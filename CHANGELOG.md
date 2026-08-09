@@ -6,6 +6,15 @@ names and the shape of `~/.tgctl.json` — those are what a major bump protects.
 
 ## [Unreleased]
 
+### Added
+
+- Any terminal agent, not just Claude Code. `AGENTS` ships entries for `claude`,
+  `agy`, `codex`, `aider` and `gemini`; `!<agent> <name> [dir]` starts one, and
+  `cfg["agents"]` adds or overrides them as `[command, resume-flags]` without a
+  code change. An unknown key is treated as its own command.
+- `cfg["agent"]` sets what `!new` starts. `!resume` remembers which agent a topic
+  was started with, so it no longer resumes a codex session with claude's flag.
+
 ## [1.0.0] — 2026-08-09
 
 First public release. tgctl had been running as the author's daily driver for a

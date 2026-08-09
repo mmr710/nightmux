@@ -1400,6 +1400,41 @@ def remember(state, sess, text):
     st["changed"] = time.time()
 
 
+# Any CLI that runs in a terminal works here: tgctl types into tmux and reads the
+# pane back. What Claude Code gets on top — the transcript tail, the two hooks,
+# the usage numbers — is Claude-specific, and every other agent falls back to
+# scraping, which is how this worked before the hooks existed.
+#
+# [command, flags that resume the last conversation]. The resume flags are the
+# part most likely to drift as these CLIs change, so cfg["agents"] overrides and
+# extends this table without needing a code change.
+AGENTS = {
+    "claude": ["claude", "--continue"],
+    "agy": ["agy", "-c"],
+    "codex": ["codex", "resume --last"],
+    "aider": ["aider", "--restore-chat-history"],
+    "gemini": ["gemini", ""],   # no resume flag; /chat resume from inside instead
+}
+
+
+def agents(cfg):
+    """Every agent key that !<key> will start: the built-ins plus cfg["agents"]."""
+    out = dict(AGENTS)
+    out.update(cfg.get("agents") or {})
+    return out
+
+
+def agent(cfg, key):
+    """(command, resume-flags) for a key. An unknown key is its own command, so a
+    one-off `!opencode foo` works before anyone edits the config."""
+    spec = agents(cfg).get(key) or [key]
+    return spec[0], (spec[1] if len(spec) > 1 else "")
+
+
+def default_agent(cfg):
+    return cfg.get("agent") or "claude"
+
+
 def spawn(name, cwd, cmdline):
     """Detached tmux session in cwd with cmdline typed at its shell."""
     tmux("new-session", "-d", "-s", name, "-c", cwd)
@@ -1407,12 +1442,13 @@ def spawn(name, cwd, cmdline):
     tmux("send-keys", "-t", name, "Enter")
 
 
-def start_session(cfg, state, lock, topic, arg, prog):
-    """New session running `prog`, bound to this topic. Trailing flags pass through."""
+def start_session(cfg, state, lock, topic, arg, key):
+    """New session running agent `key`, bound to this topic. Flags pass through."""
+    prog, _ = agent(cfg, key)
     name, _, rest = arg.partition(" ")
     rest = rest.strip()
     if not name:
-        return f"usage: !{'agy' if prog == 'agy' else 'new'} <name> [dir] [flags]"
+        return f"usage: !{key} <name> [dir] [flags]"
     if has_session(name):
         return f"'{name}' exists; use !bind {name}"
     if rest.startswith(("~", "/", ".")):        # dir first, anything after is flags
@@ -1426,6 +1462,7 @@ def start_session(cfg, state, lock, topic, arg, prog):
     with lock:
         cfg["topics"][topic] = name
         cfg.setdefault("dirs", {})[topic] = cwd   # !resume needs it after a crash
+        cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
     return f"started {prog} {flags} '{name}' in {cwd}, topic bound".replace("  ", " ")
@@ -1441,7 +1478,7 @@ def autostart(cfg):
             continue
         prog, _, cwd = spec.partition(" ")
         if not cwd:
-            prog, cwd = "claude", spec
+            prog, cwd = agent(cfg, default_agent(cfg))[0], spec
         cwd = os.path.expanduser(cwd.strip())
         if not os.path.isdir(cwd):
             print(f"autostart {name}: no dir {cwd}", file=sys.stderr)
@@ -1522,7 +1559,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return version_report()
     if cmd == "!help":
         return ("!bind <session> | !unbind | !sessions\n"
-                "!new <name> [dir] [flags] = claude | !agy ... = antigravity\n"
+                f"!new <name> [dir] [flags], or !<agent>: "
+                f"{', '.join(agents(cfg))}\n"
                 "!resume [agy] = relaunch this topic's dir with --continue\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
                 "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
@@ -1587,18 +1625,20 @@ def handle(cfg, state, lock, topic, text, mid=None):
             old = cfg["topics"].pop(topic, None)
             save_cfg(cfg)
         return f"unbound '{old}'" if old else "not bound"
-    if cmd in ("!new", "!agy"):
+    if cmd == "!new" or cmd[1:] in agents(cfg):
         return start_session(cfg, state, lock, topic, arg,
-                             "agy" if cmd == "!agy" else "claude")
+                             default_agent(cfg) if cmd == "!new" else cmd[1:])
     if cmd == "!resume":
-        prog = "agy" if arg == "agy" else "claude"
+        # Whatever started this topic, unless told otherwise: resuming a codex
+        # session with claude's flag would quietly open a fresh conversation.
+        key = arg if arg in agents(cfg) else (
+            (cfg.get("started") or {}).get(topic) or default_agent(cfg))
         name = sess or f"topic{topic}"
         if has_session(name):
             return f"'{name}' is alive; type /resume in it to pick a conversation"
         cwd = (cfg.get("dirs") or {}).get(topic, "~")
         return start_session(cfg, state, lock, topic,
-                             f"{name} {cwd} {'-c' if prog == 'agy' else '--continue'}",
-                             prog)
+                             f"{name} {cwd} {agent(cfg, key)[1]}".rstrip(), key)
 
     if not sess:
         return (autobind(cfg, state, lock, topic)
@@ -2751,6 +2791,28 @@ def selfcheck():
         assert "theirs.sh" in json.load(f)["statusLine"]["command"]
     assert sorted(wired(sfile)) == ["notify", "stop"]   # their status line: no sidecar
     assert wired(os.path.join(STATE_DIR, "nope.json")) == []
+
+    cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
+    assert agent(cfg2, "claude") == ("claude", "--continue")
+    assert agent(cfg2, "opencode") == ("opencode", "--resume")    # added by config
+    assert agent(cfg2, "nope") == ("nope", "")   # one-off: the key is the command
+    assert default_agent(cfg2) == "claude"
+    assert default_agent({"agent": "codex"}) == "codex"
+
+    spawned, lk = [], threading.Lock()
+    globals()["spawn"] = lambda n, cwd, line: spawned.append((n, cwd, line))
+    globals()["has_session"] = lambda n: False
+    assert "started codex" in start_session(cfg2, {}, lk, "9", "box ~ --sandbox",
+                                            "codex")
+    assert spawned[-1][2] == "codex --sandbox", spawned[-1]
+    assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
+    cfg2["topics"].pop("9")                      # the session died; resume the topic
+    handle(cfg2, {}, lk, "9", "!resume")
+    assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag
+    handle(cfg2, {}, lk, "9", "!resume aider")   # an explicit agent still wins
+    assert spawned[-1][2] == "aider --restore-chat-history", spawned[-1]
+    handle(cfg2, {}, lk, "77", "!opencode side")
+    assert spawned[-1][2] == "opencode", spawned[-1]
 
     for n_ in os.listdir(STATE_DIR):
         os.remove(os.path.join(STATE_DIR, n_))

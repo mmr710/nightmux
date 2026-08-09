@@ -2,12 +2,17 @@
 
 [![tests](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml/badge.svg)](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml)
 
-Drive Claude Code from Telegram. One forum topic per project, one tmux session
-behind it — text you send is typed into that session's prompt, and what the
-session says comes back to the topic.
+Run coding agents from Telegram — one forum topic per project, one tmux session
+behind it. Text you send is typed into that session's prompt; what the session
+says comes back to the topic.
 
-Python stdlib only. No relay server, no database, no dependencies, ~2700 lines
-you can read in an afternoon.
+Built for sessions that run for hours rather than minutes: tgctl watches the
+context window and the rate-limit clock, compacts before the wall, and holds a
+prompt through a five-hour lockout instead of losing it.
+
+Claude Code, Codex, Gemini, aider, or anything else that runs in a terminal.
+Python stdlib only — no dependencies, no relay server, ~2800 lines you can read
+in an afternoon.
 
 <!-- TODO: 30s screen recording — phone driving a real session, ending on an
      approval prompt answered from the buttons. -->
@@ -25,13 +30,8 @@ you can read in an afternoon.
 
 ## Why this one
 
-There are other ways to reach Claude Code from a phone. These are the two things
-tgctl does that they don't:
-
-**It attaches to sessions instead of owning them.** tgctl types into tmux. The
-session is still yours — SSH in, attach, type directly, and the bot keeps working
-mid-conversation. Nothing is wrapped, proxied, or re-hosted, so there is no state
-to get out of sync and nothing to lose when the daemon restarts.
+There are other ways to reach a coding agent from a phone. These are the three
+things tgctl does that they don't:
 
 **It manages spend, not just messages.** A status-line sidecar gives tgctl the
 real context percentage and the real 5-hour / 7-day limit windows, so it can act
@@ -47,6 +47,17 @@ on them:
 
 Long-running agent sessions cost money in a way chat does not. That is the part
 nobody else is watching.
+
+**It attaches to sessions instead of owning them.** tgctl types into tmux. The
+session is still yours — SSH in, attach, type directly, and the bot keeps working
+mid-conversation. Nothing is wrapped, proxied, or re-hosted, so there is no state
+to get out of sync and nothing to lose when the daemon restarts.
+
+**It is not tied to one agent.** `!new` starts your default; `!codex`, `!aider`,
+`!gemini` or anything you add to `agents` in the config starts that instead, and
+`!resume` remembers which agent a topic belongs to. The hooks and the usage
+numbers are Claude Code specific — every other agent degrades to reading the
+terminal, which is how tgctl worked before the hooks existed.
 
 ## Install
 
@@ -98,9 +109,9 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 
 | | |
 |---|---|
-| `!new <name> [dir] [flags]` | start a session, bind this topic to it |
-| `!agy <name> [dir]` | same, running Antigravity instead of Claude |
-| `!resume [agy]` | relaunch this topic's directory with `--continue` |
+| `!new <name> [dir] [flags]` | start a session with the default agent, bind this topic to it |
+| `!codex` / `!aider` / `!gemini` / `!agy` … | same, with that agent |
+| `!resume [agent]` | relaunch this topic's directory, resuming the last conversation |
 | `!bind <session>` / `!unbind` / `!kill` | attach, detach, stop (kill asks first) |
 | `!sessions` / `!status` | tmux sessions; every topic and its state |
 | `!pane [lines]` / `!ctl` | dump the terminal; button panel |
@@ -154,6 +165,8 @@ hook scripts). No framework, no fixtures — asserts that fail loudly.
   "chat_id": -1001234567890,
   "allow_users": [123456789],
   "topics": {"12": "api"},
+  "agent": "claude",
+  "agents": {"opencode": ["opencode", "--continue"]},
   "autostart": {"api": "~/code/api"},
   "projects_root": "~/code",
   "tz_offset": "Africa/Cairo",
@@ -162,14 +175,19 @@ hook scripts). No framework, no fixtures — asserts that fail loudly.
 }
 ```
 
+`agent` is what `!new` starts. `agents` adds or overrides entries in the
+built-in table as `[command, resume-flags]` — those flags are the part most
+likely to drift as these CLIs change, so they are config, not code.
 `autostart` recreates sessions after a reboot. `projects_root` makes a new topic
 named after a directory start that project on its first message. `!reload` picks
 up hand edits without a restart.
 
 ## Requirements
 
-Python 3.8+ (CI runs 3.8 through 3.13), tmux, Claude Code, Linux with systemd
-(the service is optional — `python3 tgctl.py` in a terminal works fine).
+Python 3.8+ (CI runs 3.8 through 3.13), tmux, a terminal coding agent, and Linux
+with systemd (the service is optional — `python3 tgctl.py` in a terminal works
+fine). Claude Code gets the hooks and the usage numbers; everything else runs on
+the terminal scrape.
 
 ## Security
 

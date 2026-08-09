@@ -190,10 +190,16 @@ Code does not own, or the alias will shadow a real slash command; the `tg` prefi
 (`tglog`, `tghelp`, `tgversion`) is the convention for collisions. `PASSTHRU`
 holds Claude's own commands, registered purely so Telegram autocompletes them.
 
-**A new agent.** `spawn()` and `start_session()` take the command line, and
-`!agy` shows the pattern. What is Claude-specific is the transcript format, the
-hooks and the TUI regexes — an agent without those still works over the pane
-scrape.
+**A new agent.** Add `key: [command, resume-flags]` to `AGENTS`, or to
+`cfg["agents"]` to do it without touching the code — `!<key>` then starts it and
+`!resume` uses its flags. An unknown key is treated as its own command, so
+`!opencode foo` works before anyone declares it. Keys are matched *after* the
+named commands, so an agent called `git` or `queue` would never be reachable;
+pick something else.
+
+What is Claude Code specific is the transcript format, the two hooks and the TUI
+regexes. An agent without those still works over the pane scrape — that path
+came first and is still the fallback.
 
 **Tests.** `selfcheck()` at the bottom of each file, plain `assert`s, no
 framework. Anything with a branch gets one, and it runs in CI on 3.8 → 3.13.
