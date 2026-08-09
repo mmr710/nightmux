@@ -1,12 +1,14 @@
-# tgctl
+# telemux
 
-[![tests](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml/badge.svg)](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml)
+[![tests](https://github.com/YOURNAME/telemux/actions/workflows/test.yml/badge.svg)](https://github.com/YOURNAME/telemux/actions/workflows/test.yml)
+
+**Your night crew, on Telegram.**
 
 Run coding agents from Telegram — one forum topic per project, one tmux session
 behind it. Text you send is typed into that session's prompt; what the session
 says comes back to the topic.
 
-Built for sessions that run for hours rather than minutes: tgctl watches the
+Built for sessions that run for hours rather than minutes: telemux watches the
 context window and the rate-limit clock, compacts before the wall, and holds a
 prompt through a five-hour lockout instead of losing it.
 
@@ -31,9 +33,9 @@ in an afternoon.
 ## Why this one
 
 There are other ways to reach a coding agent from a phone. These are the three
-things tgctl does that they don't:
+things telemux does that they don't:
 
-**It manages spend, not just messages.** A status-line sidecar gives tgctl the
+**It manages spend, not just messages.** A status-line sidecar gives telemux the
 real context percentage and the real 5-hour / 7-day limit windows, so it can act
 on them:
 
@@ -48,7 +50,7 @@ on them:
 Long-running agent sessions cost money in a way chat does not. That is the part
 nobody else is watching.
 
-**It attaches to sessions instead of owning them.** tgctl types into tmux. The
+**It attaches to sessions instead of owning them.** telemux types into tmux. The
 session is still yours — SSH in, attach, type directly, and the bot keeps working
 mid-conversation. Nothing is wrapped, proxied, or re-hosted, so there is no state
 to get out of sync and nothing to lose when the daemon restarts.
@@ -57,13 +59,13 @@ to get out of sync and nothing to lose when the daemon restarts.
 `!gemini` or anything you add to `agents` in the config starts that instead, and
 `!resume` remembers which agent a topic belongs to. The hooks and the usage
 numbers are Claude Code specific — every other agent degrades to reading the
-terminal, which is how tgctl worked before the hooks existed.
+terminal, which is how telemux worked before the hooks existed.
 
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/tgctl ~/tgctl
-python3 ~/tgctl/tgctl.py --setup
+git clone https://github.com/YOURNAME/telemux ~/telemux
+python3 ~/telemux/telemux.py --setup
 ```
 
 Setup walks the whole thing: BotFather token, finding your group, writing the
@@ -104,7 +106,7 @@ before the terminal has finished redrawing.
 ## Commands
 
 Everything works as `!cmd`, and the common ones are registered as `/cmd` so
-Telegram autocompletes them. Anything that is not a tgctl command — including
+Telegram autocompletes them. Anything that is not a telemux command — including
 Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 
 | | |
@@ -134,14 +136,14 @@ Four files, no framework:
 
 | | |
 |---|---|
-| `tgctl.py` | the daemon: long-polls Telegram, watches tmux, everything above |
-| `tg-state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
-| `tg-stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
-| `tg-notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
+| `telemux.py` | the daemon: long-polls Telegram, watches tmux, everything above |
+| `tm-state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
+| `tm-stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
+| `tm-notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
 
 The daemon reads the session's JSONL transcript when the sidecar is installed,
 which is why output arrives as clean text with a real tool trace. Without it,
-tgctl falls back to scraping `tmux capture-pane` — everything still works, just
+telemux falls back to scraping `tmux capture-pane` — everything still works, just
 noisier and without the usage numbers.
 
 One watcher thread polls every bound session; each topic gets its own worker
@@ -152,12 +154,12 @@ work rather than dropping it.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the rest: threads, what survives a
 restart, how output is chosen, and the decisions that were rejected.
 
-Run the tests: `python3 tgctl.py --selfcheck` (and the same flag on the three
+Run the tests: `python3 telemux.py --selfcheck` (and the same flag on the three
 hook scripts). No framework, no fixtures — asserts that fail loudly.
 
 ## Config
 
-`~/.tgctl.json`, mode `0600`, written by setup:
+`~/.telemux.json`, mode `0600`, written by setup:
 
 ```json
 {
@@ -185,7 +187,7 @@ up hand edits without a restart.
 ## Requirements
 
 Python 3.8+ (CI runs 3.8 through 3.13), tmux, a terminal coding agent, and Linux
-with systemd (the service is optional — `python3 tgctl.py` in a terminal works
+with systemd (the service is optional — `python3 telemux.py` in a terminal works
 fine). Claude Code gets the hooks and the usage numbers; everything else runs on
 the terminal scrape.
 

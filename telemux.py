@@ -5,7 +5,7 @@ One forum topic per project -> one tmux session. Text in a topic is typed into
 that session's Claude Code prompt; new terminal scrollback is sent back to the
 topic. Stdlib only.
 
-Config: ~/.tgctl.json
+Config: ~/.telemux.json
 {
   "token": "<bot token from @BotFather>",
   "chat_id": -1001234567890,
@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 VERSION = "1.0.0"
-CFG_PATH = os.path.expanduser(os.environ.get("TGCTL_CONFIG", "~/.tgctl.json"))
+CFG_PATH = os.path.expanduser(os.environ.get("TELEMUX_CONFIG", "~/.telemux.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper
 
@@ -57,13 +57,13 @@ def save_cfg(cfg):
     with open(tmp, "w") as f:
         json.dump(disk, f, indent=2)
     # This file holds the bot token, and whoever has that owns every session
-    # tgctl can type into. The temp file is created under the umask, so the mode
+    # telemux can type into. The temp file is created under the umask, so the mode
     # has to be set here or each save quietly re-widens it.
     os.chmod(tmp, 0o600)
     os.replace(tmp, CFG_PATH)
 
 
-OFFSET_PATH = os.path.expanduser(os.environ.get("TGCTL_OFFSET", "~/.tgctl.offset"))
+OFFSET_PATH = os.path.expanduser(os.environ.get("TELEMUX_OFFSET", "~/.telemux.offset"))
 
 
 def load_offset():
@@ -195,7 +195,7 @@ FILE_AFTER = 2  # more chunks than this and it goes up as one attachment instead
 
 def send_file(cfg, topic, name, data, caption="", buttons=None):
     """Upload text as a document — one attachment beats six walls of <pre>."""
-    b = "----tgctl-" + str(int(time.time() * 1000))
+    b = "----telemux-" + str(int(time.time() * 1000))
 
     def field(k, v):
         return (f"--{b}\r\nContent-Disposition: form-data; "
@@ -255,7 +255,7 @@ def react(cfg, mid, emoji):
             reaction=json.dumps([{"type": "emoji", "emoji": emoji}]))
 
 
-FILE_DIR = os.path.expanduser("~/.tgctl-files")
+FILE_DIR = os.path.expanduser("~/.telemux-files")
 
 
 def fetch_file(cfg, file_id, name=None):
@@ -418,9 +418,9 @@ LIMIT_HIT = re.compile(
     r"|Your (?:seat type doesn't include|usage allocation has been disabled)")
 RESET_IN = re.compile(r"resets? in\s+((?:\d+\s*(?:d|hr?|min|m)\b\s*)+)", re.I)
 RESET_AT = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:[ap]m)?)", re.I)
-HOOK_DIR = os.path.expanduser("~/.tgctl-hooked")
+HOOK_DIR = os.path.expanduser("~/.telemux-hooked")
 HOOK_FRESH = 900  # a Stop hook seen this recently owns delivery for that session
-STATE_DIR = os.path.expanduser("~/.tgctl-state")
+STATE_DIR = os.path.expanduser("~/.telemux-state")
 # The status line only redraws while a session is active, so an idle one goes
 # quiet. Its transcript path stays valid the whole time — only the usage numbers
 # in it go stale — hence two ages: one to trust the path, a shorter one to act
@@ -1109,7 +1109,7 @@ def drain(cfg, state, topic, sess):
         # Clear the hold here rather than on the way out with a prompt. A window
         # that reset with an empty queue would otherwise leave the session
         # flagged as limited for good, and leave the topic with no word at the
-        # time tgctl promised one — which reads as a hold that never lifted.
+        # time telemux promised one — which reads as a hold that never lifted.
         st.pop("limit_until", None)
         if st.get("queue"):
             st["resumed"] = True     # the send below says "resumed", not "sending"
@@ -1315,7 +1315,7 @@ def watcher(cfg, state, lock):
     bound = []
     while True:
         # Anything thrown here would take the thread with it, and a dead watcher
-        # is a tgctl that answers commands while quietly monitoring nothing.
+        # is a telemux that answers commands while quietly monitoring nothing.
         try:
             with lock:
                 bound = list(cfg["topics"].items())
@@ -1355,7 +1355,7 @@ KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 # Telegram autocompletes registered bot commands when you type "/", which is
 # the only autocomplete a bot can offer. Two registers share that one menu:
 #
-#   TG_SLASH  — tgctl's own, aliased to their ! form. Every name here is one
+#   TG_SLASH  — telemux's own, aliased to their ! form. Every name here is one
 #               Claude Code does NOT own, so nothing shadows a real slash command.
 #   PASSTHRU  — Claude Code's commands, registered purely so they autocomplete;
 #               they are typed into the session like any other text.
@@ -1363,8 +1363,8 @@ TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
             "pane": "!pane", "git": "!git", "diff": "!diff", "get": "!get",
             "bind": "!bind", "unbind": "!unbind", "kill": "!kill",
             "verbose": "!verbose", "queue": "!queue", "keys": "!keys",
-            "raw": "!raw", "reload": "!reload", "tglog": "!log",
-            "tghelp": "!help", "tgversion": "!version",
+            "raw": "!raw", "reload": "!reload", "tmlog": "!log",
+            "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx"}
 TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and its state",
@@ -1372,9 +1372,9 @@ TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and it
            "git": "status + last commits", "diff": "unstaged diff",
            "get": "upload a file from the session's cwd", "queue": "held prompts [clear|now]",
            "kill": "kill this topic's session", "verbose": "toggle tool detail",
-           "raw": "type text even with a menu open", "reload": "re-read ~/.tgctl.json",
-           "tglog": "tgctl daemon journal", "tghelp": "tgctl command list",
-           "tgversion": "tgctl version, and which hooks are wired",
+           "raw": "type text even with a menu open", "reload": "re-read ~/.telemux.json",
+           "tmlog": "telemux daemon journal", "tmhelp": "telemux command list",
+           "tmversion": "telemux version, and which hooks are wired",
            "limits": "5h/7d window and context use, every topic",
            "tz": "show times in your timezone, e.g. /tz Africa/Cairo",
            "ctx": "what is filling this session's context window",
@@ -1414,7 +1414,7 @@ def remember(state, sess, text):
     st["changed"] = time.time()
 
 
-# Any CLI that runs in a terminal works here: tgctl types into tmux and reads the
+# Any CLI that runs in a terminal works here: telemux types into tmux and reads the
 # pane back. What Claude Code gets on top — the transcript tail, the two hooks,
 # the usage numbers — is Claude-specific, and every other agent falls back to
 # scraping, which is how this worked before the hooks existed.
@@ -1563,7 +1563,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
     text = re.sub(r"^(/[\w:-]+)@\w+", r"\1", text)
     cmd, _, arg = text.partition(" ")
     cmd, arg = cmd.lower(), arg.strip()
-    # Registered slash aliases so Telegram's "/" menu can drive tgctl too. Names
+    # Registered slash aliases so Telegram's "/" menu can drive telemux too. Names
     # that Claude Code also owns are deliberately absent: those pass through.
     if cmd[1:] in TG_SLASH:
         cmd = TG_SLASH[cmd[1:]]
@@ -1589,7 +1589,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "photo/file -> saved, path typed in\n"
                 "/slash and anything else -> typed into Claude")
     if cmd == "!log":
-        return run("journalctl", "--user", "-u", "tgctl", "-n", "40", "--no-pager")
+        return run("journalctl", "--user", "-u", "telemux", "-n", "40", "--no-pager")
     if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
         with lock:
             cfg.update(load_cfg())
@@ -1884,10 +1884,10 @@ def dispatch(cfg, state, lock, allow, upd, acks):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLAUDE_SETTINGS = os.path.expanduser("~/.claude/settings.json")
-UNIT_PATH = os.path.expanduser("~/.config/systemd/user/tgctl.service")
+UNIT_PATH = os.path.expanduser("~/.config/systemd/user/telemux.service")
 
 SIDECAR_SH = """#!/bin/bash
-# tgctl status line. The pipe below is the point: it parks the context
+# telemux status line. The pipe below is the point: it parks the context
 # percentage, the 5h/7d windows and the transcript path where the daemon reads
 # them. Replace everything else with your own status line; keep that one line.
 input=$(cat)
@@ -1923,14 +1923,14 @@ def wired(path=None):
     except (OSError, ValueError):
         return []
     blob += open_text(sl)   # the sidecar usually lives one file further out
-    return [n for n, p in (("stop", "tg-stop.py"), ("notify", "tg-notify.py"),
-                           ("sidecar", "tg-state.py")) if p in blob]
+    return [n for n, p in (("stop", "tm-stop.py"), ("notify", "tm-notify.py"),
+                           ("sidecar", "tm-state.py")) if p in blob]
 
 
 def version_report():
     rev = tmux_git(HERE, "rev-parse", "--short", "HEAD")
     on = wired()
-    return (f"tgctl {VERSION}" + (f" ({rev})" if rev and " " not in rev else "")
+    return (f"telemux {VERSION}" + (f" ({rev})" if rev and " " not in rev else "")
             + f"\npython {sys.version.split()[0]}\n{HERE}\nwired: "
             + (", ".join(on) if on
                else "nothing — falling back to scraping the pane"))
@@ -1987,7 +1987,7 @@ def wire_claude(path=None):
     except (OSError, ValueError):
         settings = {}
     notes = []
-    for event, script in (("Stop", "tg-stop.py"), ("Notification", "tg-notify.py")):
+    for event, script in (("Stop", "tm-stop.py"), ("Notification", "tm-notify.py")):
         groups = settings.setdefault("hooks", {}).setdefault(event, [])
         if any(script in h.get("command", "")
                for g in groups for h in g.get("hooks") or []):
@@ -1995,10 +1995,10 @@ def wire_claude(path=None):
         groups.append({"hooks": [{"type": "command", "timeout": 20, "command":
                                   f"{sys.executable} {os.path.join(HERE, script)}"}]})
         notes.append(f"hook {event} -> {script}")
-    sidecar = os.path.join(HERE, "tg-state.py")
+    sidecar = os.path.join(HERE, "tm-state.py")
     line = f'printf \'%s\' "$input" | {sys.executable} {sidecar} >/dev/null 2>&1 &'
     if not settings.get("statusLine"):
-        sh = os.path.join(os.path.dirname(path), "tgctl-statusline.sh")
+        sh = os.path.join(os.path.dirname(path), "telemux-statusline.sh")
         with open(sh, "w") as f:
             f.write(SIDECAR_SH.format(py=sys.executable, sidecar=sidecar))
         os.chmod(sh, 0o755)
@@ -2031,23 +2031,39 @@ def wire_unit():
     os.makedirs(os.path.dirname(UNIT_PATH), exist_ok=True)
     with open(UNIT_PATH, "w") as f:
         f.write(UNIT.format(py=sys.executable,
-                            script=os.path.join(HERE, "tgctl.py")))
+                            script=os.path.join(HERE, "telemux.py")))
     # Without linger a user service stops at logout and never starts at boot,
     # which is exactly when a phone-driven controller needs to be up.
     subprocess.run(("loginctl", "enable-linger"), capture_output=True)
     subprocess.run(("systemctl", "--user", "daemon-reload"), capture_output=True)
-    return run("systemctl", "--user", "enable", "--now", "tgctl")
+    return run("systemctl", "--user", "enable", "--now", "telemux")
+
+
+def migrate(paths=None):
+    """Adopt anything the pre-rename daemon left behind, once.
+
+    The config is the only one of these that cannot be regenerated, and held
+    prompts in the state directory are the only other thing worth carrying — but
+    renaming all of them is the same three lines, and a fresh install finds
+    nothing and does nothing.
+    """
+    for new in paths or (CFG_PATH, OFFSET_PATH, STATE_DIR, HOOK_DIR, FILE_DIR):
+        old = new.replace("telemux", "tgctl")
+        if old != new and os.path.exists(old) and not os.path.exists(new):
+            os.rename(old, new)
+            print(f"migrated {old} -> {new}", flush=True)
 
 
 def setup():
     """Interactive first run: token, group, allowlist, hooks, service."""
+    migrate()
     if not sys.stdin.isatty():
         sys.exit("--setup needs a terminal")
     try:
         cfg = load_cfg()
     except (OSError, ValueError):
         cfg = {}
-    print("tgctl setup\n\n"
+    print("telemux setup\n\n"
           "1. In Telegram, open @BotFather -> /newbot, and copy the token.")
     token = input("   token%s: " % (" [enter to keep the saved one]"
                                     if cfg.get("token") else "")).strip()
@@ -2090,6 +2106,7 @@ def setup():
 
 
 def main():
+    migrate()
     cfg = load_cfg()
     for key in ("token", "chat_id", "allow_users"):
         if not cfg.get(key):
@@ -2105,7 +2122,7 @@ def main():
         until = held.get("limit_until", 0)
         print(f"restored {len(held['queue'])} queued prompt(s) for {sess}", flush=True)
         if topic:
-            send(cfg, topic, f"↩️ tgctl restarted · {len(held['queue'])} queued "
+            send(cfg, topic, f"↩️ telemux restarted · {len(held['queue'])} queued "
                  f"prompt(s) kept" + (f", still holding until {clock(cfg, until)}"
                                       if until > time.time() else ""), mode="plain")
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
@@ -2118,7 +2135,7 @@ def main():
         offset = res[-1]["update_id"] + 1 if res else None
     allow = {int(u) for u in cfg["allow_users"]}
     acks = Acks()
-    print(f"tgctl up. chat={cfg['chat_id']} topics={cfg['topics']} offset={offset}",
+    print(f"telemux up. chat={cfg['chat_id']} topics={cfg['topics']} offset={offset}",
           flush=True)
 
     while True:
@@ -2188,7 +2205,7 @@ def selfcheck():
 
     assert common_prefix(["a", "b", "c"], ["a", "b", "z"]) == 2
 
-    assert "timed out after 1s" in run("tmux", "wait-for", "tgctl-selfcheck", timeout=1)
+    assert "timed out after 1s" in run("tmux", "wait-for", "telemux-selfcheck", timeout=1)
     assert run("echo", "hi") == "hi"
 
     globals()["CFG_PATH"] = os.path.join(FILE_DIR, "selfcheck.json")
@@ -2673,7 +2690,7 @@ def selfcheck():
 
     # A window that resets with nothing queued must still clear the hold and say
     # so. The silent version left the session flagged as limited for good, and
-    # left the topic with no word at the time tgctl had promised one.
+    # left the topic with no word at the time telemux had promised one.
     st["limit_until"], n = time.time() - 1, len(sent)
     drain(cfg, state, "1", "s")
     assert "limit_until" not in st and "resumed" not in st
@@ -2811,7 +2828,7 @@ def selfcheck():
         got = json.load(f)
     assert got["model"] == "opus"                  # unrelated settings survive
     stop = [h["command"] for g in got["hooks"]["Stop"] for h in g["hooks"]]
-    assert stop[0] == "mine.sh" and stop[1].endswith("tg-stop.py"), stop
+    assert stop[0] == "mine.sh" and stop[1].endswith("tm-stop.py"), stop
     got["statusLine"] = {"type": "command", "command": "bash /nope/theirs.sh"}
     with open(sfile, "w") as f:
         json.dump(got, f)
@@ -2820,6 +2837,20 @@ def selfcheck():
         assert "theirs.sh" in json.load(f)["statusLine"]["command"]
     assert sorted(wired(sfile)) == ["notify", "stop"]   # their status line: no sidecar
     assert wired(os.path.join(STATE_DIR, "nope.json")) == []
+
+    scratch = os.path.join(os.path.dirname(FILE_DIR), ".mig-selfcheck")
+    os.makedirs(scratch, exist_ok=True)
+    newer = os.path.join(scratch, "telemux.json")
+    older = newer.replace("telemux", "tgctl")
+    open(older, "w").close()
+    migrate([newer])
+    assert os.path.exists(newer) and not os.path.exists(older)
+    open(older, "w").close()          # a current file already there wins
+    migrate([newer])
+    assert os.path.exists(older), "migrate clobbered the current file"
+    os.remove(older), os.remove(newer)
+    migrate([newer])                  # nothing to adopt: a fresh install
+    os.rmdir(scratch)
 
     cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
     assert agent(cfg2, "claude") == ("claude", "--continue")

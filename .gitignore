@@ -1,9 +1,9 @@
 __pycache__/
 *.pyc
-tgctl.log
+telemux.log
 
 # Never commit these. They live in $HOME, but a stray copy here would carry the
 # bot token, which is a shell on this machine — see SECURITY.md.
-.tgctl.json
-tgctl.json
+.telemux.json
+telemux.json
 *.offset

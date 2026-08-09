@@ -2,9 +2,23 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [semver](https://semver.org/). The public surface is the command
-names and the shape of `~/.tgctl.json` — those are what a major bump protects.
+names and the shape of `~/.telemux.json` — those are what a major bump protects.
 
 ## [Unreleased]
+
+### Changed
+
+- Renamed from `tgctl` to `telemux`. Paths move to `~/.telemux.json`,
+  `~/.telemux-state`, `~/.telemux-files`, `~/.telemux-hooked` and
+  `~/.telemux.offset`; the systemd unit and the `/tg*` command aliases follow.
+  The daemon adopts the old paths automatically on first run, so an existing
+  install keeps its config and any held prompts.
+
+### Fixed
+
+- A rate-limit hold that expired with an empty queue was never cleared, so the
+  session stayed flagged as limited across restarts and the topic heard nothing
+  at the time it was promised a resume.
 
 ### Added
 
@@ -17,7 +31,7 @@ names and the shape of `~/.tgctl.json` — those are what a major bump protects.
 
 ## [1.0.0] — 2026-08-09
 
-First public release. tgctl had been running as the author's daily driver for a
+First public release. telemux had been running as the author's daily driver for a
 while before this; 1.0.0 marks the point where the command names and the config
 keys are considered stable, not the point where the code started working.
 
@@ -57,7 +71,7 @@ follows), `!reload`, `!log`, `!version`, `!help`. Photos and files are saved wit
 their path typed into the session. Common commands are registered as `/`
 commands so Telegram autocompletes them, alongside Claude Code's own.
 
-**Setup.** `tgctl.py --setup` does the token, the group, the allowlist, the two
+**Setup.** `telemux.py --setup` does the token, the group, the allowlist, the two
 hooks, the status-line sidecar and the systemd user service, and is safe to
 re-run.
 
@@ -66,5 +80,5 @@ re-run.
 - Python 3.8+, stdlib only, no dependencies and no relay server.
 - Tests are assert-based selfchecks: `--selfcheck` on each of the four scripts,
   run in CI against 3.8 through 3.13.
-- `~/.tgctl.json` is written `0600` on every save. The bot token is a shell on
+- `~/.telemux.json` is written `0600` on every save. The bot token is a shell on
   the machine — see [SECURITY.md](SECURITY.md).

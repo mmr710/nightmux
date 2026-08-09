@@ -1,10 +1,10 @@
 # Security
 
-Read this before you run tgctl. It is short, and it matters more than the README.
+Read this before you run telemux. It is short, and it matters more than the README.
 
-## What tgctl actually is
+## What telemux actually is
 
-tgctl types text into a running Claude Code session on your machine, and Claude
+telemux types text into a running Claude Code session on your machine, and Claude
 Code runs commands. That means:
 
 **Anyone who can put text in your Telegram topic can run commands on your box,
@@ -15,7 +15,7 @@ Every mitigation below exists to control *who* can put text in that topic.
 
 ## The trust boundary
 
-There is exactly one: `allow_users` in `~/.tgctl.json`.
+There is exactly one: `allow_users` in `~/.telemux.json`.
 
 ```json
 "allow_users": [123456789]
@@ -32,7 +32,7 @@ anyone in the group sees everything the bot sends.
 
 ## The bot token
 
-`~/.tgctl.json` holds the bot token. **The token is equivalent to the
+`~/.telemux.json` holds the bot token. **The token is equivalent to the
 allowlisted user's access**: anyone holding it can read every message in the
 group, including output from your sessions.
 
@@ -40,7 +40,7 @@ group, including output from your sessions.
   a temp file created under your umask would otherwise silently re-widen it.
 - It is in `.gitignore`. Do not move it into the repo.
 - If it leaks, revoke it in BotFather (`/revoke`) — that invalidates the old
-  token immediately — then re-run `python3 tgctl.py --setup`.
+  token immediately — then re-run `python3 telemux.py --setup`.
 
 ## Prompt injection
 
@@ -53,7 +53,7 @@ Consequences worth stating plainly:
 - Text you forward into a topic (a log line, an error someone pasted you, a
   snippet from a webpage) is typed into Claude as if you wrote it. Forwarding is
   not quoting.
-- A file or photo you send is saved to `~/.tgctl-files` and its **path** is typed
+- A file or photo you send is saved to `~/.telemux-files` and its **path** is typed
   into the session. Claude will read it if it decides to.
 - Inline buttons (`!y`, menu picks) approve whatever prompt is on screen *at that
   moment*. On a slow link the screen can move between the buzz and the tap; the
@@ -62,9 +62,9 @@ Consequences worth stating plainly:
 If a message asks you to add someone to `allow_users`, that is the exact request
 a compromised account or an injection would make. Verify out of band.
 
-## What tgctl does not protect against
+## What telemux does not protect against
 
-- A malicious or compromised Claude Code session. tgctl is a keyboard, not a
+- A malicious or compromised Claude Code session. telemux is a keyboard, not a
   supervisor. It does not inspect, filter, or veto what Claude runs.
 - Anyone with local access to your machine — they can read the config, attach to
   the tmux sessions, or read the transcripts directly.
@@ -76,10 +76,10 @@ a compromised account or an injection would make. Verify out of band.
 
 ## Hardening worth doing
 
-- Run tgctl as a dedicated user with only the repos it needs, if you cannot
+- Run telemux as a dedicated user with only the repos it needs, if you cannot
   accept "a shell as you".
 - Keep the group private, with yourself as the only admin and no invite link.
-- `/setprivacy` → *Enable* is **not** an option: tgctl needs to see every message
+- `/setprivacy` → *Enable* is **not** an option: telemux needs to see every message
   in the topic, which is why setup makes the bot an admin. Compensate with group
   membership, not with privacy mode.
 - Check `allow_users` after anyone touches your config: `!reload` prints the
@@ -87,7 +87,7 @@ a compromised account or an injection would make. Verify out of band.
 
 ## Reporting
 
-Open an issue for anything that lets a **non-allowlisted** sender cause tgctl to
+Open an issue for anything that lets a **non-allowlisted** sender cause telemux to
 type, spend tokens, or leak session output. That is the property worth
 defending. For anything sensitive, email the address in the git log rather than
 filing publicly.

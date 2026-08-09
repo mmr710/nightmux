@@ -1,6 +1,6 @@
 # Architecture
 
-Why tgctl is shaped the way it is. The code carries the same notes as
+Why telemux is shaped the way it is. The code carries the same notes as
 docstrings; this is the map.
 
 ## Shape
@@ -26,12 +26,12 @@ no broker: the only shared mutable state is a `cfg` dict behind a lock, and a
 
 | | |
 |---|---|
-| `tgctl.py` | the daemon. Polling, commands, tmux injection, scraping, spend accounting, setup |
-| `tg-state.py` | `statusLine` sidecar. Parks context %, 5h/7d windows, model, transcript path, `$TMUX_PANE` |
-| `tg-stop.py` | `Stop` hook. Sends the final assistant message as exact text |
-| `tg-notify.py` | `Notification` hook. Sends permission prompts the instant they appear |
+| `telemux.py` | the daemon. Polling, commands, tmux injection, scraping, spend accounting, setup |
+| `tm-state.py` | `statusLine` sidecar. Parks context %, 5h/7d windows, model, transcript path, `$TMUX_PANE` |
+| `tm-stop.py` | `Stop` hook. Sends the final assistant message as exact text |
+| `tm-notify.py` | `Notification` hook. Sends permission prompts the instant they appear |
 
-The three small ones import `tgctl` for its config and send helpers, and every
+The three small ones import `telemux` for its config and send helpers, and every
 one of their failure paths exits 0. A hook that fails must never block the
 session it is reporting on.
 
@@ -65,12 +65,12 @@ types** — a `+1` walk would wait forever on an id that never arrives.
 
 | Where | What | Survives restart |
 |---|---|---|
-| `cfg` (memory + `~/.tgctl.json`) | token, chat, allowlist, topic→session bindings | yes |
-| `~/.tgctl.offset` | polling offset | yes |
-| `~/.tgctl-state/queue.json` | prompts held for a rate-limit reset | yes |
-| `~/.tgctl-state/<session_id>.json` | sidecar snapshots: context %, limits, transcript path | as a cache |
-| `~/.tgctl-hooked/<session>` | "the Stop hook owns delivery for this session" | as a cache |
-| `~/.tgctl-files/` | inbound photos and documents | 7 days |
+| `cfg` (memory + `~/.telemux.json`) | token, chat, allowlist, topic→session bindings | yes |
+| `~/.telemux.offset` | polling offset | yes |
+| `~/.telemux-state/queue.json` | prompts held for a rate-limit reset | yes |
+| `~/.telemux-state/<session_id>.json` | sidecar snapshots: context %, limits, transcript path | as a cache |
+| `~/.telemux-hooked/<session>` | "the Stop hook owns delivery for this session" | as a cache |
+| `~/.telemux-files/` | inbound photos and documents | 7 days |
 | `state` (memory) | screen offsets, warning flags, mode, echo suppression | **no, deliberately** |
 
 That last row is the important one. Everything in `state` except the queue is a
@@ -82,7 +82,7 @@ stale would resend old output or suppress new output. Only what the user is
 and re-applies mode `0600` on every write: the temp file is created under the
 umask, so without that each save quietly re-widens the file holding the token.
 
-`prune` sweeps `~/.tgctl-files` at 7 days and sidecar snapshots at 1 day, and
+`prune` sweeps `~/.telemux-files` at 7 days and sidecar snapshots at 1 day, and
 skips `queue.json` explicitly — that file is only rewritten when its contents
 change, so mtime says nothing about whether it is live. Without the skip, a
 prompt queued behind a session that had been busy for a day would be swept.
@@ -91,19 +91,19 @@ prompt queued behind a session that had been busy for a day would be swept.
 
 Three paths, in order of preference:
 
-1. **Transcript tail.** When the sidecar is installed, tgctl knows the JSONL
+1. **Transcript tail.** When the sidecar is installed, telemux knows the JSONL
    path and reads it incrementally by byte offset. Exact text, a real tool trace,
    no terminal chrome.
 2. **Stop hook.** Delivers the final message directly. Touching
-   `~/.tgctl-hooked/<session>` claims delivery, so the scraper stands down for
+   `~/.telemux-hooked/<session>` claims delivery, so the scraper stands down for
    `HOOK_FRESH` (15 min) and nothing arrives twice.
 3. **Pane scrape.** `tmux capture-pane`, diffed against the last capture by
-   common prefix. Always available, and the reason tgctl works with no hooks at
+   common prefix. Always available, and the reason telemux works with no hooks at
    all — just noisier, and without usage numbers.
 
 Regexes do the rest: strip box-drawing chrome and spinner lines, detect a waiting
 prompt, detect a busy session, pull numbered menu options into inline buttons,
-recognise a rate-limit banner and the reset time inside it. What tgctl just typed
+recognise a rate-limit banner and the reset time inside it. What telemux just typed
 is remembered per session and filtered out, so the TUI's echo of your own message
 is not sent back to you.
 
@@ -122,7 +122,7 @@ Live progress edits one message on a timer rather than posting a stream.
 
 ## Rate limits and the queue
 
-When a session hits its usage limit, tgctl parses the reset time from the banner
+When a session hits its usage limit, telemux parses the reset time from the banner
 (both "resets in 2h 14m" and "resets at 3pm" forms), and holds anything typed
 until then plus a minute of slack. Held prompts go to disk immediately, so a
 restart, a reboot or a crash mid-wait loses nothing — a five-hour hold outlives
@@ -136,7 +136,7 @@ silently loses exactly what the feature exists to keep.
 
 ## Decisions
 
-**tmux, not a subprocess.** tgctl attaches to sessions instead of owning them, so
+**tmux, not a subprocess.** telemux attaches to sessions instead of owning them, so
 you can SSH in and type directly mid-conversation. A wrapper process would have
 to reproduce the TUI, own the lifecycle, and stay in sync with a terminal it
 cannot see. The cost is that some output is scraped rather than structured, and
@@ -162,7 +162,7 @@ per-image cost warnings (`!ctx` already surfaces them), and systemd sandboxing
 (it breaks access to the user's tmux socket for marginal gain — the daemon can
 type into Claude anyway, so confining it is theatre).
 
-**No timezone library.** Python 3.8 has no `zoneinfo`, so tgctl scopes `TZ` and
+**No timezone library.** Python 3.8 has no `zoneinfo`, so telemux scopes `TZ` and
 calls `time.tzset()`. A fixed UTC offset would silently go an hour wrong for half
 the year, so `!tz` takes zone names.
 
