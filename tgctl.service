@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram controller for Claude Code tmux sessions
+After=network-online.target
+
+[Service]
+# %h is the user's home. `tgctl.py --setup` writes this file with absolute paths
+# into ~/.config/systemd/user/; this copy is the template for doing it by hand.
+ExecStart=/usr/bin/python3 %h/tgctl/tgctl.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
