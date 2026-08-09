@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+VERSION = "1.0.0"
 CFG_PATH = os.path.expanduser(os.environ.get("TGCTL_CONFIG", "~/.tgctl.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper
@@ -1348,7 +1349,8 @@ TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
             "pane": "!pane", "git": "!git", "diff": "!diff", "get": "!get",
             "bind": "!bind", "unbind": "!unbind", "kill": "!kill",
             "verbose": "!verbose", "queue": "!queue", "keys": "!keys",
-            "raw": "!raw", "reload": "!reload", "tglog": "!log", "tghelp": "!help",
+            "raw": "!raw", "reload": "!reload", "tglog": "!log",
+            "tghelp": "!help", "tgversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx"}
 TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and its state",
@@ -1358,6 +1360,7 @@ TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and it
            "kill": "kill this topic's session", "verbose": "toggle tool detail",
            "raw": "type text even with a menu open", "reload": "re-read ~/.tgctl.json",
            "tglog": "tgctl daemon journal", "tghelp": "tgctl command list",
+           "tgversion": "tgctl version, and which hooks are wired",
            "limits": "5h/7d window and context use, every topic",
            "tz": "show times in your timezone, e.g. /tz Africa/Cairo",
            "ctx": "what is filling this session's context window",
@@ -1515,6 +1518,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         cmd = TG_SLASH[cmd[1:]]
         text = f"{cmd} {arg}".strip()
 
+    if cmd == "!version":
+        return version_report()
     if cmd == "!help":
         return ("!bind <session> | !unbind | !sessions\n"
                 "!new <name> [dir] [flags] = claude | !agy ... = antigravity\n"
@@ -1522,6 +1527,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
                 "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
                 "!queue [clear|now] | !usage | !ctx | !cost [days] | !tz | !reload\n"
+                "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
                 "!autocompact <pct|off> | !idlectx <pct|off>\n"
                 "type / for the same commands with autocomplete\n"
@@ -1847,6 +1853,33 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 """
+
+
+def wired(path=None):
+    """Which of the three Claude Code integrations are actually installed.
+
+    Read from settings rather than assumed: "it works, but the output is noisy
+    and the usage numbers are missing" is nearly always one of these unwired,
+    and it is the first thing a bug report needs to say.
+    """
+    try:
+        with open(path or CLAUDE_SETTINGS) as f:
+            blob = f.read()
+        sl = (json.loads(blob).get("statusLine") or {}).get("command", "")
+    except (OSError, ValueError):
+        return []
+    blob += open_text(sl)   # the sidecar usually lives one file further out
+    return [n for n, p in (("stop", "tg-stop.py"), ("notify", "tg-notify.py"),
+                           ("sidecar", "tg-state.py")) if p in blob]
+
+
+def version_report():
+    rev = tmux_git(HERE, "rev-parse", "--short", "HEAD")
+    on = wired()
+    return (f"tgctl {VERSION}" + (f" ({rev})" if rev and " " not in rev else "")
+            + f"\npython {sys.version.split()[0]}\n{HERE}\nwired: "
+            + (", ".join(on) if on
+               else "nothing — falling back to scraping the pane"))
 
 
 def setup_chat(upd):
@@ -2716,6 +2749,8 @@ def selfcheck():
     assert "add this line" in wire_claude(sfile)[0]  # theirs: instructions, not a rewrite
     with open(sfile) as f:
         assert "theirs.sh" in json.load(f)["statusLine"]["command"]
+    assert sorted(wired(sfile)) == ["notify", "stop"]   # their status line: no sidecar
+    assert wired(os.path.join(STATE_DIR, "nope.json")) == []
 
     for n_ in os.listdir(STATE_DIR):
         os.remove(os.path.join(STATE_DIR, n_))
@@ -2728,5 +2763,7 @@ if __name__ == "__main__":
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
+    elif "--version" in sys.argv:
+        print(version_report())
     else:
         main()

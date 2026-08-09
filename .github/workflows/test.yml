@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selfcheck:
+    # 22.04 is the newest runner image setup-python still has 3.8 for, and 3.8 is
+    # the floor tgctl supports — it is what Ubuntu 20.04 LTS ships, and that is a
+    # common thing to have an always-on box sitting on.
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false   # one version failing should not hide the others
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The selfchecks drive a real tmux server: injection, key sending and the
+      # pane scrape are the parts most worth testing against the real thing.
+      - run: sudo apt-get update -qq && sudo apt-get install -y tmux
+
+      - name: selfcheck every script
+        run: |
+          for f in tgctl.py tg-state.py tg-stop.py tg-notify.py; do
+            echo "--- $f"
+            python "$f" --selfcheck
+          done
+
+      # The pitch is "clone and run, no dependencies". A stray import should fail
+      # here rather than in somebody's install. One version is enough to catch it.
+      - name: stdlib only
+        if: matrix.python == '3.12'
+        run: |
+          python - <<'EOF'
+          import ast, sys
+          bad = []
+          for f in ("tgctl.py", "tg-state.py", "tg-stop.py", "tg-notify.py"):
+              for node in ast.walk(ast.parse(open(f).read())):
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom) and not node.level:
+                      names = [node.module or ""]
+                  else:
+                      continue
+                  bad += [(f, n) for n in names
+                          if n.split(".")[0] not in sys.stdlib_module_names
+                          and n != "tgctl"]
+          print(bad or "stdlib only")
+          sys.exit(bool(bad))
+          EOF

@@ -1,5 +1,7 @@
 # tgctl
 
+[![tests](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml/badge.svg)](https://github.com/YOURNAME/tgctl/actions/workflows/test.yml)
+
 Drive Claude Code from Telegram. One forum topic per project, one tmux session
 behind it — text you send is typed into that session's prompt, and what the
 session says comes back to the topic.
@@ -110,6 +112,7 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!grep <text> [days]` | search every transcript on the machine |
 | `!verbose` / `!raw <text>` / `!keys <keys>` | tool detail, type past a menu, raw tmux keys |
 | `!1`..`!9` `!y` `!n` `!esc` `!int` `!enter` `!tab` | menu picks and keys |
+| `!version` | build, python, and which hooks are wired |
 | `!tz <zone>` / `!reload` / `!log` / `!help` | timezone, re-read config, journal, this list |
 
 Send a photo or file and it is saved, with the path typed into the session.
@@ -134,6 +137,9 @@ One watcher thread polls every bound session; each topic gets its own worker
 thread, so a slow command in one topic never blocks another. The polling offset
 is only persisted past updates that have actually finished, so a crash replays
 work rather than dropping it.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) has the rest: threads, what survives a
+restart, how output is chosen, and the decisions that were rejected.
 
 Run the tests: `python3 tgctl.py --selfcheck` (and the same flag on the three
 hook scripts). No framework, no fixtures — asserts that fail loudly.
@@ -162,8 +168,8 @@ up hand edits without a restart.
 
 ## Requirements
 
-Python 3.8+, tmux, Claude Code, Linux with systemd (the service is optional —
-`python3 tgctl.py` in a terminal works fine).
+Python 3.8+ (CI runs 3.8 through 3.13), tmux, Claude Code, Linux with systemd
+(the service is optional — `python3 tgctl.py` in a terminal works fine).
 
 ## Security
 
@@ -173,4 +179,4 @@ you add a second person or a second machine. It is short.
 
 ## License
 
-MIT
+MIT. Changes are in [CHANGELOG.md](CHANGELOG.md).
