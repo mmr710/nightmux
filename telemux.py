@@ -2877,6 +2877,9 @@ def selfcheck():
     for n_ in os.listdir(STATE_DIR):
         os.remove(os.path.join(STATE_DIR, n_))
     os.rmdir(STATE_DIR)
+    # Later saves recreate the redirected config; leaving it behind drops test
+    # debris in the live upload cache, where prune would not touch it for a week.
+    os.path.exists(CFG_PATH) and os.remove(CFG_PATH)
     print("selfcheck ok")
 
 
