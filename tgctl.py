@@ -1061,6 +1061,8 @@ def queue_blob(state):
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
         held = {k: st[k] for k in ("queue", "limit_until") if st.get(k)}
+        if held.get("limit_until", 0) < time.time():
+            held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
             out[sess] = held
     return out
@@ -1102,10 +1104,22 @@ def load_queue(state):
 def drain(cfg, state, topic, sess):
     """Once the window resets, feed the queue back one prompt per idle turn."""
     st = state.setdefault(sess, {})
+    until = st.get("limit_until", 0)
+    if until and time.time() >= until:
+        # Clear the hold here rather than on the way out with a prompt. A window
+        # that reset with an empty queue would otherwise leave the session
+        # flagged as limited for good, and leave the topic with no word at the
+        # time tgctl promised one — which reads as a hold that never lifted.
+        st.pop("limit_until", None)
+        if st.get("queue"):
+            st["resumed"] = True     # the send below says "resumed", not "sending"
+        else:
+            send(cfg, topic, f"▶️ {sess} usage window reset · nothing was queued",
+                 mode="plain")
     q = st.get("queue")
     if not q or st.get("mode") != "idle" or time.time() < st.get("limit_until", 0):
         return
-    held = st.pop("limit_until", None)
+    held = st.pop("resumed", None)
     text = q.pop(0)
     send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
          f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
@@ -2656,6 +2670,21 @@ def selfcheck():
     assert sent[-1].startswith("⚙️ s")           # then the live trace for that turn
     assert st["queue"] == [] and st["prog_msg"] == 77   # live trace opened for it
     st.pop("prog_msg"), st.pop("limit_line")
+
+    # A window that resets with nothing queued must still clear the hold and say
+    # so. The silent version left the session flagged as limited for good, and
+    # left the topic with no word at the time tgctl had promised one.
+    st["limit_until"], n = time.time() - 1, len(sent)
+    drain(cfg, state, "1", "s")
+    assert "limit_until" not in st and "resumed" not in st
+    assert sent[-1].startswith("▶️ s usage window reset"), sent[-1]
+    drain(cfg, state, "1", "s")                   # ...said once, not every tick
+    assert len(sent) == n + 1
+    st["limit_until"] = time.time() - 1           # and an expired hold never
+    assert queue_blob({"s": st}).get("s", {}) == {}          # reaches disk again
+    st["limit_until"] = time.time() + 60
+    assert queue_blob({"s": st})["s"]["limit_until"] > time.time()
+    st.pop("limit_until")
 
     handle(cfg, state, threading.Lock(), "1", "another one", mid=555)  # prompt ticked
     assert ("setMessageReaction", 555) in [(m, k.get("message_id")) for m, k in edits]
