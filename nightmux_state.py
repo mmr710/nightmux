@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Status-line sidecar: park what Claude Code tells the status line where telemux reads it.
+"""Status-line sidecar: park what Claude Code tells the status line where nightmux reads it.
 
 The status line payload is the only place that carries the 5-hour usage window,
 the context percentage and the transcript path together with the cwd. One line
-added to the user's status line script therefore turns three of telemux's guesses
+added to the user's status line script therefore turns three of nightmux's guesses
 into facts: what is being worked on, how much window is left, and where the
 exact conversation text lives.
 
 Keyed by session_id rather than tmux session so the hot path spawns nothing;
-telemux matches a snapshot to a pane by cwd. Prints nothing and swallows every
+nightmux matches a snapshot to a pane by cwd. Prints nothing and swallows every
 error: a status line that fails is a status line the user has to debug.
 """
 import json
@@ -16,7 +16,7 @@ import os
 import sys
 import time
 
-STATE_DIR = os.path.expanduser("~/.telemux-state")
+STATE_DIR = os.path.expanduser("~/.nightmux-state")
 
 
 def snapshot(d):
@@ -72,7 +72,7 @@ def selfcheck():
     with open(p) as f:
         assert json.load(f)["model"] == "Opus 5"
     os.remove(p)
-    print("telemux_state selfcheck ok")
+    print("nightmux_state selfcheck ok")
 
 
 if __name__ == "__main__":

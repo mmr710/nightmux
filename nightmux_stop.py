@@ -2,8 +2,8 @@
 """Claude Code Stop hook: push the final assistant message to its Telegram topic.
 
 Cleaner than scraping the TUI — exact text, no chrome, no idle guessing. Only
-fires for tmux sessions bound to a topic in ~/.telemux.json; anything else exits
-silently. Touching ~/.telemux-hooked/<session> tells telemux.py to stop scraping
+fires for tmux sessions bound to a topic in ~/.nightmux.json; anything else exits
+silently. Touching ~/.nightmux-hooked/<session> tells nightmux.py to stop scraping
 replies for this session, so nothing is delivered twice.
 
 Never blocks the session: every failure path exits 0.
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import telemux  # noqa: E402  (same dir; reuses the config + send helpers)
+import nightmux  # noqa: E402  (same dir; reuses the config + send helpers)
 
 
 def last_assistant_text(transcript_path):
@@ -42,9 +42,9 @@ def last_assistant_text(transcript_path):
 
 
 def tailed(sid):
-    """True when the status-line sidecar is running, so telemux reads this itself."""
+    """True when the status-line sidecar is running, so nightmux reads this itself."""
     return bool(sid) and os.path.exists(
-        os.path.join(telemux.STATE_DIR, f"{sid}.json"))
+        os.path.join(nightmux.STATE_DIR, f"{sid}.json"))
 
 
 def main():
@@ -57,19 +57,19 @@ def main():
     if not sess:
         return
     try:
-        cfg = telemux.load_cfg()
+        cfg = nightmux.load_cfg()
     except OSError:
         return
     topic = next((t for t, s in cfg.get("topics", {}).items() if s == sess), None)
     if not topic:
         return
-    os.makedirs(telemux.HOOK_DIR, exist_ok=True)
-    open(os.path.join(telemux.HOOK_DIR, sess), "w").close()  # claim delivery
+    os.makedirs(nightmux.HOOK_DIR, exist_ok=True)
+    open(os.path.join(nightmux.HOOK_DIR, sess), "w").close()  # claim delivery
     if tailed(payload.get("session_id")):
-        return  # telemux reads the same transcript, and reports the tool trace too
+        return  # nightmux reads the same transcript, and reports the tool trace too
     text = last_assistant_text(payload.get("transcript_path", ""))
     if text:
-        telemux.send(cfg, topic, f"✅ {sess}\n{text}", mode="md")
+        nightmux.send(cfg, topic, f"✅ {sess}\n{text}", mode="md")
 
 
 def selfcheck():
@@ -91,7 +91,7 @@ def selfcheck():
             f.write((rec if isinstance(rec, str) else json.dumps(rec)) + "\n")
     assert last_assistant_text(p) == "final answer", last_assistant_text(p)
     os.remove(p)
-    print("telemux_stop selfcheck ok")
+    print("nightmux_stop selfcheck ok")
 
 
 if __name__ == "__main__":

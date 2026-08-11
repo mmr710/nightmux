@@ -7,6 +7,6 @@ build/
 
 # Never commit these. They live in $HOME, but a stray copy here would carry the
 # bot token, which is a shell on this machine — see SECURITY.md.
-.telemux.json
-telemux.json
+.nightmux.json
+nightmux.json
 *.offset

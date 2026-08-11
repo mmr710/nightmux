@@ -3,9 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# The bare "telemux" is taken on PyPI by an unrelated project. The command you
-# type is still `telemux` — see [project.scripts].
-name = "telemux-bot"
+name = "nightmux"
 version = "1.1.0"
 description = "Run Claude Code, Codex or any terminal coding agent from Telegram — one forum topic per tmux session."
 readme = "README.md"
@@ -25,15 +23,15 @@ classifiers = [
 # No dependencies, and that is a feature: see README.
 
 [project.urls]
-Homepage = "https://github.com/mmr79/telemux"
-Changelog = "https://github.com/mmr79/telemux/blob/main/CHANGELOG.md"
-Issues = "https://github.com/mmr79/telemux/issues"
+Homepage = "https://github.com/mmr79/nightmux"
+Changelog = "https://github.com/mmr79/nightmux/blob/main/CHANGELOG.md"
+Issues = "https://github.com/mmr79/nightmux/issues"
 
 [project.scripts]
-telemux = "telemux:cli"
+nightmux = "nightmux:cli"
 
 # Flat modules rather than a package: the Claude Code hooks are separate
 # processes launched by path, so they have to land on disk as runnable files
-# next to telemux.py — which is exactly what py-modules does.
+# next to nightmux.py — which is exactly what py-modules does.
 [tool.setuptools]
-py-modules = ["telemux", "telemux_stop", "telemux_notify", "telemux_state"]
+py-modules = ["nightmux", "nightmux_stop", "nightmux_notify", "nightmux_state"]

@@ -1,16 +1,16 @@
-# telemux
+# nightmux
 
-[![tests](https://github.com/mmr79/telemux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr79/telemux/actions/workflows/test.yml)
+[![tests](https://github.com/mmr79/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr79/nightmux/actions/workflows/test.yml)
 
 **Your night crew, on Telegram.**
 
 Run **Claude Code from your phone** — or Codex, Gemini, aider, anything with a
-prompt. telemux is a Telegram bot that drives real tmux sessions on your own
+prompt. nightmux is a Telegram bot that drives real tmux sessions on your own
 machine: one forum topic per project, one tmux session behind it. Text you send
 is typed into that session's prompt; what the session says comes back to the
 topic.
 
-Built for sessions that run for hours rather than minutes: telemux watches the
+Built for sessions that run for hours rather than minutes: nightmux watches the
 context window and the rate-limit clock, compacts before the wall, and holds a
 prompt through a five-hour lockout instead of losing it.
 
@@ -39,10 +39,10 @@ two shapes: a bot that drives the agent through its SDK and keeps the
 conversation in its own database, or a mobile app that talks to a relay service
 you don't run. Both work. Neither leaves you with a terminal session.
 
-telemux is the third shape — it drives the session you would have started
+nightmux is the third shape — it drives the session you would have started
 yourself:
 
-**It manages spend, not just messages.** A status-line sidecar gives telemux the
+**It manages spend, not just messages.** A status-line sidecar gives nightmux the
 real context percentage and the real 5-hour / 7-day limit windows, so it can act
 on them:
 
@@ -57,7 +57,7 @@ on them:
 Long-running agent sessions cost money in a way chat does not. That is the part
 nobody else is watching.
 
-**It attaches to sessions instead of owning them.** telemux types into tmux. The
+**It attaches to sessions instead of owning them.** nightmux types into tmux. The
 session is still yours — SSH in, attach, type directly, and the bot keeps working
 mid-conversation. Nothing is wrapped, proxied, or re-hosted, so there is no state
 to get out of sync and nothing to lose when the daemon restarts.
@@ -66,11 +66,11 @@ to get out of sync and nothing to lose when the daemon restarts.
 `!gemini` or anything you add to `agents` in the config starts that instead, and
 `!resume` remembers which agent a topic belongs to. The hooks and the usage
 numbers are Claude Code specific — every other agent degrades to reading the
-terminal, which is how telemux worked before the hooks existed.
+terminal, which is how nightmux worked before the hooks existed.
 
 **Not for you if** you want a polished app instead of a chat window, you're on
 Windows or macOS (the service install is systemd, though everything else is
-portable — [#2](https://github.com/mmr79/telemux/issues/2)), or you want your
+portable — [#2](https://github.com/mmr79/nightmux/issues/2)), or you want your
 teammates in the same group: the allowlist is a list of people trusted with a
 shell on your machine, which is not a thing to hand out. One person, their own
 box, their own agents.
@@ -78,16 +78,16 @@ box, their own agents.
 ## Install
 
 ```bash
-pipx install git+https://github.com/mmr79/telemux
-telemux --setup
+pipx install git+https://github.com/mmr79/nightmux
+nightmux --setup
 ```
 
 or clone it, which is the version to pick if you want the source where you can
 read and edit it — there are only four files and no dependencies:
 
 ```bash
-git clone https://github.com/mmr79/telemux ~/telemux
-python3 ~/telemux/telemux.py --setup
+git clone https://github.com/mmr79/nightmux ~/nightmux
+python3 ~/nightmux/nightmux.py --setup
 ```
 
 Setup walks the whole thing: BotFather token, finding your group, writing the
@@ -128,7 +128,7 @@ before the terminal has finished redrawing.
 ## Commands
 
 Everything works as `!cmd`, and the common ones are registered as `/cmd` so
-Telegram autocompletes them. Anything that is not a telemux command — including
+Telegram autocompletes them. Anything that is not a nightmux command — including
 Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 
 | | |
@@ -158,14 +158,14 @@ Four files, no framework:
 
 | | |
 |---|---|
-| `telemux.py` | the daemon: long-polls Telegram, watches tmux, everything above |
-| `telemux_state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
-| `telemux_stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
-| `telemux_notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
+| `nightmux.py` | the daemon: long-polls Telegram, watches tmux, everything above |
+| `nightmux_state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
+| `nightmux_stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
+| `nightmux_notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
 
 The daemon reads the session's JSONL transcript when the sidecar is installed,
 which is why output arrives as clean text with a real tool trace. Without it,
-telemux falls back to scraping `tmux capture-pane` — everything still works, just
+nightmux falls back to scraping `tmux capture-pane` — everything still works, just
 noisier and without the usage numbers.
 
 One watcher thread polls every bound session; each topic gets its own worker
@@ -176,12 +176,12 @@ work rather than dropping it.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the rest: threads, what survives a
 restart, how output is chosen, and the decisions that were rejected.
 
-Run the tests: `python3 telemux.py --selfcheck` (and the same flag on the three
+Run the tests: `python3 nightmux.py --selfcheck` (and the same flag on the three
 hook scripts). No framework, no fixtures — asserts that fail loudly.
 
 ## Config
 
-`~/.telemux.json`, mode `0600`, written by setup:
+`~/.nightmux.json`, mode `0600`, written by setup:
 
 ```json
 {
@@ -209,7 +209,7 @@ up hand edits without a restart.
 ## Requirements
 
 Python 3.8+ (CI runs 3.8 through 3.13), tmux, a terminal coding agent, and Linux
-with systemd (the service is optional — `python3 telemux.py` in a terminal works
+with systemd (the service is optional — `python3 nightmux.py` in a terminal works
 fine). Claude Code gets the hooks and the usage numbers; everything else runs on
 the terminal scrape.
 

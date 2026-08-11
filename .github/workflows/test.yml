@@ -7,7 +7,7 @@ on:
 jobs:
   selfcheck:
     # 22.04 is the newest runner image setup-python still has 3.8 for, and 3.8 is
-    # the floor telemux supports — it is what Ubuntu 20.04 LTS ships, and that is a
+    # the floor nightmux supports — it is what Ubuntu 20.04 LTS ships, and that is a
     # common thing to have an always-on box sitting on.
     runs-on: ubuntu-22.04
     strategy:
@@ -27,7 +27,7 @@ jobs:
 
       - name: selfcheck every script
         run: |
-          for f in telemux.py telemux_state.py telemux_stop.py telemux_notify.py; do
+          for f in nightmux.py nightmux_state.py nightmux_stop.py nightmux_notify.py; do
             echo "--- $f"
             python "$f" --selfcheck
           done
@@ -40,7 +40,7 @@ jobs:
           python - <<'EOF'
           import ast, sys
           bad = []
-          for f in ("telemux.py", "telemux_state.py", "telemux_stop.py", "telemux_notify.py"):
+          for f in ("nightmux.py", "nightmux_state.py", "nightmux_stop.py", "nightmux_notify.py"):
               for node in ast.walk(ast.parse(open(f).read())):
                   if isinstance(node, ast.Import):
                       names = [a.name for a in node.names]
@@ -50,7 +50,7 @@ jobs:
                       continue
                   bad += [(f, n) for n in names
                           if n.split(".")[0] not in sys.stdlib_module_names
-                          and n != "telemux"]
+                          and n != "nightmux"]
           print(bad or "stdlib only")
           sys.exit(bool(bad))
           EOF

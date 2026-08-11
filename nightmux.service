@@ -3,9 +3,9 @@ Description=Telegram controller for Claude Code tmux sessions
 After=network-online.target
 
 [Service]
-# %h is the user's home. `telemux.py --setup` writes this file with absolute paths
+# %h is the user's home. `nightmux.py --setup` writes this file with absolute paths
 # into ~/.config/systemd/user/; this copy is the template for doing it by hand.
-ExecStart=/usr/bin/python3 %h/telemux/telemux.py
+ExecStart=/usr/bin/python3 %h/nightmux/nightmux.py
 Restart=always
 RestartSec=5
 

@@ -2,21 +2,23 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [semver](https://semver.org/). The public surface is the command
-names and the shape of `~/.telemux.json` — those are what a major bump protects.
+names and the shape of `~/.nightmux.json` — those are what a major bump protects.
 
 ## [1.1.0] — 2026-08-11
 
 ### Changed
 
-- The hook scripts are now `telemux_stop.py`, `telemux_notify.py` and
-  `telemux_state.py` (was `tm-stop.py`, `tm-notify.py`, `tm-state.py`). Hyphens
+- The hook scripts are now `nightmux_stop.py`, `nightmux_notify.py` and
+  `nightmux_state.py` (was `tm-stop.py`, `tm-notify.py`, `tm-state.py`). Hyphens
   are not legal in a module name, and that was the only thing standing between
   this and a `pip install`. Re-run `--setup` to repoint Claude Code at them.
-- Renamed from `tgctl` to `telemux`. Paths move to `~/.telemux.json`,
-  `~/.telemux-state`, `~/.telemux-files`, `~/.telemux-hooked` and
-  `~/.telemux.offset`; the systemd unit and the `/tg*` command aliases follow.
-  The daemon adopts the old paths automatically on first run, so an existing
-  install keeps its config and any held prompts.
+- Renamed from `tgctl` to `nightmux`, briefly by way of `telemux` — which turned
+  out to be another project's name on PyPI and six other repositories' on GitHub,
+  including one bridging Telegram to tmux for the same three agents. Paths move
+  to `~/.nightmux.json`, `~/.nightmux-state`, `~/.nightmux-files`,
+  `~/.nightmux-hooked` and `~/.nightmux.offset`; the systemd unit and the `/tg*`
+  command aliases follow. Both older names are adopted automatically on first
+  run, so an existing install keeps its config and any held prompts.
 
 ### Fixed
 
@@ -35,7 +37,7 @@ names and the shape of `~/.telemux.json` — those are what a major bump protect
 
 ## [1.0.0] — 2026-08-09
 
-First public release. telemux had been running as the author's daily driver for a
+First public release. nightmux had been running as the author's daily driver for a
 while before this; 1.0.0 marks the point where the command names and the config
 keys are considered stable, not the point where the code started working.
 
@@ -75,7 +77,7 @@ follows), `!reload`, `!log`, `!version`, `!help`. Photos and files are saved wit
 their path typed into the session. Common commands are registered as `/`
 commands so Telegram autocompletes them, alongside Claude Code's own.
 
-**Setup.** `telemux.py --setup` does the token, the group, the allowlist, the two
+**Setup.** `nightmux.py --setup` does the token, the group, the allowlist, the two
 hooks, the status-line sidecar and the systemd user service, and is safe to
 re-run.
 
@@ -84,5 +86,5 @@ re-run.
 - Python 3.8+, stdlib only, no dependencies and no relay server.
 - Tests are assert-based selfchecks: `--selfcheck` on each of the four scripts,
   run in CI against 3.8 through 3.13.
-- `~/.telemux.json` is written `0600` on every save. The bot token is a shell on
+- `~/.nightmux.json` is written `0600` on every save. The bot token is a shell on
   the machine — see [SECURITY.md](SECURITY.md).
