@@ -1,6 +1,6 @@
 # telemux
 
-[![tests](https://github.com/YOURNAME/telemux/actions/workflows/test.yml/badge.svg)](https://github.com/YOURNAME/telemux/actions/workflows/test.yml)
+[![tests](https://github.com/mmr79/telemux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr79/telemux/actions/workflows/test.yml)
 
 **Your night crew, on Telegram.**
 
@@ -64,7 +64,7 @@ terminal, which is how telemux worked before the hooks existed.
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/telemux ~/telemux
+git clone https://github.com/mmr79/telemux ~/telemux
 python3 ~/telemux/telemux.py --setup
 ```
 
