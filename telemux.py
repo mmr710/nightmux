@@ -2218,7 +2218,10 @@ def selfcheck():
 
     assert common_prefix(["a", "b", "c"], ["a", "b", "z"]) == 2
 
-    assert "timed out after 1s" in run("tmux", "wait-for", "telemux-selfcheck", timeout=1)
+    # Something that always blocks. `tmux wait-for` only blocks once a server is
+    # already running, so this passed on a machine with sessions open and let a
+    # clean one through untested — the timeout path is what is being checked.
+    assert "timed out after 1s" in run("sleep", "5", timeout=1)
     assert run("echo", "hi") == "hi"
 
     globals()["CFG_PATH"] = os.path.join(FILE_DIR, "selfcheck.json")
