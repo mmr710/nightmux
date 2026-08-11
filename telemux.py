@@ -1423,7 +1423,7 @@ AGENTS = {
     "agy": ["agy", "-c"],
     "codex": ["codex", "resume --last"],
     "aider": ["aider", "--restore-chat-history"],
-    "gemini": ["gemini", ""],   # no resume flag; /chat resume from inside instead
+    "gemini": ["gemini", "--resume latest"],   # or an index: --resume 5
 }
 
 
