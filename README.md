@@ -4,9 +4,11 @@
 
 **Your night crew, on Telegram.**
 
-Run coding agents from Telegram — one forum topic per project, one tmux session
-behind it. Text you send is typed into that session's prompt; what the session
-says comes back to the topic.
+Run **Claude Code from your phone** — or Codex, Gemini, aider, anything with a
+prompt. telemux is a Telegram bot that drives real tmux sessions on your own
+machine: one forum topic per project, one tmux session behind it. Text you send
+is typed into that session's prompt; what the session says comes back to the
+topic.
 
 Built for sessions that run for hours rather than minutes: telemux watches the
 context window and the rate-limit clock, compacts before the wall, and holds a

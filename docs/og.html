@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- Source for docs/og.png, the GitHub social preview card (Settings ->
+     Social preview). Re-render after an edit:
+     chromium --headless --screenshot=docs/og.png --window-size=1280,640 docs/og.html -->
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; }
+  body {
+    background: #0d1117;
+    background-image:
+      radial-gradient(900px 420px at 78% 8%, rgba(46,166,255,.16), transparent 70%),
+      radial-gradient(700px 400px at 6% 100%, rgba(126,231,135,.10), transparent 70%);
+    color: #e6edf3;
+    font-family: "DejaVu Sans", sans-serif;
+    padding: 68px 72px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .name {
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 92px; font-weight: bold; letter-spacing: -2px; line-height: 1;
+  }
+  .name .dim { color: #2ea6ff; }
+  .tag { margin-top: 18px; font-size: 34px; color: #9fb0c0; }
+  .pitch { margin-top: 26px; font-size: 30px; line-height: 1.45; max-width: 720px; }
+  .pitch b { color: #7ee787; font-weight: normal; }
+  .wire {
+    position: absolute; right: 72px; top: 190px;
+    font-family: "DejaVu Sans Mono", monospace; font-size: 21px; line-height: 1.7;
+    color: #7d8f9f; white-space: pre; text-align: left;
+  }
+  .wire .t { color: #2ea6ff; }
+  .wire .s { color: #7ee787; }
+  .chips { display: flex; gap: 14px; }
+  .chip {
+    border: 1px solid #263344; border-radius: 999px; padding: 12px 22px;
+    font-size: 21px; color: #b9c7d4; background: rgba(255,255,255,.02);
+  }
+</style>
+<div>
+  <div class="name">tele<span class="dim">mux</span></div>
+  <div class="tag">Your night crew, on Telegram.</div>
+  <div class="pitch">Run <b>Claude Code</b> from your phone.<br>One Telegram topic per tmux session, on your own machine.</div>
+</div>
+<div class="wire"><span class="t">#api</span>      ──►  tmux <span class="s">api</span>      → claude
+<span class="t">#frontend</span> ──►  tmux <span class="s">web</span>      → codex
+<span class="t">#scratch</span>  ──►  tmux <span class="s">scratch</span>  → gemini</div>
+<div class="chips">
+  <div class="chip">no relay server</div>
+  <div class="chip">holds prompts through rate limits</div>
+  <div class="chip">Python stdlib only</div>
+</div>
