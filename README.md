@@ -34,8 +34,13 @@ in an afternoon.
 
 ## Why this one
 
-There are other ways to reach a coding agent from a phone. These are the three
-things telemux does that they don't:
+There are plenty of ways to reach a coding agent from a phone. Most are one of
+two shapes: a bot that drives the agent through its SDK and keeps the
+conversation in its own database, or a mobile app that talks to a relay service
+you don't run. Both work. Neither leaves you with a terminal session.
+
+telemux is the third shape — it drives the session you would have started
+yourself:
 
 **It manages spend, not just messages.** A status-line sidecar gives telemux the
 real context percentage and the real 5-hour / 7-day limit windows, so it can act
@@ -62,6 +67,13 @@ to get out of sync and nothing to lose when the daemon restarts.
 `!resume` remembers which agent a topic belongs to. The hooks and the usage
 numbers are Claude Code specific — every other agent degrades to reading the
 terminal, which is how telemux worked before the hooks existed.
+
+**Not for you if** you want a polished app instead of a chat window, you're on
+Windows or macOS (the service install is systemd, though everything else is
+portable — [#2](https://github.com/mmr79/telemux/issues/2)), or you want your
+teammates in the same group: the allowlist is a list of people trusted with a
+shell on your machine, which is not a thing to hand out. One person, their own
+box, their own agents.
 
 ## Install
 
