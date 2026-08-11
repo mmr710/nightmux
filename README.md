@@ -66,6 +66,14 @@ terminal, which is how telemux worked before the hooks existed.
 ## Install
 
 ```bash
+pipx install git+https://github.com/mmr79/telemux
+telemux --setup
+```
+
+or clone it, which is the version to pick if you want the source where you can
+read and edit it — there are only four files and no dependencies:
+
+```bash
 git clone https://github.com/mmr79/telemux ~/telemux
 python3 ~/telemux/telemux.py --setup
 ```

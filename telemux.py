@@ -28,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CFG_PATH = os.path.expanduser(os.environ.get("TELEMUX_CONFIG", "~/.telemux.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper

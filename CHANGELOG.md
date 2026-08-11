@@ -4,7 +4,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [semver](https://semver.org/). The public surface is the command
 names and the shape of `~/.telemux.json` — those are what a major bump protects.
 
-## [Unreleased]
+## [1.1.0] — 2026-08-11
 
 ### Changed
 

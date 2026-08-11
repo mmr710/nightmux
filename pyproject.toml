@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # The bare "telemux" is taken on PyPI by an unrelated project. The command you
 # type is still `telemux` — see [project.scripts].
 name = "telemux-bot"
-version = "1.0.0"
+version = "1.1.0"
 description = "Run Claude Code, Codex or any terminal coding agent from Telegram — one forum topic per tmux session."
 readme = "README.md"
 license = { file = "LICENSE" }
