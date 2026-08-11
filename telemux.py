@@ -1936,8 +1936,8 @@ def wired(path=None):
     except (OSError, ValueError):
         return []
     blob += open_text(sl)   # the sidecar usually lives one file further out
-    return [n for n, p in (("stop", "tm-stop.py"), ("notify", "tm-notify.py"),
-                           ("sidecar", "tm-state.py")) if p in blob]
+    return [n for n, p in (("stop", "telemux_stop.py"), ("notify", "telemux_notify.py"),
+                           ("sidecar", "telemux_state.py")) if p in blob]
 
 
 def version_report():
@@ -2000,7 +2000,7 @@ def wire_claude(path=None):
     except (OSError, ValueError):
         settings = {}
     notes = []
-    for event, script in (("Stop", "tm-stop.py"), ("Notification", "tm-notify.py")):
+    for event, script in (("Stop", "telemux_stop.py"), ("Notification", "telemux_notify.py")):
         groups = settings.setdefault("hooks", {}).setdefault(event, [])
         if any(script in h.get("command", "")
                for g in groups for h in g.get("hooks") or []):
@@ -2008,7 +2008,7 @@ def wire_claude(path=None):
         groups.append({"hooks": [{"type": "command", "timeout": 20, "command":
                                   f"{sys.executable} {os.path.join(HERE, script)}"}]})
         notes.append(f"hook {event} -> {script}")
-    sidecar = os.path.join(HERE, "tm-state.py")
+    sidecar = os.path.join(HERE, "telemux_state.py")
     line = f'printf \'%s\' "$input" | {sys.executable} {sidecar} >/dev/null 2>&1 &'
     if not settings.get("statusLine"):
         sh = os.path.join(os.path.dirname(path), "telemux-statusline.sh")
@@ -2857,7 +2857,7 @@ def selfcheck():
         got = json.load(f)
     assert got["model"] == "opus"                  # unrelated settings survive
     stop = [h["command"] for g in got["hooks"]["Stop"] for h in g["hooks"]]
-    assert stop[0] == "mine.sh" and stop[1].endswith("tm-stop.py"), stop
+    assert stop[0] == "mine.sh" and stop[1].endswith("telemux_stop.py"), stop
     got["statusLine"] = {"type": "command", "command": "bash /nope/theirs.sh"}
     with open(sfile, "w") as f:
         json.dump(got, f)
@@ -2912,7 +2912,8 @@ def selfcheck():
     print("selfcheck ok")
 
 
-if __name__ == "__main__":
+def cli():
+    """Entry point for both `python3 telemux.py` and the installed `telemux`."""
     if "--selfcheck" in sys.argv:
         selfcheck()
     elif "--setup" in sys.argv:
@@ -2921,3 +2922,7 @@ if __name__ == "__main__":
         print(version_report())
     else:
         main()
+
+
+if __name__ == "__main__":
+    cli()

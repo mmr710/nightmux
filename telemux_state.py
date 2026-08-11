@@ -72,7 +72,7 @@ def selfcheck():
     with open(p) as f:
         assert json.load(f)["model"] == "Opus 5"
     os.remove(p)
-    print("tm-state selfcheck ok")
+    print("telemux_state selfcheck ok")
 
 
 if __name__ == "__main__":

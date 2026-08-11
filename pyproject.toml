@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The bare "telemux" is taken on PyPI by an unrelated project. The command you
+# type is still `telemux` — see [project.scripts].
+name = "telemux-bot"
+version = "1.0.0"
+description = "Run Claude Code, Codex or any terminal coding agent from Telegram — one forum topic per tmux session."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Mohamed Raslan" }]
+keywords = ["telegram", "tmux", "claude-code", "codex", "coding-agent", "remote"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
+# No dependencies, and that is a feature: see README.
+
+[project.urls]
+Homepage = "https://github.com/mmr79/telemux"
+Changelog = "https://github.com/mmr79/telemux/blob/main/CHANGELOG.md"
+Issues = "https://github.com/mmr79/telemux/issues"
+
+[project.scripts]
+telemux = "telemux:cli"
+
+# Flat modules rather than a package: the Claude Code hooks are separate
+# processes launched by path, so they have to land on disk as runnable files
+# next to telemux.py — which is exactly what py-modules does.
+[tool.setuptools]
+py-modules = ["telemux", "telemux_stop", "telemux_notify", "telemux_state"]

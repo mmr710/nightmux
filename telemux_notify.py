@@ -53,7 +53,7 @@ def main():
 def selfcheck():
     assert IDLE in "Claude is waiting for your input"
     assert IDLE not in "Claude needs your permission to use Bash".lower()
-    print("tm-notify selfcheck ok")
+    print("telemux_notify selfcheck ok")
 
 
 if __name__ == "__main__":

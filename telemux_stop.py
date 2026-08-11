@@ -91,7 +91,7 @@ def selfcheck():
             f.write((rec if isinstance(rec, str) else json.dumps(rec)) + "\n")
     assert last_assistant_text(p) == "final answer", last_assistant_text(p)
     os.remove(p)
-    print("tm-stop selfcheck ok")
+    print("telemux_stop selfcheck ok")
 
 
 if __name__ == "__main__":

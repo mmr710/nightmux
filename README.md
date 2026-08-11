@@ -137,9 +137,9 @@ Four files, no framework:
 | | |
 |---|---|
 | `telemux.py` | the daemon: long-polls Telegram, watches tmux, everything above |
-| `tm-state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
-| `tm-stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
-| `tm-notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
+| `telemux_state.py` | status-line sidecar — parks context %, limit windows and the transcript path where the daemon can read them |
+| `telemux_stop.py` | `Stop` hook — pushes the final answer as exact text, not scraped pixels |
+| `telemux_notify.py` | `Notification` hook — pushes permission prompts the instant they appear |
 
 The daemon reads the session's JSONL transcript when the sidecar is installed,
 which is why output arrives as clean text with a real tool trace. Without it,

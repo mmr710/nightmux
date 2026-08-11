@@ -8,6 +8,10 @@ names and the shape of `~/.telemux.json` — those are what a major bump protect
 
 ### Changed
 
+- The hook scripts are now `telemux_stop.py`, `telemux_notify.py` and
+  `telemux_state.py` (was `tm-stop.py`, `tm-notify.py`, `tm-state.py`). Hyphens
+  are not legal in a module name, and that was the only thing standing between
+  this and a `pip install`. Re-run `--setup` to repoint Claude Code at them.
 - Renamed from `tgctl` to `telemux`. Paths move to `~/.telemux.json`,
   `~/.telemux-state`, `~/.telemux-files`, `~/.telemux-hooked` and
   `~/.telemux.offset`; the systemd unit and the `/tg*` command aliases follow.

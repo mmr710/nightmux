@@ -27,9 +27,9 @@ no broker: the only shared mutable state is a `cfg` dict behind a lock, and a
 | | |
 |---|---|
 | `telemux.py` | the daemon. Polling, commands, tmux injection, scraping, spend accounting, setup |
-| `tm-state.py` | `statusLine` sidecar. Parks context %, 5h/7d windows, model, transcript path, `$TMUX_PANE` |
-| `tm-stop.py` | `Stop` hook. Sends the final assistant message as exact text |
-| `tm-notify.py` | `Notification` hook. Sends permission prompts the instant they appear |
+| `telemux_state.py` | `statusLine` sidecar. Parks context %, 5h/7d windows, model, transcript path, `$TMUX_PANE` |
+| `telemux_stop.py` | `Stop` hook. Sends the final assistant message as exact text |
+| `telemux_notify.py` | `Notification` hook. Sends permission prompts the instant they appear |
 
 The three small ones import `telemux` for its config and send helpers, and every
 one of their failure paths exits 0. A hook that fails must never block the
