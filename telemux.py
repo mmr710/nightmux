@@ -757,12 +757,8 @@ def check_limit(cfg, st, topic, sess, scr, fresh):
     being true, and one that merely scrolled past was never a live state at all.
     """
     snap = st.get("snap") or {}
-    fh = snap.get("five_hour") or {}
-    # resets_at in the past means the window already turned over and this reading
-    # describes the one before it — a resumed session redraws its status line
-    # with the last figures it knew before the first API call refreshes them.
-    if (time.time() - snap.get("ts", 0) < USAGE_FRESH
-            and (fh.get("resets_at") or 0) > time.time()):
+    fh = window(snap, "five_hour") or {}   # a window that already reset says nothing
+    if (time.time() - snap.get("ts", 0) < USAGE_FRESH and fh.get("resets_at")):
         if (fh.get("used_percentage") or 0) < 100:
             st.pop("limit_line", None)   # sidecar says there is room; screen cannot argue
             return
@@ -806,15 +802,15 @@ def warn_usage(cfg, st, topic, sess):
     if time.time() - snap.get("ts", 0) > USAGE_FRESH:
         return  # stale numbers describe a window that may already have reset
     for key, label in (("five_hour", "5-hour"), ("seven_day", "weekly")):
-        w = snap.get(key) or {}
+        w = window(snap, key) or {}
         pct, at = w.get("used_percentage"), w.get("resets_at")
         if pct is None or not at:
             continue
-        window, done = _warned.get(key, (None, 0))
-        if window != at:          # a new window: last time's warnings do not carry
-            window, done = at, 0
+        armed, done = _warned.get(key, (None, 0))
+        if armed != at:           # a new window: last time's warnings do not carry
+            armed, done = at, 0
         step = max((t for t in WARN_AT if pct >= t), default=0)
-        _warned[key] = (window, max(step, done))
+        _warned[key] = (armed, max(step, done))
         if step > done:
             send(cfg, topic, f"🔶 {label} limit {pct:.0f}% used\n"
                  f"resets {clock(cfg, at)} (in {left(at - time.time())})",
@@ -1519,12 +1515,29 @@ def autobind(cfg, state, lock, topic):
     return None
 
 
+def window(snap, key):
+    """A usage window from the status-line snapshot, or None once it has reset.
+
+    Claude Code redraws its status line with the last figures it knew, so for a
+    moment after a window turns over the payload still carries the old
+    percentage beside a resets_at that has already passed. Reporting it
+    announces the *previous* window's 92% as if it were this one's, which is
+    both wrong and alarming. The reading is fresh; the window it describes is
+    not, and the next redraw carries the real one.
+    """
+    w = (snap or {}).get(key) or {}
+    at = w.get("resets_at")
+    if w.get("used_percentage") is None or (at and at <= time.time()):
+        return None
+    return w
+
+
 def usage_line(cfg, snap, sep="  "):
     """5-hour and weekly windows, straight from what the status line was told."""
     out = []
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        w = (snap or {}).get(key) or {}
-        if w.get("used_percentage") is None:
+        w = window(snap, key)
+        if not w:
             continue
         at = w.get("resets_at")
         out.append(f"{label} {w['used_percentage']:.0f}%" + (
@@ -2575,6 +2588,19 @@ def selfcheck():
     warn_usage(cfg, st, "1", "s")                  # new window: warnings re-arm
     assert sent[-1].startswith("🔶 5-hour limit 91%") and len(sent) == n + 3
     state.pop("other"), _warned.clear()
+
+    # A window that has already turned over still shows up in the payload, with
+    # last window's percentage beside a resets_at in the past. Reporting it read
+    # as "weekly 92% used, resets in 0m" while the real week was at 22%.
+    now, n = time.time(), len(sent)
+    stale = {"ts": now, "seven_day": {"used_percentage": 92, "resets_at": now - 5},
+             "five_hour": {"used_percentage": 16, "resets_at": now + 3600}}
+    assert window(stale, "seven_day") is None
+    assert window(stale, "five_hour")["used_percentage"] == 16   # the live one stays
+    assert "7d" not in usage_line({}, stale) and "5h 16%" in usage_line({}, stale)
+    warn_usage(cfg, {"snap": stale}, "1", "s")
+    assert len(sent) == n, sent[-1]              # ...and nothing is announced
+    _warned.clear()
 
     n = len(sent)                                  # context bloat, per session
     warn_ctx(cfg, st, "1", "s")
