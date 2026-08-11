@@ -1,0 +1,25 @@
+# Publish to PyPI when a GitHub release is published.
+#
+# No API token anywhere: this uses PyPI Trusted Publishing (OIDC). One-time
+# setup at https://pypi.org/manage/account/publishing/ — owner mmr79, repository
+# nightmux, workflow publish.yml, environment left blank. Until that exists this
+# job fails at the last step and nothing else is affected.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # the whole point: mint an OIDC token, hold no secret
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
