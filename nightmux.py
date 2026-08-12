@@ -883,8 +883,32 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
 WARN_AT = (80, 90)   # say something before the wall, not at it
 CTX_WARN = 75        # a context this full costs double for the same work
 # Account-wide: every session shares the same 5-hour and weekly windows, so six
-# bound topics must not mean six warnings. First one to notice speaks.
+# bound topics must not mean six warnings. First one to notice speaks — and it
+# outlives the process, because a restart used to re-arm every threshold the
+# window had already crossed and announce it a second time. Three restarts in an
+# afternoon is three duplicate warnings for one window nobody had left.
 _warned = {}
+
+
+def warned_path():
+    return os.path.join(STATE_DIR, "warned.json")
+
+
+def load_warned():
+    """Thresholds already announced for windows that have not turned over yet."""
+    try:
+        with open(warned_path()) as f:
+            return {k: (v[0], v[1]) for k, v in json.load(f).items()}
+    except (OSError, ValueError, IndexError, TypeError):
+        return {}
+
+
+def save_warned():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = warned_path()
+    with open(path + ".tmp", "w") as f:
+        json.dump(_warned, f)
+    os.replace(path + ".tmp", path)   # a reader never sees a half-written file
 
 
 def warn_usage(cfg, st, topic, sess):
@@ -901,7 +925,9 @@ def warn_usage(cfg, st, topic, sess):
         if armed != at:           # a new window: last time's warnings do not carry
             armed, done = at, 0
         step = max((t for t in WARN_AT if pct >= t), default=0)
-        _warned[key] = (armed, max(step, done))
+        before, _warned[key] = _warned.get(key), (armed, max(step, done))
+        if _warned[key] != before:   # a crossed threshold, or a window turning over
+            save_warned()
         if step > done:
             send(cfg, topic, f"🔶 {label} limit {pct:.0f}% used\n"
                  f"resets {clock(cfg, at)} (in {left(at - time.time())})",
@@ -1399,7 +1425,7 @@ def prune(now, last):
     for d, days in ((FILE_DIR, 7), (STATE_DIR, 1)):
         cut = now - days * 86400
         for n in os.listdir(d) if os.path.isdir(d) else []:
-            if d == STATE_DIR and n.startswith("queue.json"):
+            if d == STATE_DIR and n.startswith(("queue.json", "warned.json")):
                 continue   # held prompts are state, not a cache: only rewritten
             p = os.path.join(d, n)   # when they change, so mtime says nothing
             try:
@@ -2310,6 +2336,7 @@ def main():
     state, lock = {}, threading.Lock()
     # Before the watcher runs, or its first save would overwrite the file with
     # the empty state it starts from.
+    _warned.update(load_warned())   # a restart is not news for a window mid-flight
     for sess, held in load_queue(state).items():
         topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
         until = held.get("limit_until", 0)
@@ -2787,6 +2814,15 @@ def selfcheck():
     st["snap"]["five_hour"]["resets_at"] = at + 18000
     warn_usage(cfg, st, "1", "s")                  # new window: warnings re-arm
     assert sent[-1].startswith("🔶 5-hour limit 91%") and len(sent) == n + 3
+    held, n = dict(_warned), len(sent)             # a restart mid-window
+    _warned.clear()
+    _warned.update(load_warned())                  # ...reads back what it said
+    assert _warned == held, (_warned, held)
+    warn_usage(cfg, st, "1", "s")                  # ...and does not say it again
+    assert len(sent) == n
+    _warned.clear()                                # nothing on disk: back to silence
+    os.remove(warned_path())
+    assert load_warned() == {}
     state.pop("other"), _warned.clear()
 
     # A window that has already turned over still shows up in the payload, with

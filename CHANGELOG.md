@@ -42,6 +42,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   banner was optimistic; `"limit_slack"` (default 60s) tunes how early that is.
 - A window that reopens onto a busy or blocked pane now says so, with the queue
   depth, rather than going quiet and reading as a hold that never lifted.
+- A restart no longer re-announces a usage threshold the window had already
+  crossed. The "once per threshold, once per account" state lived only in the
+  process, so every restart re-armed it: three restarts in one afternoon meant
+  three 🔶 warnings for a window nobody had left. It is now kept beside the queue,
+  and swept only when the window it describes is long gone.
 - A spent **weekly** window is now held on. Only the 5-hour window was read from
   the status-line snapshot, and a fresh snapshot outranks the on-screen banner —
   so a week that had run out while the 5-hour figure read healthy was seen as
