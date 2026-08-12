@@ -483,6 +483,7 @@ NUDGE_AFTER = 600   # an unanswered prompt blocks the session: remind after this
 NUDGE_EVERY = 1800  # then keep one message current instead of posting more
 LIMIT_SLACK = 60    # resume this long after the stated reset, never before
 REFUSED_FAST = 60   # a prompt refused this soon after being typed did no work
+ACTIVE_RECENT = 120  # a transcript that grew this recently was a turn in progress
 IDLE_AFTER = 300    # nothing moving anywhere for this long -> poll lazily
 IDLE_POLL = 10
 
@@ -1333,6 +1334,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     gained = tail_transcript(st, tpath) if tpath else []
     if gained:
         st.setdefault("tbuf", []).extend(gained)
+        st["last_gain"] = time.time()
     scr = visible(sess)
     if not fresh and not gained and scr == st.get("scr") and st["prev"] == st["sent"]:
         return  # nothing moved anywhere and nothing is pending: skip the big capture
@@ -1364,9 +1366,17 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # Kept for the journal: when this decides wrongly, which of the three inputs
     # was wrong is the whole question, and reconstructing them afterwards from
     # the message record does not work — it already failed to explain one.
-    st["why"] = f"trace={open_turn} prev={was_busy} mode={st['mode']}"
+    # A transcript that grew a moment ago is a turn that was running a moment
+    # ago, and it is the only one of these that survives a session driven from
+    # the terminal rather than from Telegram: no prompt of ours was typed, so
+    # there is no live trace, and the pane can read idle at the tick the window
+    # is found spent. Three real limits in a row were missed for exactly that,
+    # each one followed a few seconds later by kilobytes of delivered output.
+    active = time.time() - st.get("last_gain", 0) < ACTIVE_RECENT
+    st["why"] = (f"trace={open_turn} prev={was_busy} mode={st['mode']} "
+                 f"active={active}")
     check_limit(cfg, st, topic, sess, [l for l in scr if l not in seen], fresh,
-                open_turn or was_busy or st["mode"] == "busy")
+                open_turn or was_busy or active or st["mode"] == "busy")
     warn_usage(cfg, st, topic, sess)
     warn_ctx(cfg, st, topic, sess)
     if st["mode"] == "waiting":
@@ -3219,6 +3229,22 @@ def selfcheck():
     with stubbed(snapshot=lambda p: st["snap"]):
         flush_new(cfg, state, "1", "s")
     assert st["queue"] == ["continue"], st["queue"]
+    # The same, for a session driven from its own terminal: no prompt of ours was
+    # typed, so no live trace exists and the pane can read idle at the very tick
+    # the window is found spent. A transcript that grew seconds ago is the turn.
+    for k in ("queue", "limit_until", "limit_line", "prog_msg"):
+        st.pop(k, None)
+    st["mode"], st["last_gain"] = "idle", time.time()
+    with stubbed(snapshot=lambda p: st["snap"]):
+        flush_new(cfg, state, "1", "s")
+    assert st["queue"] == ["continue"], st["queue"]
+    st["last_gain"] = time.time() - ACTIVE_RECENT - 1   # ...but not hours later
+    for k in ("queue", "limit_until", "limit_line"):
+        st.pop(k, None)
+    with stubbed(snapshot=lambda p: st["snap"]):
+        flush_new(cfg, state, "1", "s")
+    assert not st.get("queue"), st.get("queue")
+    st.pop("last_gain")
     for k in ("queue", "limit_until", "limit_line", "prog_msg", "snap"):
         st.pop(k, None)
 

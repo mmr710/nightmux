@@ -60,6 +60,14 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   banner was optimistic; `"limit_slack"` (default 60s) tunes how early that is.
 - A window that reopens onto a busy or blocked pane now says so, with the queue
   depth, rather than going quiet and reading as a hold that never lifted.
+- A turn cut off in a session driven from its own terminal is now noticed. All
+  three signals for "work was in flight" — a live trace, the previous tick, the
+  pane's mode — assume nightmux either started the turn or caught the pane
+  rendering while it ran, and neither holds when you type into the session
+  yourself and the window is found spent between two polls. Three consecutive
+  real limits were missed that way, each followed seconds later by kilobytes of
+  delivered output. A transcript that grew within the last two minutes is now
+  evidence in its own right.
 - A prompt refused before it ever got a turn now goes back on the queue. The
   recovery existed but was reachable only when something was already running,
   which is the one state a refusal rules out — so the case it was written for
