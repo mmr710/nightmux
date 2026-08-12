@@ -1722,6 +1722,11 @@ def status_report(cfg, state):
         age = int(now - st.get("changed", now))
         snap = st.get("snap")
         tag = " [hook]" if hooked(sess) and not (snap or {}).get("transcript") else ""
+        # No status-line snapshot at all: no usage windows, no context figure, no
+        # transcript, and the pane falls back to whichever one holds the focus.
+        # The session still works, it is just being watched through the keyhole,
+        # and nothing said so — it took a script to notice two topics were.
+        tag += "" if snap else " [no status line]"
         q = len(st.get("queue") or [])
         rows.append(f"{icon} {sess:<14} topic {topic}  {mode}  {age}s quiet{tag}"
                     + (f"  📥{q}" if q else "") + usage_line(cfg, snap))
@@ -3079,7 +3084,11 @@ def selfcheck():
     twice_p()                                     # nothing new in the file: silence
     assert sent[-1].startswith("✅ s\n● Read")
     globals()["live_sessions"] = lambda: {"s": "%5"}
-    assert "5h 12%" in status_report({"topics": {"1": "s"}}, state)
+    report = status_report({"topics": {"1": "s"}}, state)
+    assert "5h 12%" in report and "no status line" not in report, report
+    held, state["s"]["snap"] = state["s"]["snap"], None    # watched through the
+    assert "[no status line]" in status_report({"topics": {"1": "s"}}, state)
+    state["s"]["snap"] = held                             # keyhole, and saying so
     os.remove(tp)
 
     cfg["topics"] = {"1": "s"}                    # status + watchdog
