@@ -15,6 +15,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   the continuation itself and the existing drain sends it when the window
   reopens. `"auto_continue": false` waits for a human; any other string replaces
   `continue`.
+- `"modes": {"<topic>": "readonly"}` — a topic that reports, greps, shows usage
+  and pane output, and never reaches the keyboard of the session it watches.
+  Every bound topic was writable by anyone on the allowlist, which is the right
+  default for a session you are driving and the wrong one for a topic bound to
+  something you only want to watch from a phone.
 
 ### Fixed
 

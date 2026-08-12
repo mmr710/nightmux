@@ -1764,6 +1764,21 @@ def status_report(cfg, state):
     return "\n".join(rows)
 
 
+# Everything that reaches the keyboard of a live session, or ends one. Bare text
+# is the other half and is caught separately, being everything that is not a
+# command. Listed rather than inferred: a command added later is read-only until
+# someone says otherwise, which is the safe direction for the list to be wrong in.
+WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!model", "!effort",
+              "!bind", "!unbind", "!reload", "!autocompact", "!tz")
+
+
+def writes(cfg, cmd, arg=""):
+    """True when this would type into the session, or take it away."""
+    return (not cmd.startswith("!") or cmd in KEYS or cmd in WRITE_CMDS
+            or cmd[1:] in agents(cfg)                # !claude, !agy: starts one
+            or (cmd == "!queue" and arg == "now"))   # releasing a hold sends
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -1778,6 +1793,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
         cmd = TG_SLASH[cmd[1:]]
         text = f"{cmd} {arg}".strip()
 
+    # A phone is a small thing to lose, and the account that unlocks it drives
+    # every bound session. A topic watching something it must not touch can say
+    # so — it still reports, greps and shows usage, it just never reaches the
+    # keyboard. Set with "modes": {"115": "readonly"}.
+    if (cfg.get("modes") or {}).get(str(topic)) == "readonly" and writes(cfg, cmd, arg):
+        return ("🔒 this topic is read-only\n"
+                "it reports and searches; it does not type into the session.\n"
+                'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
     if cmd == "!help":
@@ -3075,6 +3098,16 @@ def selfcheck():
     assert sent[-1].startswith("⚠️ kill tmux session 's'?"), sent[-1]
     assert cfg["topics"].get("1") == "s"          # nothing killed, still bound
     assert handle(cfg, state, threading.Lock(), "1", "!cancel") == "cancelled"
+    # A read-only topic reports and searches, and never reaches the keyboard.
+    cfg["modes"], ro_typed = {"1": "readonly"}, len(typed)
+    for blocked in ("hello there", "!raw rm -rf /", "!1", "!kill", "!new x",
+                    "!queue now", "!claude"):
+        assert handle(cfg, state, threading.Lock(), "1", blocked).startswith("🔒"), blocked
+    assert len(typed) == ro_typed and cfg["topics"].get("1") == "s"   # nothing typed
+    assert handle(cfg, state, threading.Lock(), "1", "!status") == status_report(cfg, state)
+    assert handle(cfg, state, threading.Lock(), "1", "!queue").startswith("0 queued")
+    cfg.pop("modes")                              # full again for what follows
+    assert handle(cfg, state, threading.Lock(), "1", "!queue clear") is not None
     # An unhandled !command is typed into the session as text, so the cancel
     # button has to be a real command or declining would inject "!cancel".
     assert len(sent) == n + 1 and len(typed) == t, (sent[n:], typed[t:])

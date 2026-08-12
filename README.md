@@ -206,6 +206,7 @@ hook scripts). No framework, no fixtures — asserts that fail loudly.
   "tz_offset": "Africa/Cairo",
   "autocompact": 70,
   "auto_continue": "continue",
+  "modes": {"115": "readonly"},
   "poll": 2
 }
 ```
