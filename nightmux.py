@@ -348,18 +348,20 @@ def live_sessions():
     they cannot end up addressing two different panes.
     """
     out = tmux("list-panes", "-a", "-F",
-               "#{session_name}\t#{pane_id}\t#{pane_active}")
-    seen, active = {}, {}
+               "#{session_name}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}")
+    seen, active, running = {}, {}, {}
     for l in out.split("\n"):
         f = l.split("\t")
-        if len(f) != 3:
+        if len(f) != 4:
             continue
         seen.setdefault(f[0], []).append(f[1])
         if f[2] == "1":
             active.setdefault(f[0], f[1])
+        if f[3] in AGENT_BINS:
+            running.setdefault(f[0], f[1])
     hot = snapped()
     return {s: max((p for p in pids if p in hot), key=lambda p: hot[p],
-                   default=active.get(s) or pids[0])
+                   default=running.get(s) or active.get(s) or pids[0])
             for s, pids in seen.items()}
 
 
@@ -1618,6 +1620,12 @@ AGENTS = {
 }
 
 
+# What an agent shows up as in `pane_current_command`, for finding its pane when
+# no status line has named one. Built-ins only: an agent added through the config
+# still falls back to the active pane, exactly as everything did before.
+AGENT_BINS = set(AGENTS) | {v[0] for v in AGENTS.values()}
+
+
 def agents(cfg):
     """Every agent key that !<key> will start: the built-ins plus cfg["agents"]."""
     out = dict(AGENTS)
@@ -2458,13 +2466,16 @@ def selfcheck():
     # written from, which is not always the pane holding the focus — and reading
     # one pane while typing into another is indistinguishable from a hang.
     real_tmux, real_snapped = tmux, snapped
-    globals()["tmux"] = lambda *a: "api\t%1\t0\napi\t%2\t1\nweb\t%9\t1"
+    panes = ("api\t%1\t0\tclaude\napi\t%2\t1\tbash\nweb\t%9\t1\tvim")
+    globals()["tmux"] = lambda *a: panes
     globals()["snapped"] = lambda: {"%1": 100.0}
     assert live_sessions() == {"api": "%1", "web": "%9"}   # sidecar beats focus
     globals()["snapped"] = lambda: {"%1": 100.0, "%2": 200.0}
     assert live_sessions()["api"] == "%2"                  # two agents: the newer
-    globals()["snapped"] = lambda: {}
-    assert live_sessions() == {"api": "%2", "web": "%9"}   # none: the active pane
+    globals()["snapped"] = lambda: {}                      # no sidecar anywhere:
+    assert live_sessions() == {"api": "%1", "web": "%9"}   # the pane running one
+    panes = "api\t%1\t0\tbash\napi\t%2\t1\tbash"           # nothing to go on:
+    assert live_sessions() == {"api": "%2"}                # back to the focus
     globals()["tmux"], globals()["snapped"] = real_tmux, real_snapped
     assert tgt("api") == "api"        # never seen: the session name, as before
     _target["api"] = "%2"

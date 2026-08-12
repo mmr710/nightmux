@@ -23,6 +23,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- Without a status-line snapshot, a session now resolves to the pane running a
+  known agent binary before falling back to the focused one — so a split window
+  no longer sends keys into whichever pane happens to hold the focus on the
+  sessions the sidecar does not cover. Two agent panes in one session with no
+  snapshot between them is still a guess, and an agent added through the config
+  still falls back to the active pane.
 - A session now resolves to the pane its agent is actually in, for reads and for
   keystrokes alike. `-t <session>` means that session's *active* pane, so a split
   window — or a session left looking at another window — had nightmux capturing
