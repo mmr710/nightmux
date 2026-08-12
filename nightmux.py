@@ -15,6 +15,7 @@ Config: ~/.nightmux.json
 }
 """
 import calendar
+import contextlib
 import html
 import json
 import os
@@ -863,13 +864,18 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     # ordinary drain runs it the moment the window reopens. Set
     # "auto_continue": false to go back to waiting, or to another string to send
     # something other than `continue`.
-    cont = busy and cfg.get("auto_continue", "continue")
+    # A prompt typed a moment ago that never got a turn was refused outright: no
+    # work came of it, so `continue` would continue nothing and the prompt itself
+    # has to go back. "Never got a turn" is the whole of it — a prompt whose turn
+    # ran and finished must not be sent twice, and the pane going busy at any
+    # point since it was typed is what tells the two apart. This is also its own
+    # trigger, not a refinement of `busy`: the refusal is precisely the case
+    # where nothing was running to notice.
+    refused = bool(st.get("last") and not st.get("ran")
+                   and time.time() - st.get("last_at", 0) < REFUSED_FAST)
+    cont = (busy or refused) and cfg.get("auto_continue", "continue")
     if cont:
-        # Refused within the minute it was typed, though, and no work came of it
-        # — resuming that with `continue` would continue nothing. The prompt
-        # itself goes back, which is also what saves a resume that lands early
-        # because the reset time on the banner was optimistic.
-        if st.get("last") and time.time() - st.get("last_at", 0) < REFUSED_FAST:
+        if refused:
             cont = st["last"]
         st.setdefault("queue", []).insert(0, cont)
     # In the journal too: which branch this took is the whole behaviour, and the
@@ -1349,6 +1355,12 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # pane has read idle for a tick or more. Watching two ticks of `mode` missed
     # every real hit for exactly that reason.
     open_turn = bool(st.get("prog_msg"))
+    # The last prompt did get a turn, whatever came of it: the pane is working,
+    # or the transcript grew, or the pane has output that has not been flushed.
+    # A turn shorter than one poll interval never shows as busy, and treating
+    # that as "never ran" would re-send a prompt whose work is already done.
+    if st["mode"] == "busy" or gained or changed:
+        st["ran"] = True
     # Kept for the journal: when this decides wrongly, which of the three inputs
     # was wrong is the whole question, and reconstructing them afterwards from
     # the message record does not work — it already failed to explain one.
@@ -1658,6 +1670,7 @@ def remember(state, sess, text):
     # ...and what it was, for the case where the window refuses it outright: a
     # prompt that got no turn out of the window has to go back in the queue.
     st["last"], st["last_at"] = text, time.time()
+    st["ran"] = False    # no turn has started for it yet; flush_new sets this
     st["changed"] = time.time()
 
 
@@ -2536,6 +2549,22 @@ def process(cfg, state, lock, allow, upd):
         send(cfg, topic, reply)
 
 
+@contextlib.contextmanager
+def stubbed(**globs):
+    """Swap module globals for one section of the selfcheck, and put them back.
+
+    A stub left standing is the worst kind of failure here: the section that set
+    it passes, and one three hundred lines later fails for a reason that has
+    nothing to do with what it is testing. That has happened more than once.
+    """
+    old = {k: globals()[k] for k in globs}
+    globals().update(globs)
+    try:
+        yield
+    finally:
+        globals().update(old)
+
+
 def selfcheck():
     assert chunks("a\nb") == ["a\nb"]
     assert chunks("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
@@ -2554,18 +2583,15 @@ def selfcheck():
     # Which pane a session means. The agent is wherever its status line was last
     # written from, which is not always the pane holding the focus — and reading
     # one pane while typing into another is indistinguishable from a hang.
-    real_tmux, real_snapped = tmux, snapped
-    panes = ("api\t%1\t0\tclaude\napi\t%2\t1\tbash\nweb\t%9\t1\tvim")
-    globals()["tmux"] = lambda *a: panes
-    globals()["snapped"] = lambda: {"%1": 100.0}
-    assert live_sessions() == {"api": "%1", "web": "%9"}   # sidecar beats focus
-    globals()["snapped"] = lambda: {"%1": 100.0, "%2": 200.0}
-    assert live_sessions()["api"] == "%2"                  # two agents: the newer
-    globals()["snapped"] = lambda: {}                      # no sidecar anywhere:
-    assert live_sessions() == {"api": "%1", "web": "%9"}   # the pane running one
-    panes = "api\t%1\t0\tbash\napi\t%2\t1\tbash"           # nothing to go on:
-    assert live_sessions() == {"api": "%2"}                # back to the focus
-    globals()["tmux"], globals()["snapped"] = real_tmux, real_snapped
+    panes = ["api\t%1\t0\tclaude\napi\t%2\t1\tbash\nweb\t%9\t1\tvim"]
+    with stubbed(tmux=lambda *a: panes[0], snapped=lambda: {"%1": 100.0}):
+        assert live_sessions() == {"api": "%1", "web": "%9"}   # sidecar over focus
+        with stubbed(snapped=lambda: {"%1": 100.0, "%2": 200.0}):
+            assert live_sessions()["api"] == "%2"              # two: the newer
+        with stubbed(snapped=lambda: {}):                      # no sidecar at all:
+            assert live_sessions() == {"api": "%1", "web": "%9"}   # the agent pane
+            panes[0] = "api\t%1\t0\tbash\napi\t%2\t1\tbash"     # nothing to go on:
+            assert live_sessions() == {"api": "%2"}             # back to the focus
     assert tgt("api") == "api"        # never seen: the session name, as before
     _target["api"] = "%2"
     assert tgt("api") == "%2"
@@ -3088,7 +3114,7 @@ def selfcheck():
     assert sent[-1].startswith("⚙️ s")           # then the live trace for that turn
     assert st["queue"] == [] and st["prog_msg"] == 77   # live trace opened for it
     assert "limit_line" not in st   # the ended window's banner suppresses nothing
-    st.pop("prog_msg")
+    st.pop("prog_msg"), st.pop("last", None)   # not a prompt awaiting its turn
 
     # A window that resets with nothing queued must still clear the hold and say
     # so. The silent version left the session flagged as limited for good, and
@@ -3146,16 +3172,32 @@ def selfcheck():
     drain(cfg, state, "1", "s")
     assert typed == ["continue"] and st["queue"] == [], typed
     st.pop("limit_line", None), st.pop("prog_msg", None)
-    st["queue"] = []                              # an idle session had no turn to
-    check_limit(cfg, st, "1", "s", screen, False, False)   # resume: left alone
+    # That resume landed on a window that was still shut: the prompt it just sent
+    # never got a turn, so it goes back rather than being lost to the refusal.
+    st["queue"], st["limit_line"] = [], None
+    check_limit(cfg, st, "1", "s", screen, False, False)
+    assert st["queue"] == ["continue"], st["queue"]
+    st["queue"], st["limit_line"] = [], None      # an idle session with nothing
+    st.pop("last")                                # outstanding is left alone
+    check_limit(cfg, st, "1", "s", screen, False, False)
     assert st["queue"] == [] and st["limit_until"] > time.time()
     st.pop("limit_until"), st.pop("limit_line")
     # A prompt refused the moment it was typed did no work: it goes back whole,
     # rather than a `continue` that would resume nothing.
     st["mode"], st["queue"] = "busy", []
-    st["last"], st["last_at"] = "the refused prompt", time.time()
+    st["last"], st["last_at"], st["ran"] = "the refused prompt", time.time(), False
     check_limit(cfg, st, "1", "s", screen, False, True)
     assert st["queue"] == ["the refused prompt"], st["queue"]
+    # ...and it does not need a busy pane to notice, because a prompt that was
+    # refused is exactly the case where nothing was running to see it.
+    st["queue"], st["limit_line"] = [], None
+    check_limit(cfg, st, "1", "s", screen, False, False)
+    assert st["queue"] == ["the refused prompt"], st["queue"]
+    # A prompt whose turn did run is a different thing, and must not be re-sent.
+    st["queue"], st["limit_line"], st["ran"] = [], None, True
+    check_limit(cfg, st, "1", "s", screen, False, False)
+    assert st["queue"] == [], st["queue"]
+    st["ran"], st["queue"] = False, ["the refused prompt"]   # for what follows
     # ...and a window that reopens onto a pane that cannot take it says so, once,
     # instead of looking like a hold that never lifted.
     st["mode"], st["limit_until"], n = "busy", time.time() - 1, len(sent)
@@ -3174,11 +3216,9 @@ def selfcheck():
         "ts": time.time(),
         "five_hour": {"used_percentage": 100, "resets_at": time.time() + 5}}
     st.pop("last", None), st.pop("limit_line", None)
-    real_snapshot = snapshot
-    globals()["snapshot"] = lambda p: st["snap"]
-    flush_new(cfg, state, "1", "s")
+    with stubbed(snapshot=lambda p: st["snap"]):
+        flush_new(cfg, state, "1", "s")
     assert st["queue"] == ["continue"], st["queue"]
-    globals()["snapshot"] = real_snapshot
     for k in ("queue", "limit_until", "limit_line", "prog_msg", "snap"):
         st.pop(k, None)
 
@@ -3193,22 +3233,20 @@ def selfcheck():
     st.pop("limit_line", None)
 
     # Menus disagree about Enter, so the answer is checked rather than assumed.
-    real_tmux, keys = tmux, []
-    globals()["tmux"] = lambda *a: keys.append(a[-1])
-    globals()["CONFIRM_AFTER"] = 0.3
+    keys, calls = [], []
     screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
     assert menu_digit(screen, YES_NO["!y"]) == "1"    # "y" would go nowhere here
     assert menu_digit(screen, YES_NO["!n"]) == "2"
-    press("s", "1", confirm=True)                 # menu still up: the digit alone
-    assert keys == ["1", "Enter"], keys            # only moved the highlight
-    calls, keys[:] = [], []
-    globals()["visible"] = lambda s: (calls.append(1), list(screen) if len(calls) < 2
-                                      else ["● done", "esc to interrupt"])[1]
-    press("s", "1", confirm=True)                 # the dialog acted on the digit:
-    assert keys == ["1"], keys                     # a stray Enter would answer the
-    globals()["visible"] = lambda s: list(screen)  # next question for you
-    globals()["tmux"] = real_tmux
-    screen[:] = ["● done"] + box                  # back to an idle pane
+    with stubbed(tmux=lambda *a: keys.append(a[-1]), CONFIRM_AFTER=0.3):
+        press("s", "1", confirm=True)             # menu still up: the digit alone
+        assert keys == ["1", "Enter"], keys        # only moved the highlight
+        keys[:] = []
+        with stubbed(visible=lambda s: (calls.append(1),
+                                        list(screen) if len(calls) < 2
+                                        else ["● done", "esc to interrupt"])[1]):
+            press("s", "1", confirm=True)         # the dialog acted on the digit:
+        assert keys == ["1"], keys                 # a stray Enter would answer the
+    screen[:] = ["● done"] + box                  # next question for you
 
     handle(cfg, state, threading.Lock(), "1", "another one", mid=555)  # prompt ticked
     assert ("setMessageReaction", 555) in [(m, k.get("message_id")) for m, k in edits]

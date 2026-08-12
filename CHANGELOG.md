@@ -60,6 +60,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   banner was optimistic; `"limit_slack"` (default 60s) tunes how early that is.
 - A window that reopens onto a busy or blocked pane now says so, with the queue
   depth, rather than going quiet and reading as a hold that never lifted.
+- A prompt refused before it ever got a turn now goes back on the queue. The
+  recovery existed but was reachable only when something was already running,
+  which is the one state a refusal rules out — so the case it was written for
+  could not reach it. Whether a turn ran is now tracked directly (the pane went
+  busy, the transcript grew, or output arrived), which also keeps a prompt whose
+  turn finished inside one poll interval from being sent a second time.
 - A restart no longer re-announces a usage threshold the window had already
   crossed. The "once per threshold, once per account" state lived only in the
   process, so every restart re-armed it: three restarts in one afternoon meant
