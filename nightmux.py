@@ -872,8 +872,8 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
         st.setdefault("queue", []).insert(0, cont)
     # In the journal too: which branch this took is the whole behaviour, and the
     # Telegram message it is inferred from is not where you look at 3am.
-    print(f"limit {sess}: {hit}, until {int(until)}, "
-          f"resume={cont!r}, mode={st.get('mode')}", file=sys.stderr, flush=True)
+    print(f"limit {sess}: {hit}, until {int(until)}, resume={cont!r}, "
+          f"{st.get('why', 'mode=' + str(st.get('mode')))}", file=sys.stderr, flush=True)
     send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
          f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
          + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
@@ -1264,8 +1264,13 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # with the spent percentage, so by the time the window is seen to be shut the
     # pane has read idle for a tick or more. Watching two ticks of `mode` missed
     # every real hit for exactly that reason.
+    open_turn = bool(st.get("prog_msg"))
+    # Kept for the journal: when this decides wrongly, which of the three inputs
+    # was wrong is the whole question, and reconstructing them afterwards from
+    # the message record does not work — it already failed to explain one.
+    st["why"] = f"trace={open_turn} prev={was_busy} mode={st['mode']}"
     check_limit(cfg, st, topic, sess, [l for l in scr if l not in seen], fresh,
-                bool(st.get("prog_msg")) or was_busy or st["mode"] == "busy")
+                open_turn or was_busy or st["mode"] == "busy")
     warn_usage(cfg, st, topic, sess)
     warn_ctx(cfg, st, topic, sess)
     if st["mode"] == "waiting":
