@@ -860,6 +860,10 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
         if st.get("last") and time.time() - st.get("last_at", 0) < REFUSED_FAST:
             cont = st["last"]
         st.setdefault("queue", []).insert(0, cont)
+    # In the journal too: which branch this took is the whole behaviour, and the
+    # Telegram message it is inferred from is not where you look at 3am.
+    print(f"limit {sess}: {hit}, until {int(until)}, "
+          f"resume={cont!r}, mode={st.get('mode')}", file=sys.stderr, flush=True)
     send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
          f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
          + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
@@ -1243,8 +1247,15 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     was_busy = st.get("mode") == "busy"   # a turn was in flight on the last tick
     st["mode"] = pane_state(scr)
     seen = set(prev_scr)
+    # A turn is open until its output has been delivered — `prog_msg` is the live
+    # trace, opened when it starts and deleted when the pane settles. That is the
+    # signal for "the limit cut something off", not the pane's mode: a refusal
+    # ends the turn, the pane goes still, and the status line only then redraws
+    # with the spent percentage, so by the time the window is seen to be shut the
+    # pane has read idle for a tick or more. Watching two ticks of `mode` missed
+    # every real hit for exactly that reason.
     check_limit(cfg, st, topic, sess, [l for l in scr if l not in seen], fresh,
-                was_busy or st["mode"] == "busy")
+                bool(st.get("prog_msg")) or was_busy or st["mode"] == "busy")
     warn_usage(cfg, st, topic, sess)
     warn_ctx(cfg, st, topic, sess)
     if st["mode"] == "waiting":
@@ -2843,6 +2854,7 @@ def selfcheck():
     st.pop("ctx_warned")
 
     st.update(mode="idle", queue=[])              # usage limit: hold, then resume
+    st.pop("prog_msg", None)                      # no turn open: nothing was cut
     n = len(sent)                                 # quoted output is not the banner
     screen[:] = ["● done",
                  "  ⎿  Error during compaction: You've hit your monthly limit"] + box
@@ -2935,6 +2947,22 @@ def selfcheck():
     drain(cfg, state, "1", "s")
     assert len(sent) == n + 1 and st["queue"] == ["the refused prompt"]
     for k in ("snap", "queue", "last", "last_at", "resumed", "limit_line"):
+        st.pop(k, None)
+
+    # The turn is open until its output lands, and the pane reads idle for the
+    # tick or two between a refusal and the status line admitting the window is
+    # spent — so the live trace, not the pane's mode, is what says work was cut.
+    st["mode"], st["queue"], screen[:] = "idle", [], ["● done"] + box
+    st["prog_msg"], st["snap"] = 77, {
+        "ts": time.time(),
+        "five_hour": {"used_percentage": 100, "resets_at": time.time() + 5}}
+    st.pop("last", None), st.pop("limit_line", None)
+    real_snapshot = snapshot
+    globals()["snapshot"] = lambda p: st["snap"]
+    flush_new(cfg, state, "1", "s")
+    assert st["queue"] == ["continue"], st["queue"]
+    globals()["snapshot"] = real_snapshot
+    for k in ("queue", "limit_until", "limit_line", "prog_msg", "snap"):
         st.pop(k, None)
 
     # A banner that is merely still on screen is not a new limit: only what the
