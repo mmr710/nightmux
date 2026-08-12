@@ -1,6 +1,6 @@
 # nightmux
 
-[![tests](https://github.com/mmr79/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr79/nightmux/actions/workflows/test.yml)
+[![tests](https://github.com/mmr710/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr710/nightmux/actions/workflows/test.yml)
 
 ![nightmux — unified Telegram control for multi-agent AI workflows, quota monitoring, and automated recovery](docs/hero.jpg)
 
@@ -75,7 +75,7 @@ terminal, which is how nightmux worked before the hooks existed.
 
 **Not for you if** you want a polished app instead of a chat window, you're on
 Windows or macOS (the service install is systemd, though everything else is
-portable — [#2](https://github.com/mmr79/nightmux/issues/2)), or you want your
+portable — [#2](https://github.com/mmr710/nightmux/issues/2)), or you want your
 teammates in the same group: the allowlist is a list of people trusted with a
 shell on your machine, which is not a thing to hand out. One person, their own
 box, their own agents.
@@ -83,7 +83,7 @@ box, their own agents.
 ## Install
 
 ```bash
-pipx install git+https://github.com/mmr79/nightmux
+pipx install git+https://github.com/mmr710/nightmux
 nightmux --setup
 ```
 
@@ -91,7 +91,7 @@ or clone it, which is the version to pick if you want the source where you can
 read and edit it — there are only four files and no dependencies:
 
 ```bash
-git clone https://github.com/mmr79/nightmux ~/nightmux
+git clone https://github.com/mmr710/nightmux ~/nightmux
 python3 ~/nightmux/nightmux.py --setup
 ```
 

@@ -90,4 +90,4 @@ a compromised account or an injection would make. Verify out of band.
 Open an issue for anything that lets a **non-allowlisted** sender cause nightmux to
 type, spend tokens, or leak session output. That is the property worth
 defending. For anything sensitive, reach the maintainer through the contact on
-https://github.com/mmr79 rather than filing publicly.
+https://github.com/mmr710 rather than filing publicly.

@@ -23,9 +23,9 @@ classifiers = [
 # No dependencies, and that is a feature: see README.
 
 [project.urls]
-Homepage = "https://github.com/mmr79/nightmux"
-Changelog = "https://github.com/mmr79/nightmux/blob/main/CHANGELOG.md"
-Issues = "https://github.com/mmr79/nightmux/issues"
+Homepage = "https://github.com/mmr710/nightmux"
+Changelog = "https://github.com/mmr710/nightmux/blob/main/CHANGELOG.md"
+Issues = "https://github.com/mmr710/nightmux/issues"
 
 [project.scripts]
 nightmux = "nightmux:cli"

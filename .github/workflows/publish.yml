@@ -1,7 +1,7 @@
 # Publish to PyPI when a GitHub release is published.
 #
 # No API token anywhere: this uses PyPI Trusted Publishing (OIDC). One-time
-# setup at https://pypi.org/manage/account/publishing/ — owner mmr79, repository
+# setup at https://pypi.org/manage/account/publishing/ — owner mmr710, repository
 # nightmux, workflow publish.yml, environment left blank. Until that exists this
 # job fails at the last step and nothing else is affected.
 name: publish
