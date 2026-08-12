@@ -1175,7 +1175,7 @@ def queue_blob(state):
     """
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
-        held = {k: st[k] for k in ("queue", "limit_until") if st.get(k)}
+        held = {k: st[k] for k in ("queue", "limit_until", "sched") if st.get(k)}
         if held.get("limit_until", 0) < time.time():
             held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
@@ -1213,7 +1213,7 @@ def load_queue(state):
     for sess, held in blob.items():
         state.setdefault(sess, {}).update(held)
     _queued[0] = blob
-    return {s: h for s, h in blob.items() if h.get("queue")}
+    return {s: h for s, h in blob.items() if h.get("queue") or h.get("sched")}
 
 
 def drain(cfg, state, topic, sess):
@@ -1251,6 +1251,62 @@ def drain(cfg, state, topic, sess):
     inject(sess, spill(sess, text))
     remember(state, sess, text)
     started(cfg, state, topic, sess, None)
+
+
+DUR = re.compile(r"(\d+)\s*([dhm])")
+
+
+def parse_every(text):
+    """'4h', '90m', '1d 6h' -> seconds. Zero for anything that says no duration."""
+    return sum(int(n) * {"d": 86400, "h": 3600, "m": 60}[u]
+               for n, u in DUR.findall(text.lower()))
+
+
+def at_epoch(cfg, when, now=None):
+    """The next moment the clock reads HH:MM, or now + a duration for '+2h'.
+
+    Wall clock in the config's timezone, because "03:00" from a phone means the
+    time on the phone. A time that has already gone today means tomorrow — the
+    alternative is a prompt that fires the instant you schedule it.
+    """
+    now = now or time.time()
+    if when.startswith("+"):
+        secs = parse_every(when[1:])
+        return now + secs if secs else None
+    m = re.fullmatch(r"(\d{1,2}):?(\d{2})?", when)
+    if not m:
+        return None
+    off = cfg.get("tz_offset")
+    shift = tz_shift(off, now) if isinstance(off, str) else (off or 0) * 3600
+    local = now + shift
+    at = local - local % 86400 + int(m.group(1)) * 3600 + int(m.group(2) or 0) * 60
+    return (at + 86400 if at <= local else at) - shift
+
+
+def due(cfg, state, topic, sess):
+    """Move scheduled prompts onto the queue when their time comes.
+
+    Onto the queue rather than into the pane, so a scheduled prompt inherits
+    everything the queue already knows: it waits behind a usage-limit hold, it
+    waits for a busy pane, and it survives a restart.
+    """
+    st = state.setdefault(sess, {})
+    now, keep, fired = time.time(), [], []
+    for job in st.get("sched") or []:
+        if job["at"] > now:
+            keep.append(job)
+            continue
+        st.setdefault("queue", []).append(job["text"])
+        fired.append(job)
+        if job.get("every"):
+            # From now, not from when it was due: a daemon that was off overnight
+            # must not wake up and fire six hours of backlog in one go.
+            job["at"] = now + job["every"]
+            keep.append(job)
+    if fired:
+        st["sched"] = keep
+        send(cfg, topic, f"⏰ {sess} {len(fired)} scheduled prompt(s) queued\n"
+             + "\n".join(j["text"].splitlines()[0][:70] for j in fired), mode="plain")
 
 
 def flush_new(cfg, state, topic, sess, pane_id=None):
@@ -1449,7 +1505,8 @@ def watchdog(cfg, state, topic, sess, alive):
         # but a hold and the prompts under it are what the user is owed, not a
         # cache of the old pane. Dropping them here deleted them from disk too,
         # on the next save, in the one case they exist to survive.
-        state[sess] = {k: st[k] for k in ("queue", "limit_until") if st.get(k)}
+        state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched")
+                       if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     return alive
 
@@ -1471,6 +1528,7 @@ def watcher(cfg, state, lock):
                     if watchdog(cfg, state, topic, sess, sess in alive):
                         flush_new(cfg, state, topic, sess, alive.get(sess))
                         nudge(cfg, state, topic, sess)
+                        due(cfg, state, topic, sess)
                         drain(cfg, state, topic, sess)
                         autocompact(cfg, state, topic, sess)
                         idle_hint(cfg, state, topic, sess)
@@ -1777,7 +1835,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!model", "!effort",
-              "!bind", "!unbind", "!reload", "!autocompact", "!tz")
+              "!bind", "!unbind", "!reload", "!autocompact", "!tz", "!at", "!every")
 
 
 def writes(cfg, cmd, arg=""):
@@ -1819,6 +1877,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
                 "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
                 "!queue [clear|now] | !usage | !ctx | !cost [days] | !tz | !reload\n"
+                "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]\n"
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
                 "!autocompact <pct|off> | !idlectx <pct|off>\n"
@@ -2021,6 +2080,33 @@ def handle(cfg, state, lock, topic, text, mid=None):
         until = st.get("limit_until", 0)
         return (f"{len(q)} queued" + (f", resumes {clock(cfg, until)}"
                 if until > time.time() else "") + (f"\n{head}" if q else ""))
+    if cmd in ("!at", "!every", "!sched"):
+        now = time.time()
+    if cmd in ("!at", "!every"):
+        when, _, prompt = arg.partition(" ")
+        secs = parse_every(when) if cmd == "!every" else None
+        at = now + secs if secs else at_epoch(cfg, when)
+        if not prompt.strip() or at is None:
+            return ("usage: !at 03:00 <prompt> · !at +90m <prompt>\n"
+                    "       !every 4h <prompt>")
+        st.setdefault("sched", []).append(
+            {"at": at, "every": secs, "text": prompt})
+        save_queue(state)
+        return (f"⏰ {'every ' + when if secs else 'at ' + clock(cfg, at)}"
+                f" (first in {left(at - now)})\n{prompt.splitlines()[0][:70]}\n"
+                "!sched to list, !sched clear to drop")
+    if cmd == "!sched":
+        jobs = st.get("sched") or []
+        if arg == "clear":
+            st["sched"] = []
+            save_queue(state)
+            return f"dropped {len(jobs)} scheduled prompt(s)"
+        if not jobs:
+            return "nothing scheduled · !at 03:00 <prompt> | !every 4h <prompt>"
+        return "\n".join(
+            f"{i + 1}. {clock(cfg, j['at'])} (in {left(j['at'] - now)})"
+            + (f" every {left(j['every'])}" if j.get("every") else "")
+            + f" · {j['text'].splitlines()[0][:50]}" for i, j in enumerate(jobs))
     if cmd == "!raw":  # deliberate override of the menu guard below
         inject(sess, arg)
         remember(state, sess, arg)
@@ -2370,12 +2456,15 @@ def main():
     _warned.update(load_warned())   # a restart is not news for a window mid-flight
     for sess, held in load_queue(state).items():
         topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
-        until = held.get("limit_until", 0)
-        print(f"restored {len(held['queue'])} queued prompt(s) for {sess}", flush=True)
+        until, q, jobs = held.get("limit_until", 0), held.get("queue") or [], \
+            held.get("sched") or []
+        kept = ", ".join(([f"{len(q)} queued prompt(s)"] if q else [])
+                         + ([f"{len(jobs)} scheduled"] if jobs else []))
+        print(f"restored {kept} for {sess}", flush=True)
         if topic:
-            send(cfg, topic, f"↩️ nightmux restarted · {len(held['queue'])} queued "
-                 f"prompt(s) kept" + (f", still holding until {clock(cfg, until)}"
-                                      if until > time.time() else ""), mode="plain")
+            send(cfg, topic, f"↩️ nightmux restarted · {kept} kept"
+                 + (f", still holding until {clock(cfg, until)}"
+                    if until > time.time() else ""), mode="plain")
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
 
     # Resume where we stopped: a restart loses nothing. Kept out of the config
@@ -3015,6 +3104,35 @@ def selfcheck():
     st["limit_until"] = time.time() + 60
     assert queue_blob({"s": st})["s"]["limit_until"] > time.time()
     st.pop("limit_until")
+
+    # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
+    # and a busy pane exactly as a typed one does.
+    assert parse_every("4h") == 14400 and parse_every("1d 6h") == 108000
+    assert parse_every("no duration here") == 0
+    base = 1700000000                             # fixed instant: no clock races
+    assert at_epoch({}, "+2h", base) == base + 7200
+    nxt = at_epoch({}, "03:00", base)
+    assert 0 < nxt - base <= 86400 and time.gmtime(nxt).tm_hour == 3
+    assert at_epoch({}, "garbage", base) is None
+    st["queue"], st["sched"] = [], [
+        {"at": time.time() - 1, "every": None, "text": "one-off"},
+        {"at": time.time() - 1, "every": 3600, "text": "recurring"}]
+    due(cfg, state, "1", "s")
+    assert st["queue"] == ["one-off", "recurring"], st["queue"]
+    assert [j["text"] for j in st["sched"]] == ["recurring"]   # one-off is spent
+    assert st["sched"][0]["at"] > time.time() + 3500   # rearmed from now, so a
+    sched_n = len(sent)                                # daemon that was off does
+    due(cfg, state, "1", "s")                          # not fire a backlog at once
+    assert len(sent) == sched_n
+    assert queue_blob({"s": st})["s"]["sched"]         # and it survives a restart
+    st["queue"] = []
+    out = handle(cfg, state, threading.Lock(), "1", "!at +1h check the build")
+    assert out.startswith("⏰") and st["sched"][-1]["text"] == "check the build"
+    assert handle(cfg, state, threading.Lock(), "1", "!sched").startswith("1.")
+    assert handle(cfg, state, threading.Lock(), "1", "!at nonsense").startswith("usage:")
+    assert handle(cfg, state, threading.Lock(), "1", "!sched clear") == \
+        "dropped 2 scheduled prompt(s)"
+    st.pop("sched")
 
     # A turn cut off mid-flight has nothing left in the queue to bring it back,
     # so the hold queues its own continuation and the ordinary drain runs it.

@@ -149,6 +149,8 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!autocompact <pct\|off>` | auto-`/compact` at a context threshold |
 | `!idlectx <pct\|off>` | flag parked sessions still holding a big context |
 | `!queue [clear\|now]` | prompts held for a rate-limit reset |
+| `!at 03:00 <prompt>`, `!at +90m …` | run a prompt later |
+| `!every 4h <prompt>`, `!sched [clear]` | run it on a repeat, or list what is set |
 | `!grep <text> [days]` | search every transcript on the machine |
 | `!verbose` / `!raw <text>` / `!keys <keys>` | tool detail, type past a menu, raw tmux keys |
 | `!1`..`!9` `!y` `!n` `!esc` `!int` `!enter` `!tab` | menu picks and keys |

@@ -15,6 +15,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   the continuation itself and the existing drain sends it when the window
   reopens. `"auto_continue": false` waits for a human; any other string replaces
   `continue`.
+- `!at 03:00 <prompt>`, `!at +90m <prompt>`, `!every 4h <prompt>`, `!sched
+  [clear]` — work that starts while you are asleep. A scheduled prompt is put on
+  the queue rather than into the pane, so it inherits everything the queue
+  already knows: it waits behind a usage-limit hold, it waits for a busy pane,
+  and it survives a restart. A recurring job rearms from when it fired, not from
+  when it was due, so a daemon that was off overnight does not wake up and run
+  six hours of backlog at once.
 - `"modes": {"<topic>": "readonly"}` — a topic that reports, greps, shows usage
   and pane output, and never reaches the keyboard of the session it watches.
   Every bound topic was writable by anyone on the allowlist, which is the right
