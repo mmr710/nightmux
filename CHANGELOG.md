@@ -4,6 +4,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [semver](https://semver.org/). The public surface is the command
 names and the shape of `~/.nightmux.json` — those are what a major bump protects.
 
+## [Unreleased]
+
+### Added
+
+- A turn the usage limit cuts off now resumes itself. The prompt that started it
+  was already consumed, so the queue was empty at reset time and the session sat
+  idle until someone typed `continue` — which, for a limit that lands at 2am, was
+  the whole night. When the pane was working as the hold went on, nightmux queues
+  the continuation itself and the existing drain sends it when the window
+  reopens. `"auto_continue": false` waits for a human; any other string replaces
+  `continue`.
+
+### Fixed
+
+- A session now resolves to the pane its agent is actually in, for reads and for
+  keystrokes alike. `-t <session>` means that session's *active* pane, so a split
+  window — or a session left looking at another window — had nightmux capturing
+  one pane and typing into another: the menu never got its answer and the output
+  never moved, with nothing to say why. The pane a status-line snapshot was last
+  written from wins; without one, the active pane, as before.
+- Menu picks no longer leave the pane sitting on the question. `!1`..`!9` sent
+  the digit and assumed the dialog acted on it, which is true of Claude Code's
+  permission prompt and false of its `/model` picker, agy's trust prompt and a
+  shell's `(y/n)` — those move a highlight and wait for Enter, so the session
+  stayed parked on a menu the topic had been told was answered. The digit is now
+  followed by a look at the pane, and by Enter only if the same question is still
+  on screen. `!y`/`!n` send the digit of the matching menu option, since a
+  numbered list does not answer to the letter.
+- A banner still sitting on screen is no longer read as a fresh limit. Only the
+  lines a tick actually gained are scanned, so a resumed session cannot re-hold
+  on the banner of the window it just came out of — and a second, identically
+  worded limit is no longer swallowed by the dedup that existed for the first.
+- A prompt refused within a minute of being typed goes back on the queue whole,
+  instead of being replaced by a `continue` that would resume nothing. This is
+  also what rescues a resume that lands early because the reset time on the
+  banner was optimistic; `"limit_slack"` (default 60s) tunes how early that is.
+- A window that reopens onto a busy or blocked pane now says so, with the queue
+  depth, rather than going quiet and reading as a hold that never lifted.
+- A spent **weekly** window is now held on. Only the 5-hour window was read from
+  the status-line snapshot, and a fresh snapshot outranks the on-screen banner —
+  so a week that had run out while the 5-hour figure read healthy was seen as
+  room, and prompts were injected into a session that could only refuse them.
+  Both windows are read, and the hold runs to the later reset of the two.
+- Restarting a tmux session no longer eats the prompts held for it. The watchdog
+  rebaselines a rebuilt session by dropping its state, which is right for the
+  screen cache and wrong for the queue — the next `save_queue` then wrote the
+  loss to disk. The hold and its prompts now survive the rebuild.
+
 ## [1.1.0] — 2026-08-11
 
 ### Changed

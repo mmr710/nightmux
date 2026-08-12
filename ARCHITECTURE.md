@@ -107,6 +107,22 @@ recognise a rate-limit banner and the reset time inside it. What nightmux just t
 is remembered per session and filtered out, so the TUI's echo of your own message
 is not sent back to you.
 
+## Which pane a session means
+
+`tmux -t <session>` addresses that session's *active* pane, which is the agent's
+pane only while the agent has the focus. Split the window, or leave the session
+looking at another window, and every capture read one pane while every keystroke
+went into another — a menu that never got its answer, output that never changed,
+and nothing anywhere saying so.
+
+So a session resolves to a pane, once per watch tick: the pane its status line was
+last written from (`TMUX_PANE`, carried in the snapshot), and only failing that
+the active pane. `live_sessions` returns that pane, `_target` holds it, and
+`pane`, `visible`, `sess_cwd`, `inject` and `press` all go through `tgt()` — so
+the capture and the keystrokes cannot end up addressing two different panes.
+An agent with no status-line sidecar (agy, codex, a bare shell) still falls back
+to the active pane, which is the old behaviour and right whenever it has focus.
+
 ## Sending
 
 Telegram allows roughly 20 messages a minute to a group and **edits count**, so
@@ -128,6 +144,27 @@ until then plus a minute of slack. Held prompts go to disk immediately, so a
 restart, a reboot or a crash mid-wait loses nothing — a five-hour hold outlives
 many daemon restarts. On resume the queue drains in order and the topic is told
 what happened.
+
+The status-line snapshot outranks the banner when it is fresh, and both windows
+in it count: a spent weekly window refuses turns exactly like a spent 5-hour one,
+while the 5-hour figure beside it still reads healthy. Holding on the later of
+the two reset epochs is the only reading that does not resume into a refusal.
+
+Only the lines a tick gained are scanned for the banner. A banner that is merely
+still on screen is the limit that was already announced — and after a resume it
+is the *previous* window's, which is how a freed session used to park itself
+again. Reading the delta rather than the tail also lets the text dedup go, so a
+second limit worded exactly like the first is no longer swallowed.
+
+A limit that lands mid-turn takes the prompt with it — that prompt was already
+consumed, so an empty queue at reset time means the work stops until a human
+types `continue`. When the pane was working on the tick the hold was set,
+nightmux queues that continuation itself, and the ordinary drain sends it when the
+window reopens. `"auto_continue": false` in the config waits for a human instead;
+any other string is sent in place of `continue`. A prompt refused within a minute
+of being typed is a special case: no work came of it, so the prompt itself goes
+back on the queue rather than a `continue` that would resume nothing — which is
+also the recovery when a resume lands too early for the window that was promised.
 
 `save_queue` is behind its own lock. The watcher and every topic worker call it,
 and two threads sharing one temp path can replace a half-written file over a good

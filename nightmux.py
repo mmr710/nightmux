@@ -302,24 +302,65 @@ def has_session(sess):
         return False
 
 
+# Session name -> the pane its agent actually lives in, refreshed once per watch
+# tick. `-t <session>` means "that session's active pane", which is the agent's
+# pane only while it has the focus: split the window, or leave the session on
+# another window, and nightmux read one pane while typing into another. Nothing
+# announced that, and from Telegram it looks precisely like a hang.
+_target = {}
+
+
+def tgt(sess):
+    """What to point tmux at for this session — its agent's pane, if known."""
+    return _target.get(sess, sess)
+
+
 def pane(sess):
     """Everything the pane holds: scrollback history plus the live screen."""
-    return tmux("capture-pane", "-p", "-J", "-t", sess, "-S", "-").split("\n")
+    return tmux("capture-pane", "-p", "-J", "-t", tgt(sess), "-S", "-").split("\n")
 
 
 def visible(sess):
     """Just the on-screen rows: the cheap check before the full capture."""
-    return tmux("capture-pane", "-p", "-J", "-t", sess).split("\n")
+    return tmux("capture-pane", "-p", "-J", "-t", tgt(sess)).split("\n")
 
 
 def sess_cwd(sess):
-    return tmux("display-message", "-p", "-t", sess, "#{pane_current_path}")
+    return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
+
+
+def snapped():
+    """{pane_id: ts} for every status-line snapshot still worth trusting."""
+    out, now = {}, time.time()
+    for d in snaps():
+        p, ts = d.get("pane"), d.get("ts", 0)
+        if p and now - ts <= STATE_FRESH and ts > out.get(p, 0):
+            out[p] = ts
+    return out
 
 
 def live_sessions():
-    """{name: pane_id} for every tmux session, in one call instead of one per topic."""
-    out = tmux("list-sessions", "-F", "#{session_name}\t#{pane_id}")
-    return dict(l.split("\t", 1) for l in out.split("\n") if "\t" in l)
+    """{name: pane_id} for every tmux session, in one call instead of one per topic.
+
+    The pane is the one the agent is in — the pane its status line was last
+    written from — and only failing that the session's active pane, which is what
+    nightmux used to assume. Both the capture and the keystrokes take this, so
+    they cannot end up addressing two different panes.
+    """
+    out = tmux("list-panes", "-a", "-F",
+               "#{session_name}\t#{pane_id}\t#{pane_active}")
+    seen, active = {}, {}
+    for l in out.split("\n"):
+        f = l.split("\t")
+        if len(f) != 3:
+            continue
+        seen.setdefault(f[0], []).append(f[1])
+        if f[2] == "1":
+            active.setdefault(f[0], f[1])
+    hot = snapped()
+    return {s: max((p for p in pids if p in hot), key=lambda p: hot[p],
+                   default=active.get(s) or pids[0])
+            for s, pids in seen.items()}
 
 
 BIG_PROMPT = 2000  # past this, typing it key by key is slower and less reliable
@@ -367,19 +408,19 @@ def inject(sess, text):
     rather than sleeping a fixed guess. The old fixed sleep submitted a
     truncated prompt whenever the TUI redrew slower than 0.4s.
     """
-    args = []
+    args, at = [], tgt(sess)
     for i, line in enumerate(text.split("\n")):
         if i:  # newline inside the prompt box, not a submit
-            args += [";", "send-keys", "-t", sess, "M-Enter"]
+            args += [";", "send-keys", "-t", at, "M-Enter"]
         if line:
-            args += [";", "send-keys", "-t", sess, "-l", "--", line]
+            args += [";", "send-keys", "-t", at, "-l", "--", line]
     if not args:
         return
     tmux(*args[1:])
     if not settle(sess, text.split("\n")[-1]):
         print(f"inject {sess}: text not on screen after 2s, sending Enter anyway",
               file=sys.stderr)
-    tmux("send-keys", "-t", sess, "Enter")
+    tmux("send-keys", "-t", at, "Enter")
 
 
 # ---------- output watcher ----------
@@ -438,6 +479,7 @@ PROG_LINES = 14
 NUDGE_AFTER = 600   # an unanswered prompt blocks the session: remind after this
 NUDGE_EVERY = 1800  # then keep one message current instead of posting more
 LIMIT_SLACK = 60    # resume this long after the stated reset, never before
+REFUSED_FAST = 60   # a prompt refused this soon after being typed did no work
 IDLE_AFTER = 300    # nothing moving anywhere for this long -> poll lazily
 IDLE_POLL = 10
 
@@ -468,6 +510,22 @@ def notified(sess):
         return False
 
 
+def snaps():
+    """Every status-line snapshot on disk, unfiltered and in no useful order."""
+    try:
+        names = os.listdir(STATE_DIR)
+    except OSError:
+        return
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(STATE_DIR, n)) as f:
+                yield json.load(f)
+        except (OSError, ValueError):
+            continue
+
+
 def snapshot(pane):
     """Freshest status-line snapshot written from this tmux pane, or None.
 
@@ -478,18 +536,7 @@ def snapshot(pane):
     best, now = None, time.time()
     if not pane:
         return None
-    try:
-        names = os.listdir(STATE_DIR)
-    except OSError:
-        return None
-    for n in names:
-        if not n.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(STATE_DIR, n)) as f:
-                d = json.load(f)
-        except (OSError, ValueError):
-            continue
+    for d in snaps():
         if d.get("pane") != pane or now - d.get("ts", 0) > STATE_FRESH:
             continue
         if not best or d["ts"] > best["ts"]:
@@ -749,20 +796,35 @@ def left(secs):
     return f"{secs // 3600}h {secs % 3600 // 60}m" if secs >= 3600 else f"{secs // 60}m"
 
 
-def check_limit(cfg, st, topic, sess, scr, fresh):
+def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     """Hold prompts until the usage window resets.
 
     The status-line snapshot carries the exact percentage and reset epoch, and
     outranks the screen: a pane keeps showing a banner long after it stopped
     being true, and one that merely scrolled past was never a live state at all.
+
+    Both windows count. A spent weekly one refuses turns exactly like a spent
+    5-hour one, and while it does, the 5-hour figure reads healthy — reading
+    only that declared room where there was none and injected prompts into a
+    session that could not take them.
     """
     snap = st.get("snap") or {}
-    fh = window(snap, "five_hour") or {}   # a window that already reset says nothing
-    if (time.time() - snap.get("ts", 0) < USAGE_FRESH and fh.get("resets_at")):
-        if (fh.get("used_percentage") or 0) < 100:
+    # `scr` is what appeared since the last tick, not the whole screen: a banner
+    # that is merely still on screen is the same limit, already announced, and
+    # after a resume it is the *previous* window's — holding on it again would
+    # park a session that had just been freed.
+    # A window that already reset says nothing; one with no reset epoch cannot
+    # be held on, so neither is evidence either way.
+    live = [(w, lbl) for key, lbl in (("five_hour", "5-hour"), ("seven_day", "weekly"))
+            for w in [window(snap, key) or {}] if w.get("resets_at")]
+    if time.time() - snap.get("ts", 0) < USAGE_FRESH and live:
+        spent = [(w["resets_at"], lbl) for w, lbl in live
+                 if (w.get("used_percentage") or 0) >= 100]
+        if not spent:
             st.pop("limit_line", None)   # sidecar says there is room; screen cannot argue
             return
-        hit, at = "5-hour window spent", fh["resets_at"]
+        at, lbl = max(spent)   # both spent: the later reset is the one that frees it
+        hit = f"{lbl} window spent"
     elif fresh:
         return  # a restart sees the whole scrollback as new; old banners are not news
     else:
@@ -782,11 +844,26 @@ def check_limit(cfg, st, topic, sess, scr, fresh):
         send(cfg, topic, f"⚠️ {sess} hit a usage limit\n{hit}\n"
              "no reset time on screen — prompts are NOT queued", mode="plain")
         return
-    st["limit_until"] = until = at + LIMIT_SLACK
+    st["limit_until"] = until = at + cfg.get("limit_slack", LIMIT_SLACK)
+    # A turn cut off mid-flight took its prompt with it: that prompt was already
+    # consumed, so an empty queue at reset time means the work simply stops and
+    # waits for a human to type "continue". Queue the continuation here and the
+    # ordinary drain runs it the moment the window reopens. Set
+    # "auto_continue": false to go back to waiting, or to another string to send
+    # something other than `continue`.
+    cont = busy and cfg.get("auto_continue", "continue")
+    if cont:
+        # Refused within the minute it was typed, though, and no work came of it
+        # — resuming that with `continue` would continue nothing. The prompt
+        # itself goes back, which is also what saves a resume that lands early
+        # because the reset time on the banner was optimistic.
+        if st.get("last") and time.time() - st.get("last_at", 0) < REFUSED_FAST:
+            cont = st["last"]
+        st.setdefault("queue", []).insert(0, cont)
     send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
-         f"resumes {clock(cfg, until)} "
-         f"(in {left(until - time.time())}) — anything you send is queued",
-         mode="plain")
+         f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
+         + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
+            else "anything you send is queued"), mode="plain")
 
 
 WARN_AT = (80, 90)   # say something before the wall, not at it
@@ -1107,11 +1184,21 @@ def drain(cfg, state, topic, sess):
         # flagged as limited for good, and leave the topic with no word at the
         # time nightmux promised one — which reads as a hold that never lifted.
         st.pop("limit_until", None)
-        if st.get("queue"):
-            st["resumed"] = True     # the send below says "resumed", not "sending"
-        else:
+        # The banner that set this hold described the window that just ended, so
+        # it stops being the reason to suppress the next one.
+        st.pop("limit_line", None)
+        if not st.get("queue"):
             send(cfg, topic, f"▶️ {sess} usage window reset · nothing was queued",
                  mode="plain")
+        elif st.get("mode") != "idle":
+            # The window is open and the queue still cannot move, which from the
+            # topic looks exactly like a hold that never lifted. Say which it is.
+            send(cfg, topic, f"▶️ {sess} usage window reset · {len(st['queue'])} "
+                 f"queued, but the pane is {st.get('mode', 'busy')} — sending "
+                 "as soon as it is free", mode="plain")
+            st["resumed"] = True
+        else:
+            st["resumed"] = True     # the send below says "resumed", not "sending"
     q = st.get("queue")
     if not q or st.get("mode") != "idle" or time.time() < st.get("limit_until", 0):
         return
@@ -1145,6 +1232,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     scr = visible(sess)
     if not fresh and not gained and scr == st.get("scr") and st["prev"] == st["sent"]:
         return  # nothing moved anywhere and nothing is pending: skip the big capture
+    prev_scr = st.get("scr") or []   # what check_limit must not read as news
     st["scr"] = scr
     lines = pane(sess)
     for k, v in (("sent", lines), ("prev", lines), ("changed", time.time())):
@@ -1152,8 +1240,11 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     stable, changed = lines == st["prev"], lines != st["sent"]
     if not stable:
         st["prev"], st["changed"] = lines, time.time()
+    was_busy = st.get("mode") == "busy"   # a turn was in flight on the last tick
     st["mode"] = pane_state(scr)
-    check_limit(cfg, st, topic, sess, scr, fresh)
+    seen = set(prev_scr)
+    check_limit(cfg, st, topic, sess, [l for l in scr if l not in seen], fresh,
+                was_busy or st["mode"] == "busy")
     warn_usage(cfg, st, topic, sess)
     warn_ctx(cfg, st, topic, sess)
     if st["mode"] == "waiting":
@@ -1300,8 +1391,11 @@ def watchdog(cfg, state, topic, sess, alive):
         st["dead"] = True
         send(cfg, topic, f"💀 tmux session '{sess}' is gone", mode="plain")
     elif alive and st.get("dead"):
-        st["dead"] = False
-        state.pop(sess, None)  # rebuilt session: rebaseline instead of dumping it
+        # Rebuilt session: rebaseline instead of dumping its whole scrollback —
+        # but a hold and the prompts under it are what the user is owed, not a
+        # cache of the old pane. Dropping them here deleted them from disk too,
+        # on the next save, in the one case they exist to survive.
+        state[sess] = {k: st[k] for k in ("queue", "limit_until") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     return alive
 
@@ -1316,6 +1410,7 @@ def watcher(cfg, state, lock):
             with lock:
                 bound = list(cfg["topics"].items())
             alive = live_sessions()   # one tmux call for every topic's liveness
+            _target.update(alive)     # captures and keystrokes share one pane
             pruned = prune(time.time(), pruned)
             for topic, sess in bound:
                 try:
@@ -1345,8 +1440,49 @@ def watcher(cfg, state, lock):
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
         "!down": "Down", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
-# Numbered menu picks: the dialog acts on the digit alone, no Enter.
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
+
+# The dialogs disagree about Enter. Claude Code's permission prompt acts on the
+# digit alone; its /model picker and agy's trust prompt only move a highlight and
+# wait for Enter; a shell's (y/n) needs Enter after the letter. Assuming any one
+# of those rules leaves the pane parked on a menu the topic was told had been
+# answered — the commonest way nightmux looks hung. So send the key, look at the
+# pane, and add Enter only when the same question is still sitting there.
+CONFIRM_AFTER = 1.5   # how long the TUI gets to act on the key by itself
+# A numbered menu does not answer to "y": Claude Code's permission prompt is a
+# list, and the letter goes nowhere. Take the digit of the matching option.
+YES_NO = {"!y": re.compile(r"^ye?s?\b", re.I), "!n": re.compile(r"^no\b", re.I)}
+
+
+def dialog_id(lines):
+    """The question, ignoring which of its options is highlighted."""
+    return re.sub(r"[❯>\s]", "", prompt_key(lines))
+
+
+def menu_digit(lines, want):
+    """The digit of the first menu option whose label matches `want`."""
+    for l in lines[-25:]:
+        m = MENU.match(l)
+        if m and want.match(m.group(2).strip()):
+            return m.group(1)
+    return None
+
+
+def press(sess, key, confirm=False):
+    """Send one key, then Enter only if the pane plainly did not act on it."""
+    before = visible(sess)
+    tmux("send-keys", "-t", tgt(sess), key)
+    if not confirm:
+        return
+    end = time.time() + CONFIRM_AFTER
+    while time.time() < end:
+        time.sleep(0.25)
+        scr = visible(sess)
+        # Gone, working, or asking something else: the key was enough, and an
+        # Enter now would answer a question nobody has read yet.
+        if pane_state(scr) != "waiting" or dialog_id(scr) != dialog_id(before):
+            return
+    tmux("send-keys", "-t", sess, "Enter")
 
 # Telegram autocompletes registered bot commands when you type "/", which is
 # the only autocomplete a bot can offer. Two registers share that one menu:
@@ -1407,6 +1543,9 @@ def remember(state, sess, text):
     """
     st = state.setdefault(sess, {})
     st["echo"] = {l.strip() for l in text.split("\n") if l.strip()}
+    # ...and what it was, for the case where the window refuses it outright: a
+    # prompt that got no turn out of the window has to go back in the queue.
+    st["last"], st["last_at"] = text, time.time()
     st["changed"] = time.time()
 
 
@@ -1771,10 +1910,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!keys":
         if not arg:
             return "usage: !keys <tmux key names>"
-        tmux("send-keys", "-t", sess, *arg.split())
+        tmux("send-keys", "-t", tgt(sess), *arg.split())
         return None
     if cmd in KEYS:
-        tmux("send-keys", "-t", sess, KEYS[cmd])
+        key = KEYS[cmd]
+        if cmd in YES_NO:
+            key = menu_digit(visible(sess), YES_NO[cmd]) or key
+        press(sess, key, confirm=cmd in YES_NO or cmd[1:].isdigit())
         return None
     st = state.setdefault(sess, {})
     if cmd == "!queue":
@@ -2230,6 +2372,23 @@ def selfcheck():
     # clean one through untested — the timeout path is what is being checked.
     assert "timed out after 1s" in run("sleep", "5", timeout=1)
     assert run("echo", "hi") == "hi"
+
+    # Which pane a session means. The agent is wherever its status line was last
+    # written from, which is not always the pane holding the focus — and reading
+    # one pane while typing into another is indistinguishable from a hang.
+    real_tmux, real_snapped = tmux, snapped
+    globals()["tmux"] = lambda *a: "api\t%1\t0\napi\t%2\t1\nweb\t%9\t1"
+    globals()["snapped"] = lambda: {"%1": 100.0}
+    assert live_sessions() == {"api": "%1", "web": "%9"}   # sidecar beats focus
+    globals()["snapped"] = lambda: {"%1": 100.0, "%2": 200.0}
+    assert live_sessions()["api"] == "%2"                  # two agents: the newer
+    globals()["snapped"] = lambda: {}
+    assert live_sessions() == {"api": "%2", "web": "%9"}   # none: the active pane
+    globals()["tmux"], globals()["snapped"] = real_tmux, real_snapped
+    assert tgt("api") == "api"        # never seen: the session name, as before
+    _target["api"] = "%2"
+    assert tgt("api") == "%2"
+    _target.clear()
 
     globals()["CFG_PATH"] = os.path.join(FILE_DIR, "selfcheck.json")
     globals()["OFFSET_PATH"] = os.path.join(FILE_DIR, "selfcheck.offset")
@@ -2697,6 +2856,12 @@ def selfcheck():
     st["snap"]["five_hour"]["used_percentage"] = 100   # ... and when it is spent
     check_limit(cfg, st, "1", "s", screen, False)
     assert sent[-1].startswith("⏸ s hit the usage limit") and st["limit_until"]
+    st.pop("limit_until"), st.pop("limit_line")   # a spent week, a healthy 5h:
+    st["snap"] = {"ts": time.time(),              # the week is what refuses turns
+                  "five_hour": {"used_percentage": 10, "resets_at": time.time() + 99},
+                  "seven_day": {"used_percentage": 100, "resets_at": time.time() + 999}}
+    check_limit(cfg, st, "1", "s", screen, False)
+    assert "weekly window spent" in sent[-1] and st["limit_until"] > time.time() + 900
     st.pop("snap"), st.pop("limit_until"), st.pop("limit_line")
     flush_new(cfg, state, "1", "s")               # no sidecar: the screen decides
     assert sent[-1].startswith("⏸ s hit the usage limit") and "resumes" in sent[-1], sent[-1]
@@ -2722,7 +2887,8 @@ def selfcheck():
     assert sent[-2].startswith("▶️ s resumed") and "limit_until" not in st
     assert sent[-1].startswith("⚙️ s")           # then the live trace for that turn
     assert st["queue"] == [] and st["prog_msg"] == 77   # live trace opened for it
-    st.pop("prog_msg"), st.pop("limit_line")
+    assert "limit_line" not in st   # the ended window's banner suppresses nothing
+    st.pop("prog_msg")
 
     # A window that resets with nothing queued must still clear the hold and say
     # so. The silent version left the session flagged as limited for good, and
@@ -2738,6 +2904,66 @@ def selfcheck():
     st["limit_until"] = time.time() + 60
     assert queue_blob({"s": st})["s"]["limit_until"] > time.time()
     st.pop("limit_until")
+
+    # A turn cut off mid-flight has nothing left in the queue to bring it back,
+    # so the hold queues its own continuation and the ordinary drain runs it.
+    st["mode"], st["queue"], typed[:] = "busy", [], []
+    st.pop("last", None)                          # nothing typed just before it
+    st["snap"] = {"ts": time.time(),
+                  "five_hour": {"used_percentage": 100, "resets_at": time.time() + 5}}
+    check_limit(cfg, st, "1", "s", screen, False, True)
+    assert st["queue"] == ["continue"] and "resuming itself" in sent[-1], sent[-1]
+    st["mode"], st["limit_until"] = "idle", time.time() - 1
+    drain(cfg, state, "1", "s")
+    assert typed == ["continue"] and st["queue"] == [], typed
+    st.pop("limit_line", None), st.pop("prog_msg", None)
+    st["queue"] = []                              # an idle session had no turn to
+    check_limit(cfg, st, "1", "s", screen, False, False)   # resume: left alone
+    assert st["queue"] == [] and st["limit_until"] > time.time()
+    st.pop("limit_until"), st.pop("limit_line")
+    # A prompt refused the moment it was typed did no work: it goes back whole,
+    # rather than a `continue` that would resume nothing.
+    st["mode"], st["queue"] = "busy", []
+    st["last"], st["last_at"] = "the refused prompt", time.time()
+    check_limit(cfg, st, "1", "s", screen, False, True)
+    assert st["queue"] == ["the refused prompt"], st["queue"]
+    # ...and a window that reopens onto a pane that cannot take it says so, once,
+    # instead of looking like a hold that never lifted.
+    st["mode"], st["limit_until"], n = "busy", time.time() - 1, len(sent)
+    drain(cfg, state, "1", "s")
+    assert "1 queued, but the pane is busy" in sent[-1], sent[-1]
+    drain(cfg, state, "1", "s")
+    assert len(sent) == n + 1 and st["queue"] == ["the refused prompt"]
+    for k in ("snap", "queue", "last", "last_at", "resumed", "limit_line"):
+        st.pop(k, None)
+
+    # A banner that is merely still on screen is not a new limit: only what the
+    # tick actually gained is evidence, or every resume re-holds on its own past.
+    st["mode"], screen[:] = "idle", ["You've hit your 5-hour limit · resets in 1h 0m"]
+    flush_new(cfg, state, "1", "s")                # first sight: a real hold
+    assert st["limit_until"] > time.time() and st.get("queue") is None
+    st.pop("limit_until")
+    flush_new(cfg, state, "1", "s")                # same screen, nothing gained
+    assert "limit_until" not in st
+    st.pop("limit_line", None)
+
+    # Menus disagree about Enter, so the answer is checked rather than assumed.
+    real_tmux, keys = tmux, []
+    globals()["tmux"] = lambda *a: keys.append(a[-1])
+    globals()["CONFIRM_AFTER"] = 0.3
+    screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    assert menu_digit(screen, YES_NO["!y"]) == "1"    # "y" would go nowhere here
+    assert menu_digit(screen, YES_NO["!n"]) == "2"
+    press("s", "1", confirm=True)                 # menu still up: the digit alone
+    assert keys == ["1", "Enter"], keys            # only moved the highlight
+    calls, keys[:] = [], []
+    globals()["visible"] = lambda s: (calls.append(1), list(screen) if len(calls) < 2
+                                      else ["● done", "esc to interrupt"])[1]
+    press("s", "1", confirm=True)                 # the dialog acted on the digit:
+    assert keys == ["1"], keys                     # a stray Enter would answer the
+    globals()["visible"] = lambda s: list(screen)  # next question for you
+    globals()["tmux"] = real_tmux
+    screen[:] = ["● done"] + box                  # back to an idle pane
 
     handle(cfg, state, threading.Lock(), "1", "another one", mid=555)  # prompt ticked
     assert ("setMessageReaction", 555) in [(m, k.get("message_id")) for m, k in edits]
@@ -2815,8 +3041,11 @@ def selfcheck():
     n = len(sent)
     watchdog(cfg, state, "1", "s", False)         # dead stays quiet after the first
     assert len(sent) == n
+    state["s"].update(queue=["held"], limit_until=time.time() + 60, scr=["junk"])
     watchdog(cfg, state, "1", "s", True)
-    assert "↩️" in sent[-1] and "s" not in state   # rebaselined, no history dump
+    assert "↩️" in sent[-1] and "scr" not in state["s"]   # rebaselined, no dump
+    assert state["s"]["queue"] == ["held"]        # ...but the hold is not a cache
+    state.pop("s")
     globals()["live_sessions"] = lambda: {}
     assert "💀 gone" in status_report({"topics": {"2": "gone"}}, {})
 

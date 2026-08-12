@@ -51,6 +51,9 @@ on them:
 - `/compact` automatically at a context threshold you set (`!autocompact 70`)
 - a prompt sent during a rate limit is **held**, not lost — and replayed when the
   window resets, surviving daemon restarts and reboots
+- a turn the limit cut off **resumes itself** when the window reopens, so an
+  overnight run does not stall on a `continue` nobody was awake to type
+  (`"auto_continue": false` to wait for a human instead)
 - `!ctx` shows what is actually filling the window; `!cost` weighs a session or
   every project by token type
 - parked sessions still holding a big context get flagged, because resuming one
@@ -149,6 +152,11 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!grep <text> [days]` | search every transcript on the machine |
 | `!verbose` / `!raw <text>` / `!keys <keys>` | tool detail, type past a menu, raw tmux keys |
 | `!1`..`!9` `!y` `!n` `!esc` `!int` `!enter` `!tab` | menu picks and keys |
+
+A pick is checked, not assumed: `!1` sends the digit, looks at the pane, and adds
+Enter only if the same question is still there — dialogs disagree about whether a
+digit confirms or only moves the highlight. `!y`/`!n` answer a numbered menu with
+the digit of its Yes/No option, because the letter does nothing to a list.
 | `!version` | build, python, and which hooks are wired |
 | `!tz <zone>` / `!reload` / `!log` / `!help` | timezone, re-read config, journal, this list |
 
@@ -197,6 +205,7 @@ hook scripts). No framework, no fixtures — asserts that fail loudly.
   "projects_root": "~/code",
   "tz_offset": "Africa/Cairo",
   "autocompact": 70,
+  "auto_continue": "continue",
   "poll": 2
 }
 ```
