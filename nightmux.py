@@ -796,6 +796,11 @@ def left(secs):
     return f"{secs // 3600}h {secs % 3600 // 60}m" if secs >= 3600 else f"{secs // 60}m"
 
 
+def undetail(line):
+    """A quoted output line with its ⎿ marker and indent taken off the front."""
+    return re.sub(r"^\s*⎿\s*", "", line)
+
+
 def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     """Hold prompts until the usage window resets.
 
@@ -830,8 +835,13 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     else:
         # DETAIL lines are quoted output — "⎿ Error during compaction: You've hit
         # your monthly spend limit" is a report of a past failure, not the banner.
-        hit = next((l for l in scr[-12:]
-                    if not DETAIL.match(l) and LIMIT_HIT.search(l)), None)
+        # The live refusal arrives as a ⎿ line too, though, being the result of
+        # the turn it refused, so dropping all of them made a spend cap invisible
+        # on every pane the sidecar's windows do not cover. What separates them is
+        # position: a quoted error puts its own words in front, an announcement
+        # starts with the banner.
+        hit = next((l for l in scr[-12:] if LIMIT_HIT.search(l) and (
+            not DETAIL.match(l) or LIMIT_HIT.match(undetail(l)))), None)
         if not hit:
             return
         hit, at = hit.strip(), parse_reset("\n".join(scr[-12:]))
@@ -2860,6 +2870,15 @@ def selfcheck():
                  "  ⎿  Error during compaction: You've hit your monthly limit"] + box
     flush_new(cfg, state, "1", "s")
     assert len(sent) == n and "limit_line" not in st, sent[-1]
+    # ...but the live refusal is quoted the same way, with nothing in front of it.
+    # This is what a spend cap actually looks like on screen, and skipping every
+    # ⎿ line meant no pane without a sidecar window ever saw one.
+    screen[:] = ["● done", "  ⎿  You've hit your monthly spend limit."] + box
+    flush_new(cfg, state, "1", "s")
+    assert sent[-1].startswith("⚠️ s hit a usage limit") and "NOT queued" in sent[-1]
+    assert "limit_until" not in st                # no reset time: warn, never hold
+    st.pop("limit_line")
+    n = len(sent)                                 # that warning re-baselines this
     screen[:] = ["● done", "You've hit your 5-hour limit · resets in 1h 0m"] + box
     st["snap"] = {"ts": time.time(),              # sidecar outranks a stale screen
                   "five_hour": {"used_percentage": 40, "resets_at": time.time() + 99}}
