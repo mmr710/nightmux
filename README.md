@@ -6,22 +6,32 @@
 
 **Your night crew, on Telegram.**
 
+```
+02:14  ⏸ api hit the usage limit
+       5-hour window spent — resumes 04:11, resuming itself with 'continue'
+04:11  ▶️ api resumed · sending queued prompt
+04:11  ⚙️ api
+```
+
+A usage limit at 2am used to end the night. The turn dies mid-refactor, the
+prompt that started it is already spent, and the session sits there until
+someone awake types `continue`. nightmux reads the reset time, holds everything
+you send, and puts the work back the moment the window reopens — including the
+turn the limit cut off. You read the result at breakfast.
+
+That is the part nobody else is doing. The rest is what makes it usable:
+
 Run **Claude Code from your phone** — or Codex, Gemini, aider, anything with a
-prompt. nightmux is a Telegram bot that drives real tmux sessions on your own
-machine: one forum topic per project, one tmux session behind it. Text you send
-is typed into that session's prompt; what the session says comes back to the
-topic.
+prompt. One Telegram forum topic per project, one tmux session behind it. Text
+you send is typed into that session's prompt; what the session says comes back
+to the topic. Approvals arrive as tap buttons.
 
-Built for sessions that run for hours rather than minutes: nightmux watches the
-context window and the rate-limit clock, compacts before the wall, and holds a
-prompt through a five-hour lockout instead of losing it.
+No container, no DNS, no certificates, no ports open, no relay service. It
+attaches to tmux sessions you already have, on the machine you already use.
+Python stdlib only — one file, ~3,400 lines you can read in an afternoon.
 
-Claude Code, Codex, Gemini, aider, or anything else that runs in a terminal.
-Python stdlib only — no dependencies, no relay server, ~2800 lines you can read
-in an afternoon.
-
-<!-- TODO: 30s screen recording — phone driving a real session, ending on an
-     approval prompt answered from the buttons. -->
+<!-- TODO: 30s screen recording — the ⏸ / ▶️ pair above, on a real phone, then a
+     permission prompt answered from the buttons. -->
 
 ```
    Telegram group (Topics on)          your machine
@@ -44,23 +54,24 @@ you don't run. Both work. Neither leaves you with a terminal session.
 nightmux is the third shape — it drives the session you would have started
 yourself:
 
-**It manages spend, not just messages.** A status-line sidecar gives nightmux the
-real context percentage and the real 5-hour / 7-day limit windows, so it can act
-on them:
+**It works the hours you don't.** A status-line sidecar gives nightmux the real
+context percentage and the real 5-hour / 7-day limit windows, so it can act on
+them instead of discovering them:
 
-- `/compact` automatically at a context threshold you set (`!autocompact 70`)
-- a prompt sent during a rate limit is **held**, not lost — and replayed when the
-  window resets, surviving daemon restarts and reboots
-- a turn the limit cut off **resumes itself** when the window reopens, so an
-  overnight run does not stall on a `continue` nobody was awake to type
+- a turn the limit cut off **resumes itself** when the window reopens
   (`"auto_continue": false` to wait for a human instead)
+- a prompt sent during a lockout is **held**, not lost — replayed when the window
+  resets, surviving daemon restarts and reboots
+- a prompt refused before it ever got a turn goes back on the queue whole
+- `!at 03:00 <prompt>` and `!every 4h <prompt>` start work while you are asleep —
+  and they queue rather than type, so they wait behind a lockout too
+- `/compact` automatically at a context threshold you set (`!autocompact 70`)
+- warnings at 80% and 90% of a window, before the wall rather than at it
 - `!ctx` shows what is actually filling the window; `!cost` weighs a session or
   every project by token type
-- parked sessions still holding a big context get flagged, because resuming one
-  pays for that context on every turn
 
-Long-running agent sessions cost money in a way chat does not. That is the part
-nobody else is watching.
+Long-running agent sessions cost money and stall in ways chat never does. That is
+the part nobody else is watching.
 
 **It attaches to sessions instead of owning them.** nightmux types into tmux. The
 session is still yours — SSH in, attach, type directly, and the bot keeps working
