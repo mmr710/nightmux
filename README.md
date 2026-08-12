@@ -2,6 +2,8 @@
 
 [![tests](https://github.com/mmr79/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr79/nightmux/actions/workflows/test.yml)
 
+![nightmux — unified Telegram control for multi-agent AI workflows, quota monitoring, and automated recovery](docs/hero.jpg)
+
 **Your night crew, on Telegram.**
 
 Run **Claude Code from your phone** — or Codex, Gemini, aider, anything with a
