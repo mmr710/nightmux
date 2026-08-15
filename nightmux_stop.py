@@ -65,11 +65,19 @@ def main():
         return
     os.makedirs(nightmux.HOOK_DIR, exist_ok=True)
     open(os.path.join(nightmux.HOOK_DIR, sess), "w").close()  # claim delivery
-    if tailed(payload.get("session_id")):
-        return  # nightmux reads the same transcript, and reports the tool trace too
     text = last_assistant_text(payload.get("transcript_path", ""))
     if text:
+        if tailed(payload.get("session_id")):
+            return  # nightmux reads the same transcript, and reports the tool trace too
         nightmux.send(cfg, topic, f"✅ {sess}\n{text}", mode="md")
+    else:
+        # The turn ended and said nothing: /compact, /clear, an interrupt. Both
+        # delivery paths key off assistant text, so both stayed silent and the topic
+        # kept showing ⚙️ over a pane that was already idle and waiting. That is
+        # indistinguishable from a hang, and it is the whole of "I send and get no
+        # reply". Closing the turn costs one line and removes the ambiguity.
+        nightmux.send(cfg, topic, f"✅ {sess} · turn ended with no message "
+                      "(slash command or interrupt) — pane is free", mode="plain")
 
 
 def selfcheck():

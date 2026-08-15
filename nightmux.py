@@ -447,11 +447,32 @@ CHROME = re.compile(
 # what ran. !verbose brings all of it back.
 DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thought for)")
 # The pane is asking for a keypress and will sit there forever until it gets one.
-WAITING = re.compile(r"[❯>]\s*\d[.)]|\b\d\.\s*(?:Yes|No)\b|Do you want|\(y/n\)"
-                     r"|Press Enter to continue|Continue\?"
-                     r"|Navigate ·|enter Confirm|Requesting permission|Do you trust")
+# A dialog owns its line: the option or the question starts it, give or take the
+# box border. Matching these anywhere turned ordinary output into a phantom menu —
+# a results table cell reading ">0.75" is not menu option "0.", and a pane that
+# prints one is not waiting for anything. The pane then sat "waiting" forever,
+# swallowing typed text and nudging about an answer nobody owed.
+WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
+                     r"[❯>]\s*\d[.)]\s"          # ❯ 1. Yes
+                     r"|\d[.)]\s*(?:Yes|No)\b"    # 1. Yes / 2. No
+                     r"|Do you want\b"
+                     r"|Do you trust\b"
+                     r"|Continue\?"
+                     r"|Press Enter to continue"
+                     r"|Requesting permission"
+                     r")"
+                     # Footer hints, unambiguous wherever they land on the line.
+                     r"|\(y/n\)|Navigate ·|enter Confirm", re.M)
 # Mid-turn: these footers only render while the agent is working.
-BUSY = re.compile(r"esc to (?:interrupt|cancel)|Brewing|Thinking…|Running…|Running\.\.\.")
+# Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
+# Perusing… — so matching the word list caught almost nothing and read a working
+# pane as idle: no live trace, and drain() firing a queued prompt into a busy pane.
+# The shape is what is stable: a glyph, one gerund ending in …, then a timer.
+# "✻ Cogitated for 14m 21s" is past tense and deliberately does not match — that
+# line is what a *finished* turn leaves on screen.
+BUSY = re.compile(r"esc to (?:interrupt|cancel)"
+                  r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
+                  r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
 MENU = re.compile(r"^\s*[│┃]?\s*[❯>]?\s*(\d)[.)]\s+(\S.*?)\s*[│┃]?$")
 # The usage-limit banner. Phrasing lifted from Claude Code's own detector, so it
@@ -1489,6 +1510,13 @@ def nudge(cfg, state, topic, sess):
     if not since or now - since < NUDGE_AFTER or now - last < NUDGE_EVERY:
         return
     st["nudged"] = now
+    # Which line put the pane in `waiting` — the one fact needed to tell a real
+    # unanswered dialog from a pattern matching ordinary output, and the one fact
+    # a screen that has since scrolled can no longer supply. Twice this has been
+    # the difference between a bug and correct behaviour nobody could confirm.
+    cause = next((l.strip() for l in visible(sess)[-25:] if WAITING.search(l)), "?")
+    print(f"nudge {sess}: waiting {int((now - since) / 60)}m on {cause[:120]!r}",
+          file=sys.stderr, flush=True)
     text = f"⏰ {sess} has been waiting {int((now - since) / 60)}m for an answer"
     buttons = menu_buttons(visible(sess))
     if st.get("nudge_msg"):  # edit: no new message in the topic, no second buzz
