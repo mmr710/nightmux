@@ -1,0 +1,7 @@
+● Kicked the long build off in the background.
+  Bash(make all)
+  ⎿  Running… (7m · timeout 20m)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  user@host:/srv/project  ⛏ 5.4M

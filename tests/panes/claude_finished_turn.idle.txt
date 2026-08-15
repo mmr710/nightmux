@@ -1,0 +1,8 @@
+✻ Cogitated for 14m 21s · 2 shells still running
+❯ /compact
+  ⎿  Compacted (ctrl+o to see full summary)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  user@host:/srv/project  ⛏ 5.4M
+  ⏵⏵ accept edits on · 2 shells

@@ -1,0 +1,4 @@
+  Apply this change to src/parser.py?
+  ❯ 1. Yes, allow this tool
+    2. No, suggest changes
+  Navigate · enter Confirm

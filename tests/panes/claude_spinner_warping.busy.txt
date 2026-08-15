@@ -1,0 +1,9 @@
+● Read the config and worked out what changed.
+● Bash(python3 -m pytest tests/ -q)
+  ⎿  12 passed in 3.4s
+✶ Warping… (50s · ↓ 3.4k tokens)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  user@host:/srv/project  ⛏ 5.4M
+  ⏵⏵ accept edits on (shift+tab to cycle)

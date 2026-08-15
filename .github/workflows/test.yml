@@ -32,6 +32,13 @@ jobs:
             python "$f" --selfcheck
           done
 
+      # The pane classifier reads TUIs that change without notice, and a wrong
+      # answer is silent: a busy pane read as idle takes a queued prompt mid-turn,
+      # an idle one read as waiting swallows what the user types. Every case in
+      # the corpus is a fault that reached a user first.
+      - name: pane corpus
+        run: python tests/test_panes.py
+
       # The pitch is "clone and run, no dependencies". A stray import should fail
       # here rather than in somebody's install. One version is enough to catch it.
       - name: stdlib only

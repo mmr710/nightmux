@@ -1,0 +1,9 @@
+● Pipeline finished; only the print line failed.
+  Bash(timeout 900 python3 prof.py > /tmp/out.txt)
+  ⎿  Running… (36s · timeout 10m)
+     (ctrl+b ctrl+b (twice) to run in background)
+* Puzzling… (5m 47s · ↓ 4.5k tokens)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  user@host:/srv/project  ⛏ 5.4M

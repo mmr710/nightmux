@@ -202,6 +202,11 @@ restart, how output is chosen, and the decisions that were rejected.
 Run the tests: `python3 nightmux.py --selfcheck` (and the same flag on the three
 hook scripts). No framework, no fixtures — asserts that fail loudly.
 
+`python3 tests/test_panes.py` runs the pane corpus: captured terminal screens and
+the state nightmux must read from each. Adding an agent whose TUI it misreads is
+one file — drop the pane in `tests/panes/` as `<what>.<busy|idle|waiting>.txt` and
+the classifier is held to it from then on.
+
 ## Config
 
 `~/.nightmux.json`, mode `0600`, written by setup:
