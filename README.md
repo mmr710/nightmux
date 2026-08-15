@@ -1,6 +1,8 @@
 # nightmux
 
 [![tests](https://github.com/mmr710/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr710/nightmux/actions/workflows/test.yml)
+[![Telegram](https://img.shields.io/badge/Telegram-Community-blue.svg?logo=telegram)](https://t.me/+SGmmExdMHTQ3OWVk)
+[![PyPI](https://img.shields.io/pypi/v/nightmux.svg)](https://pypi.org/project/nightmux/)
 
 ![nightmux — unified Telegram control for multi-agent AI workflows, quota monitoring, and automated recovery](docs/hero.jpg)
 
@@ -93,6 +95,13 @@ box, their own agents.
 
 ## Install
 
+Install from PyPI (recommended):
+```bash
+pipx install nightmux
+nightmux --setup
+```
+
+Or install the latest development version directly from GitHub:
 ```bash
 pipx install git+https://github.com/mmr710/nightmux
 nightmux --setup
