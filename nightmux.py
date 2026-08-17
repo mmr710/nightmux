@@ -535,6 +535,9 @@ def notified(sess):
         return False
 
 
+_snap_cache = {}
+
+
 def snaps():
     """Every status-line snapshot on disk, unfiltered and in no useful order."""
     try:
@@ -544,9 +547,17 @@ def snaps():
     for n in names:
         if not n.endswith(".json"):
             continue
+        path = os.path.join(STATE_DIR, n)
         try:
-            with open(os.path.join(STATE_DIR, n)) as f:
-                yield json.load(f)
+            mtime = os.path.getmtime(path)
+            cached = _snap_cache.get(path)
+            if cached and cached[0] == mtime:
+                yield cached[1]
+                continue
+            with open(path) as f:
+                data = json.load(f)
+                _snap_cache[path] = (mtime, data)
+                yield data
         except (OSError, ValueError):
             continue
 
@@ -635,20 +646,21 @@ def tail_transcript(st, path):
         return []
     if pos == size:
         return []
+    out = []
     with open(path, "rb") as f:
         f.seek(pos)
-        buf = f.read()
-    cut = buf.rfind(b"\n") + 1
-    if not cut:
-        return []                              # a record still being written
-    st["tpos"] = pos + cut
-    out = []
-    for line in buf[:cut].decode("utf8", "replace").split("\n"):
-        if line.strip():
-            try:
-                out += render(json.loads(line))
-            except ValueError:
-                continue
+        while True:
+            line = f.readline()
+            if not line or not line.endswith(b"\n"):
+                break
+            pos += len(line)
+            line_str = line.decode("utf8", "replace").strip()
+            if line_str:
+                try:
+                    out += render(json.loads(line_str))
+                except ValueError:
+                    continue
+    st["tpos"] = pos
     return out
 
 
@@ -1369,6 +1381,16 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         st["prev"], st["changed"] = lines, time.time()
     was_busy = st.get("mode") == "busy"   # a turn was in flight on the last tick
     st["mode"] = pane_state(scr)
+    if st["mode"] == "busy" and not was_busy:
+        now = time.time()
+        turns = [t for t in st.get("turns", []) if now - t < 300]
+        turns.append(now)
+        st["turns"] = turns
+        cap = cfg.get("spendcap")
+        if cap and len(turns) >= cap:
+            send(cfg, topic, f"🛑 {sess} hit spend cap of {cap} turns in 5m — interrupting loop\n"
+                             "!spendcap off to disable", mode="plain")
+            tmux("send-keys", "-t", tgt(sess), "C-c")
     seen = set(prev_scr)
     # A turn is open until its output has been delivered — `prog_msg` is the live
     # trace, opened when it starts and deleted when the pane settles. That is the
@@ -1660,7 +1682,8 @@ TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
             "raw": "!raw", "reload": "!reload", "tmlog": "!log",
             "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
-            "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx"}
+            "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
+            "spendcap": "!spendcap"}
 TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and its state",
            "sessions": "list tmux sessions", "pane": "dump the pane [lines]",
            "git": "status + last commits", "diff": "unstaged diff",
@@ -1675,7 +1698,8 @@ TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and it
            "spend": "token spend: this chat, or /spend 7 for all projects",
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
-           "idlectx": "flag parked sessions above N% context, or off"}
+           "idlectx": "flag parked sessions above N% context, or off",
+           "spendcap": "pause agent after N turns in 5 mins, or off"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -1886,7 +1910,8 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!model", "!effort",
-              "!bind", "!unbind", "!reload", "!autocompact", "!tz", "!at", "!every")
+              "!bind", "!unbind", "!reload", "!autocompact", "!tz", "!at", "!every",
+              "!spendcap")
 
 
 def writes(cfg, cmd, arg=""):
@@ -1932,6 +1957,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
                 "!autocompact <pct|off> | !idlectx <pct|off>\n"
+                "!spendcap <turns|off> = interrupt if agent exceeds turns in 5m\n"
                 "type / for the same commands with autocomplete\n"
                 "!model <name> | !effort <low|medium|high>\n"
                 "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode\n"
@@ -2033,6 +2059,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
         at = cfg.get("autocompact")
         return (f"auto /compact at {at}% context" if at else
                 "auto /compact off — !autocompact 70 to enable")
+    if cmd == "!spendcap":
+        if arg:
+            with lock:
+                cfg["spendcap"] = None if arg in ("off", "0") else int(arg)
+                save_cfg(cfg)
+        cap = cfg.get("spendcap")
+        return (f"spend cap set to {cap} turns in 5 minutes" if cap else
+                "spend cap off — !spendcap 10 to enable")
     if cmd == "!idlectx":
         if arg:
             with lock:
