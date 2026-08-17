@@ -32,11 +32,15 @@ jobs:
       - run: python -m pip install --upgrade build
       - run: python -m build
       # Trusted publishing kept refusing the claim set with `invalid-publisher`,
-      # so this falls back to an API token in the PYPI_API_TOKEN repository
-      # secret. It is a long-lived credential in a place this project would
-      # rather not have one: scope it to the nightmux project as soon as the
-      # first upload has created it, and delete it entirely once trusted
-      # publishing works — restore `id-token: write` above and drop `with:`.
+      # so this falls back to an API token in the `PYPI` repository secret. A
+      # name that does not exist reads as empty rather than failing, and the
+      # action then tries OIDC and reports a permissions error — so if this step
+      # ever complains about ACTIONS_ID_TOKEN, check the secret name first.
+      #
+      # It is a long-lived credential in a place this project would rather not
+      # have one: scope it to the nightmux project as soon as the first upload
+      # has created it, and delete it entirely once trusted publishing works —
+      # restore `id-token: write` above and drop `with:`.
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ secrets.PYPI }}
