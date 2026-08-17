@@ -1,14 +1,23 @@
 # Publish to PyPI when a GitHub release is published.
 #
-# No API token anywhere: this uses PyPI Trusted Publishing (OIDC). One-time
-# setup at https://pypi.org/manage/account/publishing/ — owner mmr710, repository
-# nightmux, workflow publish.yml, environment left blank. Until that exists this
-# job fails at the last step and nothing else is affected.
+# No API token anywhere: this uses PyPI Trusted Publishing (OIDC). One-time setup
+# at https://pypi.org/manage/account/publishing/ — owner mmr710, repository
+# nightmux, workflow publish.yml, environment left blank. The name is not on PyPI
+# yet, so it is the "pending publisher" form: that is the supported way to claim a
+# name on first upload. Until it exists this job fails at the last step and
+# nothing else is affected.
+#
+# Manual trigger as well as the release event, because the release event fires
+# exactly once per release. v1.1.0 published a minute after this repository was
+# created, produced no run, and was then unrepeatable — leaving a README that
+# tells people to `pipx install nightmux` and a badge reading "not found", with
+# no way to fix it short of inventing a version number.
 name: publish
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   pypi:
