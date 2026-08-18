@@ -1739,6 +1739,25 @@ def watchdog(cfg, state, topic, sess, alive):
     return alive
 
 
+def track_cwd(cfg, lock, topic, sess):
+    """Keep dirs[topic] pointing at where the session is actually running.
+
+    Only start_session used to record it, so a topic bound to an existing
+    session with !bind had no directory at all — and a reboot then resumed it
+    in $HOME, where every such topic found the same conversation. The live
+    session is the only honest answer and it is readable only while it is
+    alive, which is exactly when nobody is asking.
+    """
+    cwd = sess_cwd(sess)
+    if not cwd or not os.path.isdir(cwd):
+        return
+    with lock:
+        if (cfg.get("dirs") or {}).get(topic) == cwd:
+            return
+        cfg.setdefault("dirs", {})[topic] = cwd
+        save_cfg(cfg)
+
+
 def watcher(cfg, state, lock):
     pruned = 0.0
     bound = []
@@ -1754,6 +1773,7 @@ def watcher(cfg, state, lock):
             for topic, sess in bound:
                 try:
                     if watchdog(cfg, state, topic, sess, sess in alive):
+                        track_cwd(cfg, lock, topic, sess)
                         flush_new(cfg, state, topic, sess, alive.get(sess))
                         nudge(cfg, state, topic, sess)
                         due(cfg, state, topic, sess)
@@ -1953,7 +1973,15 @@ def resume_session(cfg, state, lock, topic, arg=""):
     name = sess or f"topic{topic}"
     if has_session(name):
         return f"'{name}' is alive; type /resume in it to pick a conversation"
-    cwd = (cfg.get("dirs") or {}).get(topic, "~")   # already the worktree, if @branch was used
+    # No fallback. `claude --continue` resumes the last conversation *in this
+    # directory*, so guessing $HOME does not start a fresh session there — it
+    # attaches to whatever happened to run in $HOME last, for every topic at
+    # once. start_session then writes the guess back as the topic's directory,
+    # and the wrong answer is permanent.
+    cwd = (cfg.get("dirs") or {}).get(topic)   # already the worktree, if @branch was used
+    if not cwd:
+        return (f"no directory recorded for this topic — start it once with "
+                f"!{key} {name} <dir>")
     return start_session(cfg, state, lock, topic,
                          f"{name} {cwd} {agent(cfg, key)[1]}".rstrip(), key)
 
@@ -2963,16 +2991,19 @@ def restore_startup(cfg, state, lock):
     for topic, sess in list(cfg["topics"].items()):
         if has_session(sess):
             continue
+        why = None
         if cfg.get("auto_restore"):
             key = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
-            resume_session(cfg, state, lock, topic)
-            send(cfg, topic, f"▶️ restored {sess} · {key}", mode="plain")
-        else:
-            # Pre-mark dead so watchdog's first tick does not also send its own
-            # "gone" message for the same session a moment later.
-            state.setdefault(sess, {})["dead"] = True
-            send(cfg, topic, f"⚠️ {sess} is gone — machine restarted?", mode="plain",
-                 buttons=kb([[("restore", "!restore")]]))
+            why = resume_session(cfg, state, lock, topic)
+            if why.startswith("started"):
+                send(cfg, topic, f"▶️ restored {sess} · {key}", mode="plain")
+                continue
+        # Pre-mark dead so watchdog's first tick does not also send its own
+        # "gone" message for the same session a moment later.
+        state.setdefault(sess, {})["dead"] = True
+        send(cfg, topic, f"⚠️ {sess} is gone — machine restarted?"
+             + (f"\nnot restored: {why}" if why else ""), mode="plain",
+             buttons=kb([[("restore", "!restore")]]))
 
 
 def main():
@@ -3138,6 +3169,20 @@ def selfcheck():
     assert mode == 0o600, oct(mode)                # every save, not just the first
     save_offset(12345)
     assert load_offset() == 12345
+
+    # A topic with no recorded directory must not come back in $HOME: --continue
+    # resumes the last conversation *of that directory*, so one reboot put three
+    # topics on the same one. It is learned from the live session instead.
+    spawned = []
+    with stubbed(has_session=lambda s: False, sess_cwd=lambda s: FILE_DIR,
+                 spawn=lambda *a: spawned.append(a)):
+        c, l = {"topics": {"1": "s"}, "dirs": {}}, threading.Lock()
+        assert "no directory recorded" in resume_session(c, {}, l, "1")
+        assert spawned == [], spawned              # nothing started in $HOME
+        track_cwd(c, l, "1", "s")                  # learned from the live session
+        assert c["dirs"]["1"] == FILE_DIR, c
+        resume_session(c, {}, l, "1")
+        assert spawned[0][1] == FILE_DIR, spawned  # and it comes back there
 
     acks = Acks()                                  # parallel topics finish out of order
     for uid in (10, 11, 14):                       # 12, 13: types we filtered out
@@ -4158,12 +4203,17 @@ def selfcheck():
 
     # !restore is !resume under another name — both funnel through resume_session.
     cfg2["topics"]["91"] = "ghost"
+    n = len(spawned)
+    assert "no directory recorded" in handle(cfg2, {}, lk, "91", "!restore")
+    assert len(spawned) == n, spawned[n:]        # a topic with no dir stays down
+    cfg2.setdefault("dirs", {})["91"] = "/tmp"
     out = handle(cfg2, {}, lk, "91", "!restore")
-    assert spawned[-1][0] == "ghost" and "topic bound" in out, out
+    assert spawned[-1][:2] == ("ghost", "/tmp") and "topic bound" in out, out
     assert cfg2["started"]["91"] == "claude"
 
     # restore_startup: a dead topic gets a button unless auto_restore says relaunch.
-    cfg3, st3, n = {"topics": {"1": "gone1", "2": "alive2"}, "chat_id": -1}, {}, len(sent)
+    cfg3 = {"topics": {"1": "gone1", "2": "alive2"}, "dirs": {"1": "/tmp"}, "chat_id": -1}
+    st3, n = {}, len(sent)
     globals()["has_session"] = lambda s: s == "alive2"
     restore_startup(cfg3, st3, lk)
     assert sent[-1].startswith("⚠️ gone1 is gone") and len(sent) == n + 1, sent[n:]
@@ -4171,6 +4221,9 @@ def selfcheck():
     cfg3["auto_restore"] = True
     restore_startup(cfg3, st3, lk)
     assert spawned[-1][0] == "gone1" and sent[-1].startswith("▶️ restored gone1"), sent[-1]
+    cfg3["topics"]["3"] = "gone3"                 # never recorded a directory
+    restore_startup(cfg3, st3, lk)
+    assert "not restored" in sent[-1], sent[-1]   # said so, rather than "restored"
 
     # git worktrees + snapshot-before-unattended-prompt, against a real throwaway repo.
     import tempfile
