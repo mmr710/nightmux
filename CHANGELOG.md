@@ -8,6 +8,14 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- macOS service install. `--setup` now writes a launchd agent
+  (`~/Library/LaunchAgents/com.nightmux.plist`) on Darwin instead of stopping at
+  "the service install is systemd". Everything else was already portable; this
+  was the last Linux-only piece.
+- An animated demo (`docs/demo.svg`) in the README showing the overnight
+  ⏸ / ▶️ resume and a tap-button approval — the recording the README had a TODO
+  for, minus the phone.
+
 - A turn the usage limit cuts off now resumes itself. The prompt that started it
   was already consumed, so the queue was empty at reset time and the session sat
   idle until someone typed `continue` — which, for a limit that lands at 2am, was
@@ -27,6 +35,56 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   Every bound topic was writable by anyone on the allowlist, which is the right
   default for a session you are driving and the wrong one for a topic bound to
   something you only want to watch from a phone.
+- `!shift` — a sequential overnight plan: one prompt per line in the same
+  message, fired one at a time as each turn finishes. It rides the existing
+  queue/drain machinery rather than a second wait-for-idle loop, so a
+  usage-limit lockout pauses a shift exactly like it pauses a held prompt, and
+  the plan survives a restart the same way the queue does. Progress posts as
+  "shift 2/4 → <prompt>", with "shift done" at the end.
+- A git snapshot before every prompt nightmux sends unattended — a queued
+  prompt replayed after a lockout, an `!at`/`!every` firing, a `!shift` step —
+  via `git stash create`, which builds the snapshot without ever touching the
+  worktree. The branch is `nightmux/pre-<UTC timestamp>`, and only the last 5
+  per repo are kept. A prompt typed live gets none: nobody needs a snapshot for
+  work they watched happen. `!undo` lists a topic's snapshots newest-first with
+  the exact `git restore`/`git diff` commands — it never runs them, on purpose.
+- `!digest` — turns completed, a gist of the last answer, commits since the
+  digest period started, token spend and current state, squeezed onto a phone
+  screen. `!digest 08:00` schedules it daily (the same epoch math as `!every`,
+  reporting instead of typing "!digest" into the agent); `!digest off` cancels.
+  No automatic digest by default.
+- `nightmux --doctor` — tmux found, config complete, token accepted by
+  Telegram, the bot reachable in the configured chat, hooks wired, service
+  active. One ✓/✗ line each, exit 1 if anything is off. Triage only; nothing
+  gets fixed.
+- Voice messages, audio and video notes are now saved and typed in like a photo
+  or file — the same download path, just three more Telegram update fields
+  feeding it. No transcription; the agent gets the path and decides.
+- Auto-restore after a reboot. A reboot kills every tmux session; nightmux now
+  checks each bound topic against tmux at startup and either relaunches with
+  `"auto_restore": true` or posts a "machine restarted?" message with a Restore
+  button, instead of a topic that quietly never comes back. `!restore` runs the
+  same relaunch on demand — it was already what `!resume` did for a dead
+  session, just under the name people actually look for.
+- Git worktrees for running more than one agent on the same project without
+  them fighting over the same files: `!new api ~/code/api @refactor-auth`
+  checks out (or reuses) a worktree for that branch under `~/code/api-wt/` and
+  starts the session there. `!worktrees` lists a repo's worktrees and which
+  session is sitting in each.
+- A command-center topic: `!center` binds the topic it's typed in to watch and
+  control every session instead of one — it never gets an entry in `topics`,
+  and plain text there points at `!board` instead of going nowhere. `!board`
+  (usable from any topic) reuses `!status`'s own state classification for a
+  one-glance summary of every session, with a cheap cost figure where a
+  transcript is already known. A pending approval now mirrors into the command
+  center alongside its own topic, and whichever copy is tapped first resolves
+  it for both — the loser's buttons are pulled rather than left able to send a
+  second, conflicting keystroke into the same pane. `!all <targets|--all>
+  <prompt>` sends one prompt to several sessions at once, through the same
+  hold/queue/type path a single topic already used, echoing exactly who it is
+  about to hit before the first prompt goes anywhere; a `readonly` topic is
+  never among them. `!digest` run from the command center loops every bound
+  session instead of needing one run per topic.
 
 ### Fixed
 

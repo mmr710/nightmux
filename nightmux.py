@@ -21,6 +21,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -328,6 +329,43 @@ def visible(sess):
 
 def sess_cwd(sess):
     return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
+
+
+SNAP_KEEP = 5   # nightmux/pre-* branches kept per repo; older ones are pruned here
+
+
+def snapshot_repo(sess):
+    """Branch off whatever the worktree holds, right before an unattended prompt.
+
+    `git stash create` builds a commit from the worktree without touching it —
+    unlike `git stash`, nothing is popped off, so the session never sees its own
+    files move under it. A clean tree has nothing to stash, so the branch just
+    points at HEAD. Never fatal: a snapshot that fails must not be the reason a
+    prompt never goes in — that would trade one kind of lost work for another.
+    """
+    cwd = sess_cwd(sess)
+    try:
+        if not cwd or not os.path.isdir(cwd):
+            return
+        if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+            return
+        sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
+        if not sha:
+            return
+        name = "nightmux/pre-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        tmux_git(cwd, "branch", name, sha)
+        prune_snapshots(cwd)
+    except Exception as e:
+        print(f"snapshot {sess}: {e}", file=sys.stderr)
+
+
+def prune_snapshots(cwd):
+    """Keep only the last SNAP_KEEP nightmux/pre-* branches for this repo."""
+    names = [n for n in tmux_git(
+        cwd, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
+        "refs/heads/nightmux/pre-*").split("\n") if n.strip()]
+    for old in names[SNAP_KEEP:]:
+        tmux_git(cwd, "branch", "-D", old)
 
 
 def snapped():
@@ -699,18 +737,26 @@ def strip_noise(lines, verbose=False):
     return out
 
 
-def menu_buttons(lines):
-    """One tap-button per option of the menu the pane is waiting on."""
+def menu_buttons(lines, sess=None):
+    """One tap-button per option of the menu the pane is waiting on.
+
+    A session suffix on the callback data (`!1 api` instead of bare `!1`) lets
+    a tap answer the right pane regardless of which topic it landed in — the
+    command center mirrors this same message into a topic bound to nothing, so
+    topic-binding alone cannot resolve it there.
+    """
     opts = {}
     for l in lines[-25:]:
         m = MENU.match(l)
         if m:
             label = m.group(2)
             opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+    suffix = f" {sess}" if sess else ""
     # No numbers means an arrow-driven selector (agy's trust prompt, /model):
     # the nav row alone drives it, exactly as you would in the terminal.
-    rows = [[(f"{d}. {opts[d]}", f"!{d}")] for d in sorted(opts)]
-    rows.append([("esc", "!esc"), ("↑", "!up"), ("↓", "!down"), ("⏎", "!enter")])
+    rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
+    rows.append([("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
+                ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
     return kb(rows)
 
 
@@ -1093,6 +1139,48 @@ def cost_report(t, title):
     return "\n".join(rows)
 
 
+def digest_report(cfg, state, topic, sess, since):
+    """What happened since `since` — the same readers !cost/!ctx/!git already use,
+    just windowed and squeezed onto a phone screen instead of a full report.
+    """
+    st = state.get(sess) or {}
+    snap = st.get("snap") or {}
+    path = snap.get("transcript")
+    cut, turns, last = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since)), 0, ""
+    if path and os.path.isfile(path):
+        for line in open(path, errors="replace"):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") != "assistant" or (rec.get("timestamp") or "") < cut:
+                continue
+            if (rec.get("message") or {}).get("usage"):
+                turns += 1
+            blocks = (rec.get("message") or {}).get("content") or []
+            text = "\n".join(b.get("text", "") for b in blocks
+                             if isinstance(b, dict) and b.get("type") == "text").strip()
+            if text:
+                last = text
+    cwd = sess_cwd(sess)
+    since_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+    commits = [l for l in tmux_git(cwd, "log", "--oneline", f"--since={since_str}")
+              .split("\n") if l.strip()]
+    t = token_tally([path] if path else [])
+    spend = (f"~{int(sum(t[k] * w for k, w in WEIGHT.items())):,} tok, {t['turns']} turns"
+             if t["turns"] else "no usage yet")
+    mode = "held" if st.get("limit_until", 0) > time.time() else st.get("mode", "?")
+    ctx = f" · ctx {snap['ctx_pct']:.0f}%" if snap.get("ctx_pct") is not None else ""
+    ask = (f"\n🟠 waiting: {st['asked'].splitlines()[0][:60]}"
+           if mode == "waiting" and st.get("asked") else "")
+    return (f"🌙 digest · {sess}  [{mode}{ctx}]\n"
+            f"{turns} turn(s) · {spend} · {len(commits)} commit(s) in {cwd}\n"
+            + (f"last: {last.splitlines()[0][:100]}" if last else "no answer yet")
+            + (("\n" + "\n".join(commits[:5])
+                + (f"\n… +{len(commits) - 5} more" if len(commits) > 5 else ""))
+               if commits else "") + ask)
+
+
 def recent_transcripts(days):
     cut = time.time() - days * 86400
     out = []
@@ -1215,7 +1303,8 @@ def queue_blob(state):
     """
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
-        held = {k: st[k] for k in ("queue", "limit_until", "sched") if st.get(k)}
+        held = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
+                                   "shift_total") if st.get(k)}
         if held.get("limit_until", 0) < time.time():
             held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
@@ -1253,11 +1342,18 @@ def load_queue(state):
     for sess, held in blob.items():
         state.setdefault(sess, {}).update(held)
     _queued[0] = blob
-    return {s: h for s, h in blob.items() if h.get("queue") or h.get("sched")}
+    return {s: h for s, h in blob.items()
+            if h.get("queue") or h.get("sched") or h.get("shift")}
 
 
 def drain(cfg, state, topic, sess):
-    """Once the window resets, feed the queue back one prompt per idle turn."""
+    """Once the window resets, feed the queue back one prompt per idle turn.
+
+    A !shift plan rides the same gate once the regular queue is empty: nothing
+    queued, pane idle, window open — exactly what lets a held prompt go, so a
+    lockout mid-shift pauses it and this same resume restarts it, instead of a
+    second copy of the wait-for-idle logic.
+    """
     st = state.setdefault(sess, {})
     until = st.get("limit_until", 0)
     if until and time.time() >= until:
@@ -1269,8 +1365,11 @@ def drain(cfg, state, topic, sess):
         # The banner that set this hold described the window that just ended, so
         # it stops being the reason to suppress the next one.
         st.pop("limit_line", None)
-        if not st.get("queue"):
+        if not st.get("queue") and not st.get("shift"):
             send(cfg, topic, f"▶️ {sess} usage window reset · nothing was queued",
+                 mode="plain")
+        elif not st.get("queue"):
+            send(cfg, topic, f"▶️ {sess} usage window reset · resuming shift",
                  mode="plain")
         elif st.get("mode") != "idle":
             # The window is open and the queue still cannot move, which from the
@@ -1281,16 +1380,35 @@ def drain(cfg, state, topic, sess):
             st["resumed"] = True
         else:
             st["resumed"] = True     # the send below says "resumed", not "sending"
+    open_window = st.get("mode") == "idle" and time.time() >= st.get("limit_until", 0)
     q = st.get("queue")
-    if not q or st.get("mode") != "idle" or time.time() < st.get("limit_until", 0):
-        return
-    held = st.pop("resumed", None)
-    text = q.pop(0)
-    send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
-         f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
-    inject(sess, spill(sess, text))
-    remember(state, sess, text)
-    started(cfg, state, topic, sess, None)
+    if q and open_window:
+        held = st.pop("resumed", None)
+        text = q.pop(0)
+        send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
+             f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
+        # Every prompt that reaches here was sent by the daemon, not typed live
+        # this instant — a lockout replay, a schedule firing, a busy-queued
+        # human prompt going in unattended a moment later. That is the line: a
+        # snapshot happens whenever nobody is necessarily watching it land.
+        snapshot_repo(sess)
+        inject(sess, spill(sess, text))
+        remember(state, sess, text)
+        started(cfg, state, topic, sess, None)
+    elif open_window and st.get("shift"):
+        plan = st["shift"]
+        total = st.get("shift_total", len(plan))
+        text = plan.pop(0)
+        n = total - len(plan)
+        send(cfg, topic, f"🌙 shift {n}/{total} → {text.splitlines()[0][:70]}",
+             mode="plain")
+        snapshot_repo(sess)
+        inject(sess, spill(sess, text))
+        remember(state, sess, text)
+        started(cfg, state, topic, sess, None)
+        if not plan:
+            st.pop("shift", None), st.pop("shift_total", None)
+            send(cfg, topic, f"🌙 {sess} shift done", mode="plain")
 
 
 DUR = re.compile(r"(\d+)\s*([dhm])")
@@ -1328,23 +1446,32 @@ def due(cfg, state, topic, sess):
 
     Onto the queue rather than into the pane, so a scheduled prompt inherits
     everything the queue already knows: it waits behind a usage-limit hold, it
-    waits for a busy pane, and it survives a restart.
+    waits for a busy pane, and it survives a restart. A digest job rides the
+    same list and epoch math, but it is not a prompt at all — it reports
+    directly rather than typing "!digest" into the agent.
     """
     st = state.setdefault(sess, {})
-    now, keep, fired = time.time(), [], []
+    now, keep, fired, changed = time.time(), [], [], False
     for job in st.get("sched") or []:
         if job["at"] > now:
             keep.append(job)
             continue
-        st.setdefault("queue", []).append(job["text"])
-        fired.append(job)
+        changed = True
+        if job.get("kind") == "digest":
+            since = job.get("since", now - (job.get("every") or 86400))
+            send(cfg, topic, digest_report(cfg, state, topic, sess, since), mode="plain")
+            job["since"] = now
+        else:
+            st.setdefault("queue", []).append(job["text"])
+            fired.append(job)
         if job.get("every"):
             # From now, not from when it was due: a daemon that was off overnight
             # must not wake up and fire six hours of backlog in one go.
             job["at"] = now + job["every"]
             keep.append(job)
-    if fired:
+    if changed:
         st["sched"] = keep
+    if fired:
         send(cfg, topic, f"⏰ {sess} {len(fired)} scheduled prompt(s) queued\n"
              + "\n".join(j["text"].splitlines()[0][:70] for j in fired), mode="plain")
 
@@ -1504,18 +1631,47 @@ def prompt_key(lines):
     return "\n".join(tail)
 
 
+def resolve_ask(cfg, st):
+    """Strip the buttons off every posted copy of a pending approval.
+
+    A command-center mirror means two messages can answer the same question —
+    once either is tapped this clears both, so a stale button has nothing left
+    to press. Harmless when there was only ever one copy, or none at all.
+    """
+    for t, mid in st.pop("asked_msgs", None) or []:
+        if mid:
+            api(cfg, "editMessageReplyMarkup", chat_id=cfg["chat_id"], message_id=mid,
+                reply_markup=json.dumps({"inline_keyboard": []}))
+    st.pop("asked", None)
+
+
 def ask(cfg, st, topic, sess, body, lines, key=None):
     """Announce a prompt once. The pane redraws constantly; the question doesn't.
 
     Deduped on `key` — the question itself — not on the whole message, because
     the text above it arrives as a diff that keeps shifting while the menu sits
     still. Without this the same menu is resent every few seconds, forever.
+
+    Mirrored into the command-center topic too, when one is set: buttons carry
+    the session name (menu_buttons(lines, sess)) so a tap resolves the same
+    pane whichever copy answered it, and both messages are tracked so the one
+    left unanswered can have its buttons pulled.
     """
     key = key or body
     if not body or key == st.get("asked") or notified(sess):
         return False
     st["asked"] = key
-    send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=menu_buttons(lines))
+    buttons = menu_buttons(lines, sess)
+    msgs = []
+    mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
+    if mid:
+        msgs.append((topic, mid))
+    center = cfg.get("center_topic")
+    if center and str(center) != str(topic):
+        mid2 = send(cfg, center, f"🟠 needs input {sess}\n{body}", buttons=buttons)
+        if mid2:
+            msgs.append((center, mid2))
+    st["asked_msgs"] = msgs
     return True
 
 
@@ -1577,8 +1733,8 @@ def watchdog(cfg, state, topic, sess, alive):
         # but a hold and the prompts under it are what the user is owed, not a
         # cache of the old pane. Dropping them here deleted them from disk too,
         # on the next save, in the one case they exist to survive.
-        state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched")
-                       if st.get(k)}
+        state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
+                                          "shift_total") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     return alive
 
@@ -1784,13 +1940,55 @@ def spawn(name, cwd, cmdline):
     tmux("send-keys", "-t", name, "Enter")
 
 
+def resume_session(cfg, state, lock, topic, arg=""):
+    """Relaunch this topic's directory with the agent it was using, resuming
+    its last conversation. !resume, !restore, and the auto_restore startup
+    check all funnel through here — one place that knows how a topic comes back.
+    """
+    sess = cfg["topics"].get(topic)
+    # Whatever started this topic, unless told otherwise: resuming a codex
+    # session with claude's flag would quietly open a fresh conversation.
+    key = arg if arg in agents(cfg) else (
+        (cfg.get("started") or {}).get(topic) or default_agent(cfg))
+    name = sess or f"topic{topic}"
+    if has_session(name):
+        return f"'{name}' is alive; type /resume in it to pick a conversation"
+    cwd = (cfg.get("dirs") or {}).get(topic, "~")   # already the worktree, if @branch was used
+    return start_session(cfg, state, lock, topic,
+                         f"{name} {cwd} {agent(cfg, key)[1]}".rstrip(), key)
+
+
+def worktree_path(repo, branch):
+    """<repo>-wt/<branch>: create the branch only if it is new, reuse the
+    worktree if one is already checked out there. None when `repo` is not a
+    git repo — @branch has nothing to attach to.
+    """
+    if tmux_git(repo, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    root = tmux_git(repo, "rev-parse", "--show-toplevel") or repo
+    wt = os.path.join(f"{root}-wt", branch)
+    if os.path.isdir(wt):
+        return wt   # an earlier session already set this branch up
+    sha = tmux_git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+    out = (tmux_git(root, "worktree", "add", wt, branch)
+           if re.fullmatch(r"[0-9a-f]{7,40}", sha) else
+           tmux_git(root, "worktree", "add", "-b", branch, wt))
+    print(f"worktree add {branch}: {out}", file=sys.stderr)
+    return wt if os.path.isdir(wt) else None
+
+
 def start_session(cfg, state, lock, topic, arg, key):
-    """New session running agent `key`, bound to this topic. Flags pass through."""
+    """New session running agent `key`, bound to this topic. Flags pass through.
+
+    A trailing @branch checks out a git worktree for that branch next to the
+    repo and starts there instead — the isolation two agents in one tree need,
+    without nightmux trying to be a merge tool.
+    """
     prog, _ = agent(cfg, key)
     name, _, rest = arg.partition(" ")
     rest = rest.strip()
     if not name:
-        return f"usage: !{key} <name> [dir] [flags]"
+        return f"usage: !{key} <name> [dir] [flags] [@branch]"
     if has_session(name):
         return f"'{name}' exists; use !bind {name}"
     if rest.startswith(("~", "/", ".")):        # dir first, anything after is flags
@@ -1800,6 +1998,14 @@ def start_session(cfg, state, lock, topic, arg, key):
     cwd = os.path.expanduser(cwd or "~")
     if not os.path.isdir(cwd):
         return f"no dir {cwd}"
+    note = ""
+    m = re.search(r"(?:^|\s)@(\S+)", flags)
+    if m:
+        branch, flags = m.group(1), (flags[:m.start()] + flags[m.end():]).strip()
+        wt = worktree_path(cwd, branch)
+        if not wt:
+            return f"{cwd} is not a git repo — @{branch} needs a worktree to live in"
+        cwd, note = wt, f" @{branch}"
     spawn(name, cwd, f"{prog} {flags}".strip())
     with lock:
         cfg["topics"][topic] = name
@@ -1807,7 +2013,8 @@ def start_session(cfg, state, lock, topic, arg, key):
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
-    return f"started {prog} {flags} '{name}' in {cwd}, topic bound".replace("  ", " ")
+    return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
+            "topic bound").replace("  ", " ")
 
 
 def autostart(cfg):
@@ -1900,8 +2107,9 @@ def status_report(cfg, state):
         # and nothing said so — it took a script to notice two topics were.
         tag += "" if snap else " [no status line]"
         q = len(st.get("queue") or [])
+        held = f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else ""
         rows.append(f"{icon} {sess:<14} topic {topic}  {mode}  {age}s quiet{tag}"
-                    + (f"  📥{q}" if q else "") + usage_line(cfg, snap))
+                    + (f"  📥{q}" if q else "") + held + usage_line(cfg, snap))
     return "\n".join(rows)
 
 
@@ -1909,9 +2117,9 @@ def status_report(cfg, state):
 # is the other half and is caught separately, being everything that is not a
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!model", "!effort",
-              "!bind", "!unbind", "!reload", "!autocompact", "!tz", "!at", "!every",
-              "!spendcap")
+WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+              "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
+              "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
 
 def writes(cfg, cmd, arg=""):
@@ -1927,7 +2135,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
     # Telegram rewrites "/compact" as "/compact@thebot" in groups; Claude wants
     # the bare slash command.
     text = re.sub(r"^(/[\w:-]+)@\w+", r"\1", text)
-    cmd, _, arg = text.partition(" ")
+    # Any whitespace, not just a space: !shift's plan is one prompt per line in
+    # the same message, and splitting on " " alone would cut "cmd" at whatever
+    # space happened to fall on line two instead of the newline right after it.
+    cmd, arg = (text.split(None, 1) + ["", ""])[:2]
     cmd, arg = cmd.lower(), arg.strip()
     # Registered slash aliases so Telegram's "/" menu can drive nightmux too. Names
     # that Claude Code also owns are deliberately absent: those pass through.
@@ -1947,13 +2158,20 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return version_report()
     if cmd == "!help":
         return ("!bind <session> | !unbind | !sessions\n"
-                f"!new <name> [dir] [flags], or !<agent>: "
+                f"!new <name> [dir] [flags] [@branch], or !<agent>: "
                 f"{', '.join(agents(cfg))}\n"
-                "!resume [agy] = relaunch this topic's dir with --continue\n"
+                "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
+                "!worktrees = git worktrees of this topic's repo, and who is in each\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
                 "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
+                "!undo = list snapshot branches + restore commands (never runs them)\n"
                 "!queue [clear|now] | !usage | !ctx | !cost [days] | !tz | !reload\n"
                 "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]\n"
+                "!shift then one prompt per line = a sequential overnight plan\n"
+                "!digest [HH:MM|off] = what happened while you slept, on demand or daily\n"
+                "!center [off] = make this topic watch/control every session\n"
+                "!board = every topic at a glance (works anywhere)\n"
+                "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
                 "!autocompact <pct|off> | !idlectx <pct|off>\n"
@@ -1962,7 +2180,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!model <name> | !effort <low|medium|high>\n"
                 "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode\n"
                 "!keys <tmux keys> | !raw <text> (type even with a menu open)\n"
-                "photo/file -> saved, path typed in\n"
+                "photo/file/voice -> saved, path typed in\n"
                 "/slash and anything else -> typed into Claude")
     if cmd == "!log":
         return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
@@ -2018,19 +2236,45 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!new" or cmd[1:] in agents(cfg):
         return start_session(cfg, state, lock, topic, arg,
                              default_agent(cfg) if cmd == "!new" else cmd[1:])
-    if cmd == "!resume":
-        # Whatever started this topic, unless told otherwise: resuming a codex
-        # session with claude's flag would quietly open a fresh conversation.
-        key = arg if arg in agents(cfg) else (
-            (cfg.get("started") or {}).get(topic) or default_agent(cfg))
-        name = sess or f"topic{topic}"
-        if has_session(name):
-            return f"'{name}' is alive; type /resume in it to pick a conversation"
-        cwd = (cfg.get("dirs") or {}).get(topic, "~")
-        return start_session(cfg, state, lock, topic,
-                             f"{name} {cwd} {agent(cfg, key)[1]}".rstrip(), key)
+    if cmd in ("!resume", "!restore"):    # !restore: same relaunch, easier to guess
+        return resume_session(cfg, state, lock, topic, arg)
+    if cmd == "!center":
+        with lock:
+            prev = cfg.get("center_topic")
+            cfg["center_topic"] = None if arg == "off" else topic
+            save_cfg(cfg)
+        if arg == "off":
+            return "command center off" if prev else "no command center was set"
+        if prev and str(prev) != str(topic):
+            return f"command center moved here from topic {prev}"
+        return "this topic is now the command center — try !board"
+    if cmd == "!board":
+        return board_report(cfg, state)
+    if cmd == "!all":
+        return broadcast(cfg, state, topic, arg)
+    if cmd == "!digest" and str(topic) == str(cfg.get("center_topic") or ""):
+        if arg:
+            return "!digest here is report-only — schedule it from each session's own topic"
+        if not cfg["topics"]:
+            return "no topics bound"
+        parts = []
+        for t, s in sorted(cfg["topics"].items(), key=lambda kv: int(kv[0])):
+            if not has_session(s):
+                continue
+            st_s = state.setdefault(s, {})
+            since = st_s.get("digest_since", time.time() - 86400)
+            parts.append(digest_report(cfg, state, t, s, since))
+            st_s["digest_since"] = time.time()
+        return "\n\n".join(parts) if parts else "no live sessions"
 
+    # A mirrored approval button names its session explicitly, since the
+    # command-center topic it may have been tapped in binds to none.
+    mirrored = cmd in KEYS and arg and has_session(arg)
+    if mirrored:
+        sess = arg
     if not sess:
+        if str(topic) == str(cfg.get("center_topic") or ""):
+            return "this topic controls every session — try !board"
         return (autobind(cfg, state, lock, topic)
                 or "topic not bound. !bind <session> or !new <name> [dir]")
     if not has_session(sess):
@@ -2107,6 +2351,33 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     + tmux_git(cwd, "diff")).strip() or f"no unstaged changes in {cwd}"
         return (f"{cwd}\n" + tmux_git(cwd, "status", "-sb") + "\n\n"
                 + tmux_git(cwd, "log", "--oneline", "-5"))
+    if cmd == "!worktrees":
+        cwd = sess_cwd(sess)
+        root = tmux_git(cwd, "rev-parse", "--show-toplevel")
+        if not root:
+            return f"{cwd} is not a git repo"
+        who = {}
+        for t, s in cfg["topics"].items():
+            if has_session(s):
+                who.setdefault(sess_cwd(s), []).append(s)
+        rows = [l for l in tmux_git(root, "worktree", "list").split("\n") if l.strip()]
+        return "\n".join(l + (f"   [{', '.join(who[l.split()[0]])}]"
+                              if who.get(l.split()[0]) else "") for l in rows)
+    if cmd == "!undo":
+        cwd = sess_cwd(sess)
+        rows = [l for l in tmux_git(
+            cwd, "for-each-ref", "--sort=-creatordate",
+            "--format=%(refname:short)  %(creatordate:iso-strict)",
+            "refs/heads/nightmux/pre-*").split("\n") if l.strip()]
+        if not rows:
+            return f"no snapshots in {cwd} · one is taken before every unattended prompt"
+        newest = rows[0].split()[0]
+        return ("snapshots in " + cwd + " (newest first):\n"
+                + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
+                + "\n\nnightmux never restores automatically — run this yourself:\n"
+                f"  git restore --source {newest} -- .   # overwrite the worktree\n"
+                f"  git diff {newest}                    # or just look first\n"
+                "(swap in an older branch name to go further back)")
     if cmd == "!ctl":
         send(cfg, topic, f"controls · {sess}", mode="plain", buttons=kb([
             [("esc", "!esc"), ("⇧⇥ mode", "!mode"), ("⏎", "!enter"), ("↑", "!up")],
@@ -2148,6 +2419,16 @@ def handle(cfg, state, lock, topic, text, mid=None):
         key = KEYS[cmd]
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
+        with lock:
+            st = state.setdefault(sess, {})
+            # A mirrored button already resolved by its other copy has nothing
+            # left to answer — that race is decided here, under the one lock
+            # every topic worker shares, not by whichever tap Telegram delivers
+            # first.
+            stale = mirrored and not st.get("asked_msgs")
+            resolve_ask(cfg, st)
+        if stale:
+            return None
         press(sess, key, confirm=cmd in YES_NO or cmd[1:].isdigit())
         return None
     st = state.setdefault(sess, {})
@@ -2165,6 +2446,47 @@ def handle(cfg, state, lock, topic, text, mid=None):
         until = st.get("limit_until", 0)
         return (f"{len(q)} queued" + (f", resumes {clock(cfg, until)}"
                 if until > time.time() else "") + (f"\n{head}" if q else ""))
+    if cmd == "!shift":
+        if arg == "clear":
+            n = len(st.get("shift") or [])
+            st.pop("shift", None), st.pop("shift_total", None)
+            save_queue(state)
+            return f"shift cleared ({n} step(s) dropped)"
+        if arg:
+            plan = [l.strip() for l in arg.split("\n") if l.strip()]
+            st["shift"], st["shift_total"] = plan, len(plan)
+            save_queue(state)
+            return (f"shift set: {len(plan)} step(s), one at a time on idle\n"
+                    + "\n".join(f"{i + 1}. {p.splitlines()[0][:70]}"
+                                for i, p in enumerate(plan)))
+        cur = st.get("shift") or []
+        if not cur:
+            return "no shift plan · !shift then one prompt per line"
+        total = st.get("shift_total", len(cur))
+        done = total - len(cur)
+        return (f"shift {done}/{total} done, {len(cur)} left\n"
+                + "\n".join(f"{done + i + 1}. {p.splitlines()[0][:70]}"
+                            for i, p in enumerate(cur)))
+    if cmd == "!digest":
+        if arg == "off":
+            had = any(j.get("kind") == "digest" for j in st.get("sched") or [])
+            st["sched"] = [j for j in st.get("sched") or [] if j.get("kind") != "digest"]
+            save_queue(state)
+            return "digest schedule cancelled" if had else "no digest scheduled"
+        if arg:
+            at = at_epoch(cfg, arg)
+            if at is None:
+                return "usage: !digest 08:00 (daily) · !digest off · !digest (now)"
+            jobs = [j for j in st.get("sched") or [] if j.get("kind") != "digest"]
+            jobs.append({"at": at, "every": 86400, "kind": "digest",
+                        "text": "!digest", "since": time.time()})
+            st["sched"] = jobs
+            save_queue(state)
+            return f"digest daily at {clock(cfg, at)} (first in {left(at - time.time())})"
+        report = digest_report(cfg, state, topic, sess,
+                               st.get("digest_since", time.time() - 86400))
+        st["digest_since"] = time.time()
+        return report
     if cmd in ("!at", "!every", "!sched"):
         now = time.time()
     if cmd in ("!at", "!every"):
@@ -2200,6 +2522,17 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd in ("!model", "!effort"):  # sugar: type the slash command for you
         text = f"/{cmd[1:]} {arg}".strip()
 
+    return send_prompt(cfg, state, topic, sess, text, mid)
+
+
+def send_prompt(cfg, state, topic, sess, text, mid=None):
+    """The live-prompt path: hold behind a lockout, queue behind a busy or
+    waiting pane, or type it now. This is what a topic's own live text always
+    went through; !all fans the same call out to several sessions so a
+    broadcast prompt waits exactly like a typed one instead of a second,
+    drifting copy of this logic.
+    """
+    st = state.setdefault(sess, {})
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -2226,6 +2559,70 @@ def handle(cfg, state, lock, topic, text, mid=None):
     remember(state, sess, text)
     started(cfg, state, topic, sess, mid)
     return None
+
+
+def broadcast(cfg, state, topic, arg):
+    """!all: fan the same prompt out to several sessions through send_prompt.
+
+    The echo of who this hits is sent here, before the loop, rather than
+    returned — a returned reply is only sent by the caller after this whole
+    function is done, and a bad target list has to be visible before the
+    first prompt goes anywhere, not after all of them have.
+    """
+    target_str, _, prompt = arg.partition(" ")
+    if not target_str or not prompt.strip():
+        return "usage: !all <sess1,sess2 | --all> <prompt>"
+    readonly = lambda t: (cfg.get("modes") or {}).get(str(t)) == "readonly"
+    picks, skipped = [], []
+    if target_str == "--all":
+        for t, s in cfg["topics"].items():
+            if not has_session(s):
+                skipped.append(f"{s} (no tmux session)")
+            elif readonly(t):
+                skipped.append(f"{s} (read-only)")
+            else:
+                picks.append((t, s))
+    else:
+        for n in (x.strip() for x in target_str.split(",") if x.strip()):
+            hit = next(((t, s) for t, s in cfg["topics"].items()
+                       if s == n or t == n), None)
+            if not hit:
+                skipped.append(f"{n} (not bound)")
+            elif not has_session(hit[1]):
+                skipped.append(f"{hit[1]} (no tmux session)")
+            elif readonly(hit[0]):
+                skipped.append(f"{hit[1]} (read-only)")
+            else:
+                picks.append(hit)
+    if not picks:
+        return "nothing to send to" + (f" — {', '.join(map(str, skipped))}" if skipped else "")
+    send(cfg, topic, f"📣 !all → {', '.join(s for _, s in picks)}"
+         + (f"\n(skipped: {', '.join(map(str, skipped))})" if skipped else ""), mode="plain")
+    for t, s in picks:
+        reply = send_prompt(cfg, state, t, s, prompt)
+        if reply:
+            send(cfg, t, reply, mode="plain")
+    return None
+
+
+def board_report(cfg, state):
+    """Every topic at a glance — !status's own state classification, plus a
+    cheap per-session cost figure where a transcript is already known.
+    """
+    if not cfg["topics"]:
+        return "no topics bound"
+    lines = [status_report(cfg, state)]
+    costs = []
+    for _, sess in sorted(cfg["topics"].items(), key=lambda kv: int(kv[0])):
+        path = ((state.get(sess) or {}).get("snap") or {}).get("transcript")
+        if not (path and os.path.isfile(path)):
+            continue
+        t = token_tally([path])
+        if t["turns"]:
+            costs.append(f"{sess} ~{int(sum(t[k] * w for k, w in WEIGHT.items())):,}tok")
+    if costs:
+        lines.append("spend  " + " · ".join(costs))
+    return "\n".join(lines)
 
 
 # ---------- main ----------
@@ -2320,6 +2717,21 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
+"""
+
+PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.nightmux.plist")
+
+PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>com.nightmux</string>
+    <key>ProgramArguments</key><array>
+        <string>{py}</string>
+        <string>{script}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+</dict></plist>
 """
 
 
@@ -2442,6 +2854,15 @@ def open_text(cmd):
 
 def wire_unit():
     """Install and start the user service, and keep it running after logout."""
+    if sys.platform == "darwin":
+        os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
+        with open(PLIST_PATH, "w") as f:
+            f.write(PLIST.format(py=sys.executable,
+                                 script=os.path.join(HERE, "nightmux.py")))
+        # load/unload are the deprecated spelling, but they still work on every
+        # macOS this can run on, and the bootstrap replacement needs the uid.
+        subprocess.run(("launchctl", "unload", PLIST_PATH), capture_output=True)
+        return run("launchctl", "load", PLIST_PATH)
     os.makedirs(os.path.dirname(UNIT_PATH), exist_ok=True)
     with open(UNIT_PATH, "w") as f:
         f.write(UNIT.format(py=sys.executable,
@@ -2516,14 +2937,42 @@ def setup():
     for note in wire_claude() or ["claude settings already wired"]:
         print(f"   {note}")
     print()
-    if input("Install and start the systemd user service? [Y/n] ").strip().lower() \
+    mac = sys.platform == "darwin"
+    svc = "launchd agent" if mac else "systemd user service"
+    if input(f"Install and start the {svc}? [Y/n] ").strip().lower() \
             not in ("", "y", "yes"):
         print(f"skipped. Run it yourself with: {sys.executable} {__file__}")
         return
-    print(wire_unit() or f"   started, unit at {UNIT_PATH}")
+    print(wire_unit() or f"   started, unit at {PLIST_PATH if mac else UNIT_PATH}")
     print("\nDone. In the group: create a topic, then send\n"
           "   !new myproj ~/code/myproj\n"
           "and type to it. !help lists the rest.")
+
+
+def restore_startup(cfg, state, lock):
+    """Reconcile topic bindings against live tmux sessions once, at boot.
+
+    A reboot kills every tmux session; the config still remembers what each
+    topic was running (start_session sets `dirs`/`started` for exactly this).
+    auto_restore relaunches immediately — opt-in, since a reboot silently
+    resurrecting a paid agent session is not a default anyone asked for.
+    Otherwise the topic gets a button instead of nightmux acting on its own.
+    watchdog() gates every drain on the session being alive, so a queue behind
+    a still-dead one waits rather than being lost — nothing extra needed here.
+    """
+    for topic, sess in list(cfg["topics"].items()):
+        if has_session(sess):
+            continue
+        if cfg.get("auto_restore"):
+            key = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+            resume_session(cfg, state, lock, topic)
+            send(cfg, topic, f"▶️ restored {sess} · {key}", mode="plain")
+        else:
+            # Pre-mark dead so watchdog's first tick does not also send its own
+            # "gone" message for the same session a moment later.
+            state.setdefault(sess, {})["dead"] = True
+            send(cfg, topic, f"⚠️ {sess} is gone — machine restarted?", mode="plain",
+                 buttons=kb([[("restore", "!restore")]]))
 
 
 def main():
@@ -2541,15 +2990,19 @@ def main():
     _warned.update(load_warned())   # a restart is not news for a window mid-flight
     for sess, held in load_queue(state).items():
         topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
-        until, q, jobs = held.get("limit_until", 0), held.get("queue") or [], \
-            held.get("sched") or []
+        until, q, jobs, plan = held.get("limit_until", 0), held.get("queue") or [], \
+            held.get("sched") or [], held.get("shift") or []
         kept = ", ".join(([f"{len(q)} queued prompt(s)"] if q else [])
-                         + ([f"{len(jobs)} scheduled"] if jobs else []))
+                         + ([f"{len(jobs)} scheduled"] if jobs else [])
+                         + ([f"{len(plan)} shift step(s)"] if plan else []))
         print(f"restored {kept} for {sess}", flush=True)
         if topic:
             send(cfg, topic, f"↩️ nightmux restarted · {kept} kept"
                  + (f", still holding until {clock(cfg, until)}"
                     if until > time.time() else ""), mode="plain")
+    # Recreate what a reboot kills before the watcher's first tick can find a
+    # session missing and a queue with nowhere to go.
+    restore_startup(cfg, state, lock)
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
 
     # Resume where we stopped: a restart loses nothing. Kept out of the config
@@ -2586,9 +3039,13 @@ def process(cfg, state, lock, allow, upd):
     topic = str(msg.get("message_thread_id") or 0)
     att = (msg.get("photo") or [{}])[-1].get("file_id") if not cq else None
     doc = msg.get("document") or {} if not cq else {}
+    # voice/audio/video_note carry no file_name, unlike a document — fetch_file
+    # falls back to Telegram's own remote path for those, which already has one.
+    voice = (msg.get("voice") or msg.get("audio") or msg.get("video_note") or {}) \
+        if not cq else {}
     named = (msg.get("forum_topic_created") or {}).get("name")
     print(f"upd chat={chat} user={user} topic={topic} text={text[:40]!r}"
-          f"{' [cb]' if cq else ''}{' [file]' if att or doc else ''}"
+          f"{' [cb]' if cq else ''}{' [file]' if att or doc or voice else ''}"
           f"{' [topic ' + named + ']' if named else ''}", flush=True)
     if cq:
         api(cfg, "answerCallbackQuery", callback_query_id=cq["id"], text=text)
@@ -2600,13 +3057,14 @@ def process(cfg, state, lock, allow, upd):
             cfg.setdefault("topic_names", {})[topic] = named
             save_cfg(cfg)
         return
-    if not (text or att or doc):
+    if not (text or att or doc or voice):
         return
     if user not in allow:
         print(f"  drop: user {user} not in allow_users", flush=True)
         return
-    if att or doc:  # hand Claude the path; it reads images and files itself
-        path = fetch_file(cfg, doc.get("file_id") or att, doc.get("file_name"))
+    if att or doc or voice:  # hand Claude the path; it reads images and files itself
+        path = fetch_file(cfg, doc.get("file_id") or voice.get("file_id") or att,
+                          doc.get("file_name") or voice.get("file_name"))
         if not path:
             send(cfg, topic, "download failed")
             return
@@ -2883,6 +3341,12 @@ def selfcheck():
         [{"text": "1. Yes", "callback_data": "!1"}],
         [{"text": "2. Yes, and don't ask again", "callback_data": "!2"}],
         [{"text": "3. No (esc)", "callback_data": "!3"}]], menu
+    # A session suffix on every button: a mirrored copy in the command center
+    # has no topic binding to resolve a bare "!1" against.
+    qmenu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes", "  2. No"], "api")
+    picks_q = json.loads(qmenu)["inline_keyboard"]
+    assert picks_q[0][0]["callback_data"] == "!1 api", picks_q
+    assert picks_q[-1][0]["callback_data"] == "!esc api", picks_q
 
     cfg, state, screen = {"topics": {}, "chat_id": -1}, {}, []
     sent = []
@@ -2892,6 +3356,10 @@ def selfcheck():
     globals()["pane"] = lambda s: list(screen)
     globals()["visible"] = lambda s: list(screen)
     globals()["hooked"] = lambda s: False
+    # A path that is never a directory, so snapshot_repo's git check is skipped
+    # without shelling out — drain() calls it on every send, and the real
+    # sess_cwd would otherwise block on a tmux pane that was never created here.
+    globals()["sess_cwd"] = lambda s: "/nonexistent-nightmux-selfcheck"
     twice = lambda: (flush_new(cfg, state, "1", "s"), flush_new(cfg, state, "1", "s"))
 
     screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
@@ -3232,6 +3700,58 @@ def selfcheck():
         "dropped 2 scheduled prompt(s)"
     st.pop("sched")
 
+    # !digest: on demand reuses !cost/!git plumbing; scheduling rides !every's
+    # epoch math, but a fired job reports directly rather than typing "!digest"
+    # into the agent the way an ordinary scheduled prompt would.
+    st["snap"] = {}
+    out = handle(cfg, state, threading.Lock(), "1", "!digest")
+    assert out.startswith("🌙 digest · s"), out
+    sched_out = handle(cfg, state, threading.Lock(), "1", "!digest 08:00")
+    assert sched_out.startswith("digest daily at") and \
+        any(j.get("kind") == "digest" for j in st["sched"]), sched_out
+    assert handle(cfg, state, threading.Lock(), "1", "!digest off") == \
+        "digest schedule cancelled"
+    assert handle(cfg, state, threading.Lock(), "1", "!digest off") == \
+        "no digest scheduled"
+    assert handle(cfg, state, threading.Lock(), "1", "!digest nonsense") \
+        .startswith("usage:")
+    st["sched"] = [{"at": time.time() - 1, "every": 3600, "kind": "digest",
+                    "text": "!digest", "since": time.time() - 3600}]
+    st["queue"], n = [], len(sent)
+    due(cfg, state, "1", "s")
+    assert st["queue"] == [] and len(sent) == n + 1     # a report, never a typed prompt
+    assert sent[-1].startswith("🌙 digest · s"), sent[-1]
+    assert st["sched"][0]["since"] > time.time() - 5
+    assert st["sched"][0]["at"] > time.time() + 3500    # rearmed for the next window
+    st.pop("sched"), st.pop("snap")
+
+    # !shift: sequential overnight plan, drained like the queue one idle turn at
+    # a time — reuses drain()'s own idle/lockout gate instead of a second one.
+    out = handle(cfg, state, threading.Lock(), "1", "!shift\nfirst step\nsecond step")
+    assert out.startswith("shift set: 2 step(s)") and "first step" in out, out
+    assert st["shift"] == ["first step", "second step"] and st["shift_total"] == 2
+    assert handle(cfg, state, threading.Lock(), "1", "!shift").startswith("shift 0/2")
+    st["mode"], t = "busy", len(typed)
+    drain(cfg, state, "1", "s")                # busy pane: a shift step never fires
+    assert len(typed) == t and st["shift"] == ["first step", "second step"]
+    st["mode"], n = "idle", len(sent)
+    drain(cfg, state, "1", "s")
+    assert typed[-1] == "first step" and st["shift"] == ["second step"], typed
+    assert sent[n].startswith("🌙 shift 1/2 → first step"), sent[n:]
+    n = len(sent)
+    drain(cfg, state, "1", "s")
+    assert typed[-1] == "second step"
+    assert "shift" not in st and "shift_total" not in st
+    assert sent[n] == "🌙 shift 2/2 → second step", sent[n:]
+    assert "🌙 s shift done" in sent[n:], sent[n:]
+    assert handle(cfg, state, threading.Lock(), "1", "!shift") == \
+        "no shift plan · !shift then one prompt per line"
+    handle(cfg, state, threading.Lock(), "1", "!shift one two three")  # single line: one step
+    assert st["shift"] == ["one two three"], st["shift"]
+    assert handle(cfg, state, threading.Lock(), "1", "!shift clear") == \
+        "shift cleared (1 step(s) dropped)"
+    assert "shift" not in st
+
     # A turn cut off mid-flight has nothing left in the queue to bring it back,
     # so the hold queues its own continuation and the ordinary drain runs it.
     st["mode"], st["queue"], typed[:] = "busy", [], []
@@ -3370,6 +3890,94 @@ def selfcheck():
     assert handle(cfg, state, threading.Lock(), "1", "next task") is None
     assert typed[-1] == "next task", typed
 
+    # !center: binds a topic to control every session, never to one of them.
+    assert cfg.get("center_topic") is None
+    out = handle(cfg, state, threading.Lock(), "501", "!center")
+    assert out == "this topic is now the command center — try !board", out
+    assert cfg["center_topic"] == "501" and "501" not in cfg["topics"]
+    out2 = handle(cfg, state, threading.Lock(), "502", "!center")
+    assert out2 == "command center moved here from topic 501", out2
+    assert cfg["center_topic"] == "502" and "502" not in cfg["topics"]
+    # A center topic controls, it does not converse — plain text and an
+    # unrecognised command both point at !board instead of erroring or typing.
+    assert handle(cfg, state, threading.Lock(), "502", "hello there") == \
+        "this topic controls every session — try !board"
+    assert handle(cfg, state, threading.Lock(), "502", "!bogus") == \
+        "this topic controls every session — try !board"
+    assert handle(cfg, state, threading.Lock(), "502", "!center off") == \
+        "command center off"
+    assert cfg.get("center_topic") is None
+    assert handle(cfg, state, threading.Lock(), "502", "!center off") == \
+        "no command center was set"
+
+    # !board reuses !status's own classification rather than reclassifying.
+    board = handle(cfg, state, threading.Lock(), "1", "!board")
+    assert status_report(cfg, state) in board, board
+
+    # !all: fan-out reuses send_prompt, echoes who it hit before sending, and
+    # a readonly-bound or missing target is skipped, never typed into.
+    cfg["topics"]["9"] = "other"
+    state.setdefault("other", {})
+    assert handle(cfg, state, threading.Lock(), "1", "!all").startswith("usage:")
+    n, sent_n = len(typed), len(sent)
+    out3 = handle(cfg, state, threading.Lock(), "1", "!all s,other broadcast one")
+    assert out3 is None
+    echo = sent[sent_n]
+    assert echo.startswith("📣 !all → ") and "s" in echo and "other" in echo, echo
+    assert typed[n:] == ["broadcast one", "broadcast one"], typed[n:]
+    cfg["modes"] = {"9": "readonly"}
+    n, sent_n = len(typed), len(sent)
+    handle(cfg, state, threading.Lock(), "1", "!all --all skip-ro")
+    echo2 = sent[sent_n]
+    head, _, tail = echo2.partition("\n(skipped:")
+    assert "other" not in head and "s" in head, echo2
+    assert "other (read-only)" in tail, echo2
+    assert typed[n:] == ["skip-ro"], typed[n:]        # only s got it
+    cfg.pop("modes")
+    n, sent_n = len(typed), len(sent)
+    handle(cfg, state, threading.Lock(), "1", "!all bogus,s hi-there")
+    echo3 = sent[sent_n]
+    assert "bogus (not bound)" in echo3 and "s" in echo3.split("\n")[0], echo3
+    assert typed[n:] == ["hi-there"], typed[n:]
+    out4 = handle(cfg, state, threading.Lock(), "1", "!all bogus2 nope")
+    assert out4.startswith("nothing to send to"), out4
+
+    # !digest from the command center loops every bound topic instead of one.
+    handle(cfg, state, threading.Lock(), "1", "!center")
+    assert cfg["center_topic"] == "1"
+    state["s"]["snap"], state["other"]["snap"] = {}, {}
+    dig = handle(cfg, state, threading.Lock(), "1", "!digest")
+    assert dig.count("🌙 digest ·") == 2 and "s" in dig and "other" in dig, dig
+    assert handle(cfg, state, threading.Lock(), "1", "!digest 09:00") == \
+        "!digest here is report-only — schedule it from each session's own topic"
+    state["s"].pop("snap"), state["other"].pop("snap")
+    cfg["topics"].pop("9"), state.pop("other")
+
+    # A pending approval mirrors into the command center; whichever copy is
+    # tapped first resolves it under the shared lock, and the other has
+    # nothing left to press — no duplicate keystroke lands in the pane.
+    st = state["s"]
+    cfg["center_topic"] = "999"                    # distinct from "1": a real mirror
+    st.pop("asked", None), st.pop("asked_msgs", None)
+    sent_n = len(sent)
+    ok = ask(cfg, st, "1", "s", "proceed?", ["Do you want to proceed?",
+             "❯ 1. Yes", "  2. No"], key="k1")
+    assert ok is True and len(sent) == sent_n + 2      # origin, then the mirror
+    assert st["asked_msgs"] == [("1", 77), ("999", 77)], st["asked_msgs"]
+    pressed, edits_n = [], len(edits)
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+        assert handle(cfg, state, threading.Lock(), "999", "!1 s") is None  # mirror tapped first
+    assert pressed == [("s", "1")], pressed
+    assert "asked_msgs" not in st                      # resolved: nothing left to answer
+    assert any(m == "editMessageReplyMarkup" for m, _ in edits[edits_n:]), edits[edits_n:]
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+        assert handle(cfg, state, threading.Lock(), "1", "!1 s") is None    # origin's own copy, too late
+    assert pressed == [("s", "1")], pressed             # the racing second tap: no-op
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+        handle(cfg, state, threading.Lock(), "1", "!1")   # bare, no session: unaffected
+    assert pressed == [("s", "1"), ("s", "1")], pressed
+    cfg["center_topic"] = None
+
     st = state["s"]                               # busy: hold it where we can see it
     st["queue"], typed[:] = [], []
     screen[:] = ["● working", "✻ Brewing… (3s · esc to interrupt)"]
@@ -3433,6 +4041,26 @@ def selfcheck():
     state.pop("s")
     globals()["live_sessions"] = lambda: {}
     assert "💀 gone" in status_report({"topics": {"2": "gone"}}, {})
+
+    # Voice/audio/video-note updates ride the same download-and-type path as a
+    # photo or a document — just another field to notice on the way in.
+    cfg5, fetched = {"chat_id": -1}, []
+    with stubbed(fetch_file=lambda c, fid, name=None: fetched.append((fid, name)) or "/f/x",
+                handle=lambda *a, **k: None, api=lambda c, m, **kw: {}):
+        process(cfg5, {}, threading.Lock(), {7}, {
+            "update_id": 1, "message": {"chat": {"id": -1}, "from": {"id": 7},
+             "message_thread_id": "1", "voice": {"file_id": "v1", "duration": 3}}})
+        assert fetched[-1] == ("v1", None), fetched
+        process(cfg5, {}, threading.Lock(), {7}, {
+            "update_id": 2, "message": {"chat": {"id": -1}, "from": {"id": 7},
+             "message_thread_id": "1",
+             "video_note": {"file_id": "vn1", "duration": 5}}})
+        assert fetched[-1] == ("vn1", None), fetched
+        process(cfg5, {}, threading.Lock(), {7}, {   # audio can carry a name; voice never does
+            "update_id": 3, "message": {"chat": {"id": -1}, "from": {"id": 7},
+             "message_thread_id": "1",
+             "audio": {"file_id": "a1", "file_name": "song.mp3"}}})
+        assert fetched[-1] == ("a1", "song.mp3"), fetched
 
     order, gate, ran = [], threading.Event(), threading.Event()
 
@@ -3528,6 +4156,106 @@ def selfcheck():
     handle(cfg2, {}, lk, "77", "!opencode side")
     assert spawned[-1][2] == "opencode", spawned[-1]
 
+    # !restore is !resume under another name — both funnel through resume_session.
+    cfg2["topics"]["91"] = "ghost"
+    out = handle(cfg2, {}, lk, "91", "!restore")
+    assert spawned[-1][0] == "ghost" and "topic bound" in out, out
+    assert cfg2["started"]["91"] == "claude"
+
+    # restore_startup: a dead topic gets a button unless auto_restore says relaunch.
+    cfg3, st3, n = {"topics": {"1": "gone1", "2": "alive2"}, "chat_id": -1}, {}, len(sent)
+    globals()["has_session"] = lambda s: s == "alive2"
+    restore_startup(cfg3, st3, lk)
+    assert sent[-1].startswith("⚠️ gone1 is gone") and len(sent) == n + 1, sent[n:]
+    assert st3["gone1"]["dead"] is True                # pre-armed: watchdog stays quiet
+    cfg3["auto_restore"] = True
+    restore_startup(cfg3, st3, lk)
+    assert spawned[-1][0] == "gone1" and sent[-1].startswith("▶️ restored gone1"), sent[-1]
+
+    # git worktrees + snapshot-before-unattended-prompt, against a real throwaway repo.
+    import tempfile
+    repo = tempfile.mkdtemp(prefix="nightmux-selfcheck-")
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+    with open(os.path.join(repo, "f"), "w") as f:
+        f.write("one")
+    subprocess.run(["git", "-C", repo, "add", "f"], check=True)
+    subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
+
+    assert worktree_path("/no/such/dir", "x") is None    # not a repo: nothing to attach to
+    wt = worktree_path(repo, "feature-a")
+    assert wt == os.path.join(f"{repo}-wt", "feature-a") and os.path.isdir(wt), wt
+    assert tmux_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/feature-a")
+    assert worktree_path(repo, "feature-a") == wt        # already there: reused, not redone
+
+    globals()["has_session"] = lambda s: False
+    out = start_session(cfg2, {}, lk, "92", f"wtses {repo} @feature-b", "claude")
+    assert out.startswith("started claude") and "@feature-b" in out, out
+    assert cfg2["dirs"]["92"] == os.path.join(f"{repo}-wt", "feature-b")
+    assert os.path.isdir(cfg2["dirs"]["92"])
+    plaindir = tempfile.mkdtemp(prefix="nightmux-selfcheck-plain-")
+    bad = start_session(cfg2, {}, lk, "93", f"wtses2 {plaindir} @x", "claude")
+    assert "not a git repo" in bad, bad
+    shutil.rmtree(plaindir, ignore_errors=True)
+
+    with open(os.path.join(repo, "f"), "w") as f:        # dirty worktree
+        f.write("two")
+    with stubbed(sess_cwd=lambda s: repo):
+        snapshot_repo("t")                                # unattended: snapshot first
+    with open(os.path.join(repo, "f")) as f:
+        assert f.read() == "two", "stash create must never touch the worktree"
+    pre = [n_ for n_ in tmux_git(repo, "for-each-ref", "--format=%(refname:short)",
+                                 "refs/heads/nightmux/pre-*").split("\n") if n_.strip()]
+    assert len(pre) == 1, pre
+    tmux_git(repo, "branch", "-D", pre[0])   # clean slate for the deterministic prune below
+
+    for i in range(7):                                    # deterministic creatordate
+        d = f"2020-01-01T00:00:{i:02d}"
+        env = dict(os.environ, GIT_AUTHOR_DATE=d, GIT_COMMITTER_DATE=d)
+        with open(os.path.join(repo, "f"), "w") as f:
+            f.write(str(i))
+        subprocess.run(["git", "-C", repo, "commit", "-aq", "-m", str(i)], env=env, check=True)
+        subprocess.run(["git", "-C", repo, "branch", f"nightmux/pre-fake{i}", "HEAD"],
+                       env=env, check=True)
+    prune_snapshots(repo)
+    survivors = [n_ for n_ in tmux_git(
+        repo, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
+        "refs/heads/nightmux/pre-*").split("\n") if n_.strip()]
+    assert len(survivors) == SNAP_KEEP, survivors      # only the last 5 survive
+    assert survivors[0] == "nightmux/pre-fake6", survivors
+    assert "nightmux/pre-fake0" not in survivors, survivors
+
+    cfg4 = {"topics": {"1": "s4"}}
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True):
+        undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo")
+        wt_out = handle(cfg4, {}, threading.Lock(), "1", "!worktrees")
+    assert "nightmux/pre-fake6" in undo_out, undo_out
+    assert "git restore --source nightmux/pre-fake6" in undo_out
+    assert "git diff nightmux/pre-fake6" in undo_out, undo_out
+    assert repo in wt_out and "feature-a" in wt_out, wt_out
+
+    shutil.rmtree(repo, ignore_errors=True)
+    shutil.rmtree(f"{repo}-wt", ignore_errors=True)
+
+    # --doctor: one ✓/✗ line per check, and the overall result is their AND.
+    def _boom():
+        raise OSError("no config")
+
+    class _FakeShutil:
+        which = staticmethod(lambda n: "/usr/bin/tmux")
+
+    with stubbed(load_cfg=_boom):
+        assert doctor() is False               # no config at all: nothing else to check
+    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
+                api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
+                run=lambda *a, **kw: "active", shutil=_FakeShutil()):
+        assert doctor() is True                # every check stubbed healthy
+    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
+                api=lambda c, m, **kw: {"ok": False, "description": "bad token"},
+                wired=lambda: [], run=lambda *a, **kw: "inactive", shutil=_FakeShutil()):
+        assert doctor() is False               # one ✗ (token rejected) fails the whole thing
+
     for n_ in os.listdir(STATE_DIR):
         os.remove(os.path.join(STATE_DIR, n_))
     os.rmdir(STATE_DIR)
@@ -3537,12 +4265,53 @@ def selfcheck():
     print("selfcheck ok")
 
 
+def doctor():
+    """nightmux --doctor: one ✓/✗ line per check, triage only, nothing fixed."""
+    ok = [True]
+
+    def line(label, passed, detail=""):
+        ok[0] = ok[0] and passed
+        print(f"{'✓' if passed else '✗'} {label}" + (f" — {detail}" if detail else ""))
+
+    line("tmux binary found", bool(shutil.which("tmux")))
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError) as e:
+        cfg = {}
+        line("config file", False, f"{CFG_PATH}: {e}")
+    else:
+        missing = [k for k in ("token", "chat_id", "allow_users") if not cfg.get(k)]
+        line("config has token/chat_id/allow_users", not missing,
+             ("missing " + ", ".join(missing)) if missing else "")
+    if cfg.get("token"):
+        me = api(cfg, "getMe")
+        line("token accepted by Telegram", bool(me.get("ok")), me.get("description", ""))
+    else:
+        line("token accepted by Telegram", False, "no token to check")
+    if cfg.get("token") and cfg.get("chat_id"):
+        chat = api(cfg, "getChat", chat_id=cfg["chat_id"])
+        line("bot reachable in the configured chat", bool(chat.get("ok")),
+             chat.get("description", ""))
+    else:
+        line("bot reachable in the configured chat", False, "no token/chat_id to check")
+    on = wired()
+    line("Claude Code hooks wired", bool(on), ", ".join(on) if on else "none found")
+    if sys.platform == "darwin":
+        active = "com.nightmux" in run("launchctl", "list")
+    else:
+        active = run("systemctl", "--user", "is-active", "nightmux").strip() == "active"
+    line("service active", active)
+    return ok[0]
+
+
 def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
     if "--selfcheck" in sys.argv:
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
+    elif "--doctor" in sys.argv:
+        sys.exit(0 if doctor() else 1)
     elif "--version" in sys.argv:
         print(version_report())
     else:

@@ -32,8 +32,10 @@ No container, no DNS, no certificates, no ports open, no relay service. It
 attaches to tmux sessions you already have, on the machine you already use.
 Python stdlib only — one file, ~3,400 lines you can read in an afternoon.
 
-<!-- TODO: 30s screen recording — the ⏸ / ▶️ pair above, on a real phone, then a
-     permission prompt answered from the buttons. -->
+![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
+
+**Try it:** `pipx install nightmux && nightmux --setup` — five minutes, no
+dependencies, no server. [Full install →](#install)
 
 ```
    Telegram group (Topics on)          your machine
@@ -87,8 +89,8 @@ numbers are Claude Code specific — every other agent degrades to reading the
 terminal, which is how nightmux worked before the hooks existed.
 
 **Not for you if** you want a polished app instead of a chat window, you're on
-Windows or macOS (the service install is systemd, though everything else is
-portable — [#2](https://github.com/mmr710/nightmux/issues/2)), or you want your
+Windows ([#2](https://github.com/mmr710/nightmux/issues/2) — macOS and Linux
+both install as a service), or you want your
 teammates in the same group: the allowlist is a list of people trusted with a
 shell on your machine, which is not a thing to hand out. One person, their own
 box, their own agents.
@@ -116,8 +118,9 @@ python3 ~/nightmux/nightmux.py --setup
 ```
 
 Setup walks the whole thing: BotFather token, finding your group, writing the
-allowlist, wiring the Claude Code hooks, installing the systemd user service. It
-is idempotent — re-run it after an upgrade.
+allowlist, wiring the Claude Code hooks, installing the service (a systemd user
+unit on Linux, a launchd agent on macOS). It is idempotent — re-run it after an
+upgrade.
 
 You will be asked to create a Telegram group with **Topics** turned on and add
 the bot as an **admin**. Admin is not optional: without it the bot only receives
@@ -158,19 +161,26 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 
 | | |
 |---|---|
-| `!new <name> [dir] [flags]` | start a session with the default agent, bind this topic to it |
+| `!new <name> [dir] [flags] [@branch]` | start a session with the default agent, bind this topic to it |
 | `!codex` / `!aider` / `!gemini` / `!agy` … | same, with that agent |
-| `!resume [agent]` | relaunch this topic's directory, resuming the last conversation |
+| `!resume [agent]` / `!restore` | relaunch this topic's directory, resuming the last conversation |
 | `!bind <session>` / `!unbind` / `!kill` | attach, detach, stop (kill asks first) |
 | `!sessions` / `!status` | tmux sessions; every topic and its state |
 | `!pane [lines]` / `!ctl` | dump the terminal; button panel |
 | `!git` / `!diff` / `!get <path>` | repo state and file upload from the session's cwd |
+| `!worktrees` | git worktrees of this topic's repo, and which session sits in each |
+| `!undo` | list snapshot branches for this repo and the restore commands — never runs them |
 | `!ctx` / `!cost [days]` / `!usage` | context breakdown, token spend, limit windows |
 | `!autocompact <pct\|off>` | auto-`/compact` at a context threshold |
 | `!idlectx <pct\|off>` | flag parked sessions still holding a big context |
 | `!queue [clear\|now]` | prompts held for a rate-limit reset |
 | `!at 03:00 <prompt>`, `!at +90m …` | run a prompt later |
 | `!every 4h <prompt>`, `!sched [clear]` | run it on a repeat, or list what is set |
+| `!shift` + one prompt per line | a sequential overnight plan, one turn at a time |
+| `!digest [HH:MM\|off]` | what happened while you slept, on demand or daily |
+| `!center [off]` | make this topic watch and control every session |
+| `!board` | every topic at a glance, from any topic |
+| `!all <targets\|--all> <prompt>` | send one prompt into several sessions at once |
 | `!grep <text> [days]` | search every transcript on the machine |
 | `!verbose` / `!raw <text>` / `!keys <keys>` | tool detail, type past a menu, raw tmux keys |
 | `!1`..`!9` `!y` `!n` `!esc` `!int` `!enter` `!tab` | menu picks and keys |
@@ -182,7 +192,55 @@ the digit of its Yes/No option, because the letter does nothing to a list.
 | `!version` | build, python, and which hooks are wired |
 | `!tz <zone>` / `!reload` / `!log` / `!help` | timezone, re-read config, journal, this list |
 
-Send a photo or file and it is saved, with the path typed into the session.
+Send a photo, file or voice message and it is saved, with the path typed into the
+session.
+
+## Several agents, one project
+
+`!new api ~/code/api @refactor-auth` checks out a git worktree for that branch —
+new if it doesn't exist, reused if it does — at `~/code/api-wt/refactor-auth`,
+and starts the session there instead of in the main tree. Two agents, two
+branches, no stepping on each other's uncommitted work. `!worktrees` lists every
+worktree of the current topic's repo and which session (if any) is sitting in
+it. Nothing here routes work between agents or merges anything — that part is
+still yours; this is just isolation.
+
+## Command center
+
+`!center` in any topic makes it the one place that watches and controls every
+session — it binds to nothing itself, `!board` there shows every topic's state
+at a glance:
+
+```
+you   !board
+bot   ✅ api      topic 12   idle    2s quiet  5h 40%  ctx 22%
+      ⚙️  web      topic 15   busy    0s quiet  5h 40%
+      🟠 scratch  topic 19   waiting 1s quiet  🔒held→04:11
+      spend  api ~12,400tok · web ~3,100tok
+```
+
+Approvals mirror there too: a session's 🟠 needs-input prompt posts to its own
+topic as always, and a copy lands in the command center with the same buttons.
+Whichever is tapped first answers the pane; the other loses its buttons
+immediately rather than sitting there able to send a second, conflicting
+keystroke. `!all web,scratch --continue` (or `!all --all <prompt>` for every
+bound, writable session) sends the same prompt to several sessions at once —
+it replies with exactly who it is about to hit before anything is typed, and a
+`"readonly"` topic is never one of them. Nothing here routes work between
+agents or decides anything for them; it broadcasts and it aggregates, and every
+session still runs on its own.
+
+## Snapshots and !undo
+
+Before nightmux sends a prompt it typed without you watching it happen — a
+prompt held for a usage-limit reset, an `!at`/`!every` firing, a `!shift`
+step — it takes a git snapshot of the session's cwd first: `git stash create`
+captures the worktree without touching it, and a `nightmux/pre-<UTC timestamp>`
+branch is left pointing at it (the last 5 per repo; older ones are dropped).
+Prompts you type live get no snapshot — there is nothing unattended about them.
+`!undo` lists a topic's snapshot branches, newest first, with the exact `git
+restore`/`git diff` commands to look at or roll back to one. It never runs them
+— a phone is a small thing to fat-finger a hard reset from.
 
 ## How it works
 
@@ -211,6 +269,10 @@ restart, how output is chosen, and the decisions that were rejected.
 Run the tests: `python3 nightmux.py --selfcheck` (and the same flag on the three
 hook scripts). No framework, no fixtures — asserts that fail loudly.
 
+`nightmux --doctor` triages an install without fixing anything: tmux found,
+config complete, token accepted by Telegram, hooks wired, service active — one
+✓/✗ line each, exit 1 if anything is off.
+
 `python3 tests/test_panes.py` runs the pane corpus: captured terminal screens and
 the state nightmux must read from each. Adding an agent whose TUI it misreads is
 one file — drop the pane in `tests/panes/` as `<what>.<busy|idle|waiting>.txt` and
@@ -229,6 +291,7 @@ the classifier is held to it from then on.
   "agent": "claude",
   "agents": {"opencode": ["opencode", "--continue"]},
   "autostart": {"api": "~/code/api"},
+  "auto_restore": false,
   "projects_root": "~/code",
   "tz_offset": "Africa/Cairo",
   "autocompact": 70,
@@ -241,9 +304,13 @@ the classifier is held to it from then on.
 `agent` is what `!new` starts. `agents` adds or overrides entries in the
 built-in table as `[command, resume-flags]` — those flags are the part most
 likely to drift as these CLIs change, so they are config, not code.
-`autostart` recreates sessions after a reboot. `projects_root` makes a new topic
-named after a directory start that project on its first message. `!reload` picks
-up hand edits without a restart.
+`autostart` recreates named sessions after a reboot. For everything else a
+reboot killed, nightmux checks each bound topic against tmux at startup: with
+`auto_restore` it just relaunches and says so; without it, the topic gets a
+"machine restarted?" message with a Restore button instead of nightmux acting
+on its own — `!restore` does the same relaunch on demand. `projects_root` makes
+a new topic named after a directory start that project on its first message.
+`!reload` picks up hand edits without a restart.
 
 ## Requirements
 
