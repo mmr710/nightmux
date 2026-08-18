@@ -8,6 +8,13 @@ After=network-online.target
 ExecStart=/usr/bin/python3 %h/nightmux/nightmux.py
 Restart=always
 RestartSec=5
+# The tmux server is forked from this daemon, so every agent session lands in
+# this unit's cgroup — and the default KillMode=control-group takes all of them
+# down on `systemctl restart nightmux`, which is what the docs tell you to run
+# after editing the config. Restarting the controller must not kill the work it
+# controls: with `process`, systemd signals this process and leaves the sessions
+# alone, and the restarted daemon reattaches to them by name.
+KillMode=process
 
 [Install]
 WantedBy=default.target

@@ -2742,6 +2742,13 @@ After=network-online.target
 ExecStart={py} {script}
 Restart=always
 RestartSec=5
+# The tmux server is forked from this daemon, so every agent session lands in
+# this unit's cgroup — and the default KillMode=control-group takes all of them
+# down on `systemctl restart nightmux`, which is what the docs tell you to run
+# after editing the config. Restarting the controller must not kill the work it
+# controls: with `process`, systemd signals this process and leaves the sessions
+# alone, and the restarted daemon reattaches to them by name.
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -4302,7 +4309,8 @@ def selfcheck():
         assert doctor() is False               # no config at all: nothing else to check
     with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
                 api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
-                run=lambda *a, **kw: "active", shutil=_FakeShutil()):
+                run=lambda *a, **kw: "process" if "KillMode" in a else "active",
+                shutil=_FakeShutil()):
         assert doctor() is True                # every check stubbed healthy
     with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
                 api=lambda c, m, **kw: {"ok": False, "description": "bad token"},
@@ -4353,6 +4361,15 @@ def doctor():
         active = "com.nightmux" in run("launchctl", "list")
     else:
         active = run("systemctl", "--user", "is-active", "nightmux").strip() == "active"
+        # An install from before this was added keeps its own unit file, and the
+        # symptom is spectacular: `systemctl restart nightmux` takes every agent
+        # session with it, because they are all in this unit's cgroup.
+        km = run("systemctl", "--user", "show", "-p", "KillMode", "--value",
+                 "nightmux").strip()
+        line("restarting the service keeps sessions alive", km == "process",
+             "" if km == "process" else
+             f"KillMode={km} — add 'KillMode=process' under [Service] in "
+             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     line("service active", active)
     return ok[0]
 
