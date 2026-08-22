@@ -317,6 +317,26 @@ def tgt(sess):
     return _target.get(sess, sess)
 
 
+SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh"}
+
+# Session name -> its pane is sitting at a shell prompt, filled by the same
+# tick as _target. Listed by shell rather than by agent on purpose: an agent
+# nobody has told nightmux about must not read as a crash, but a shell always is.
+_shell = {}
+
+
+def agentless(sess):
+    """True when the agent under this session has exited and left its shell.
+
+    tmux keeps the session alive afterwards, and a shell prompt has neither of
+    the things the classifier looks for, so it reads as an idle pane ready for
+    work. Every path that types a prompt would then type it into bash and press
+    Enter: the queued prompt is consumed as a shell command, and the topic is
+    told it was sent.
+    """
+    return _shell.get(sess, False)
+
+
 def pane(sess):
     """Everything the pane holds: scrollback history plus the live screen."""
     return tmux("capture-pane", "-p", "-J", "-t", tgt(sess), "-S", "-").split("\n")
@@ -388,20 +408,24 @@ def live_sessions():
     """
     out = tmux("list-panes", "-a", "-F",
                "#{session_name}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}")
-    seen, active, running = {}, {}, {}
+    seen, active, running, cmd = {}, {}, {}, {}
     for l in out.split("\n"):
         f = l.split("\t")
         if len(f) != 4:
             continue
         seen.setdefault(f[0], []).append(f[1])
+        cmd[f[1]] = f[3]
         if f[2] == "1":
             active.setdefault(f[0], f[1])
         if f[3] in AGENT_BINS:
             running.setdefault(f[0], f[1])
     hot = snapped()
-    return {s: max((p for p in pids if p in hot), key=lambda p: hot[p],
-                   default=running.get(s) or active.get(s) or pids[0])
-            for s, pids in seen.items()}
+    at = {s: max((p for p in pids if p in hot), key=lambda p: hot[p],
+                 default=running.get(s) or active.get(s) or pids[0])
+          for s, pids in seen.items()}
+    _shell.clear()
+    _shell.update({s: cmd.get(p) in SHELLS for s, p in at.items()})
+    return at
 
 
 BIG_PROMPT = 2000  # past this, typing it key by key is slower and less reliable
@@ -442,13 +466,20 @@ def settle(sess, needle, timeout=2.0):
 
 
 def inject(sess, text):
-    """Type text into the Claude Code prompt and submit.
+    """Type text into the Claude Code prompt and submit. False if nothing was.
 
     One tmux invocation for the whole prompt — chained with ';' arguments —
     instead of one process spawn per line, then wait for the text to land
     rather than sleeping a fixed guess. The old fixed sleep submitted a
     truncated prompt whenever the TUI redrew slower than 0.4s.
+
+    Refuses a pane with no agent in it. Every caller routes through here, so
+    this is the one place that has to know a prompt is not a shell command.
     """
+    if agentless(sess):
+        print(f"inject {sess}: pane is at a shell, refusing to type a prompt "
+              "into it", file=sys.stderr, flush=True)
+        return False
     args, at = [], tgt(sess)
     for i, line in enumerate(text.split("\n")):
         if i:  # newline inside the prompt box, not a submit
@@ -456,12 +487,13 @@ def inject(sess, text):
         if line:
             args += [";", "send-keys", "-t", at, "-l", "--", line]
     if not args:
-        return
+        return False
     tmux(*args[1:])
     if not settle(sess, text.split("\n")[-1]):
         print(f"inject {sess}: text not on screen after 2s, sending Enter anyway",
               file=sys.stderr)
     tmux("send-keys", "-t", at, "Enter")
+    return True
 
 
 # ---------- output watcher ----------
@@ -1355,6 +1387,10 @@ def drain(cfg, state, topic, sess):
     second copy of the wait-for-idle logic.
     """
     st = state.setdefault(sess, {})
+    # Nothing leaves the queue while there is no agent to give it to. watchdog
+    # owns saying so; this only has to not spend the prompt.
+    if agentless(sess):
+        return
     until = st.get("limit_until", 0)
     if until and time.time() >= until:
         # Clear the hold here rather than on the way out with a prompt. A window
@@ -1736,6 +1772,21 @@ def watchdog(cfg, state, topic, sess, alive):
         state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
                                           "shift_total") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
+    if alive:
+        st = state.setdefault(sess, {})          # the branch above rebinds it
+        if agentless(sess):
+            # ponytail: two ticks, not one. A session is a bare shell for the
+            # moment between `tmux new-session` and the agent starting under it,
+            # and that is not a crash. Per-agent startup times if this ever lies.
+            st["shell_seen"] = st.get("shell_seen", 0) + 1
+            if st["shell_seen"] == 2:
+                held = len(st.get("queue") or []) + len(st.get("shift") or [])
+                send(cfg, topic,
+                     f"💀 the agent in '{sess}' exited — its pane is a shell now"
+                     + (f", {held} prompt(s) held" if held else ""), mode="plain",
+                     buttons=kb([[("restore", "!restore")]]))
+        elif st.pop("shell_seen", 0) >= 2:
+            send(cfg, topic, f"↩️ an agent is running in '{sess}' again", mode="plain")
     return alive
 
 
@@ -1972,7 +2023,13 @@ def resume_session(cfg, state, lock, topic, arg=""):
         (cfg.get("started") or {}).get(topic) or default_agent(cfg))
     name = sess or f"topic{topic}"
     if has_session(name):
-        return f"'{name}' is alive; type /resume in it to pick a conversation"
+        live_sessions()          # _shell is a tick old, and this branch kills
+        if not agentless(name):
+            return f"'{name}' is alive; type /resume in it to pick a conversation"
+        # A shell where the agent used to be. Killing it is what makes !restore
+        # one button that repairs both cases, instead of a button that works
+        # only for the failure tmux happened to notice.
+        tmux("kill-session", "-t", name)
     # No fallback. `claude --continue` resumes the last conversation *in this
     # directory*, so guessing $HOME does not start a fresh session there — it
     # attaches to whatever happened to run in $HOME last, for every topic at
@@ -2583,7 +2640,13 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         return (f"📥 queued ({len(st['queue'])}) · {sess} is working\n"
                 "sends when it finishes · !queue to list, !queue clear to drop")
     text = spill(sess, text)
-    inject(sess, text)
+    if not inject(sess, text):
+        # No agent under the pane. Holding it is the whole point: typed into a
+        # shell it would have run as a command and been gone.
+        st.setdefault("queue", []).append(text)
+        save_queue(state)
+        return (f"📥 queued ({len(st['queue'])}) · no agent is running in {sess}\n"
+                "!restore relaunches it, and the queue goes in behind it")
     remember(state, sess, text)
     started(cfg, state, topic, sess, mid)
     return None
@@ -3013,6 +3076,65 @@ def restore_startup(cfg, state, lock):
              buttons=kb([[("restore", "!restore")]]))
 
 
+# ---------- webhook API ----------
+import http.server
+import socketserver
+
+class WebhookHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        parts = self.path.strip('/').split('/')
+        if len(parts) != 2 or parts[0] != 'topic':
+            self.send_response(404)
+            self.end_headers()
+            return
+            
+        topic = parts[1]
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8').strip()
+        
+        if not body:
+            self.send_response(400)
+            self.end_headers()
+            return
+            
+        fake_upd = {
+            "update_id": 0,
+            "message": {
+                "message_thread_id": int(topic) if topic.isdigit() else topic,
+                "text": body,
+                "chat": {"id": self.server.cfg["chat_id"]},
+                "from": {"id": list(self.server.allow)[0]} 
+            }
+        }
+        
+        class DummyAcks:
+            def dispatch(self, uid): pass
+            def ack(self, uid): pass
+            
+        q = _workers.get(topic)
+        if q is None:
+            q = _workers[topic] = queue.Queue()
+            threading.Thread(target=serve, args=(q,), daemon=True).start()
+            
+        q.put((self.server.cfg, self.server.state, self.server.lock, self.server.allow, fake_upd, DummyAcks()))
+        
+        self.send_response(202)
+        self.end_headers()
+        self.wfile.write(b"Accepted\\n")
+
+    def log_message(self, format, *args):
+        pass
+
+def run_webhook_server(cfg, state, lock, allow, port):
+    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        
+    server = ThreadedHTTPServer(('127.0.0.1', port), WebhookHandler)
+    server.cfg, server.state, server.lock, server.allow = cfg, state, lock, allow
+    print(f"webhook listening on 127.0.0.1:{port}", flush=True)
+    server.serve_forever()
+
+
 def main():
     migrate()
     cfg = load_cfg()
@@ -3053,6 +3175,13 @@ def main():
     acks = Acks()
     print(f"nightmux up. chat={cfg['chat_id']} topics={cfg['topics']} offset={offset}",
           flush=True)
+
+    if cfg.get("webhook_port"):
+        threading.Thread(
+            target=run_webhook_server, 
+            args=(cfg, state, lock, allow, cfg["webhook_port"]), 
+            daemon=True
+        ).start()
 
     while True:
         r = api(cfg, "getUpdates", offset=offset, timeout=25,
@@ -3180,6 +3309,33 @@ def selfcheck():
     # A topic with no recorded directory must not come back in $HOME: --continue
     # resumes the last conversation *of that directory*, so one reboot put three
     # topics on the same one. It is learned from the live session instead.
+    # A real tmux session with no agent in it: the pane reads idle and ready for
+    # work, which is exactly why every send has to ask first. Injecting here
+    # would run the prompt as a shell command and lose it.
+    subprocess.run(("tmux", "kill-session", "-t", "nm-selfcheck"),
+                   capture_output=True)
+    subprocess.run(("tmux", "new-session", "-d", "-s", "nm-selfcheck", "-c", "/"),
+                   capture_output=True)
+    said = []
+    try:
+        with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False:
+                     (said.append(x), 1)[1]):
+            live_sessions()                        # fills _shell, as a tick does
+            assert pane_state(visible("nm-selfcheck")) == "idle"  # nothing says stop
+            assert agentless("nm-selfcheck") is True             # ...except this
+            assert inject("nm-selfcheck", "rm -rf /") is False    # nothing typed
+            st3 = {"queue": ["held"]}
+            drain({"chat_id": -1}, {"nm-selfcheck": st3}, "1", "nm-selfcheck")
+            assert st3["queue"] == ["held"] and said == [], (st3, said)  # not spent
+            for _ in range(3):                     # said once, on the second tick
+                watchdog({"chat_id": -1}, {"nm-selfcheck": st3}, "1",
+                         "nm-selfcheck", True)
+            assert sum("exited" in s for s in said) == 1, said
+    finally:
+        subprocess.run(("tmux", "kill-session", "-t", "nm-selfcheck"),
+                       capture_output=True)
+        _shell.clear()
+
     spawned = []
     with stubbed(has_session=lambda s: False, sess_cwd=lambda s: FILE_DIR,
                  spawn=lambda *a: spawned.append(a)):
@@ -3512,7 +3668,7 @@ def selfcheck():
     assert spill("s", "short") == "short"         # ... anything normal is untouched
 
     typed = []                                    # menu guard on plain text
-    globals()["inject"] = lambda s, t: typed.append(t)
+    globals()["inject"] = lambda s, t: (typed.append(t), True)[1]   # typed it
     cfg["topics"] = {"1": "s"}
     screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
     guard = handle(cfg, state, threading.Lock(), "1", "no, do not do that")
