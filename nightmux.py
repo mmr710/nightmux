@@ -4540,6 +4540,12 @@ def cli():
         sys.exit(0 if doctor() else 1)
     elif "--version" in sys.argv:
         print(version_report())
+    elif "--demo" in sys.argv:
+        print("\033[1mTo experience the nightmux auto-resume magic instantly:\033[0m\n")
+        print("1. Open your Telegram bot")
+        print("2. Send this exact message to bind a test agent:\n")
+        print("    !new demo bash -c \"echo 'Working...'; sleep 2; echo 'usage limit reached. resets in 1m'; sleep 125; echo 'Agent resumed!'\"\n")
+        print("nightmux will immediately detect the simulated limit, pause the topic, wait until the reset window opens, and auto-resume.\n")
     else:
         main()
 
