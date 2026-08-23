@@ -34,7 +34,7 @@ Python stdlib only — one file, ~3,400 lines you can read in an afternoon.
 
 ![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
 
-**Try it:** `pipx install nightmux && nightmux --setup` — five minutes, no
+**Try it:** `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash` — five minutes, no
 dependencies, no server. [Full install →](#install)
 
 ```
@@ -97,7 +97,15 @@ box, their own agents.
 
 ## Install
 
-Install from PyPI (recommended):
+The fastest way to install is using the one-line installer:
+```bash
+curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash
+```
+*(This automatically checks for `pipx`, installs nightmux, and runs setup).*
+
+**To test the rate limit auto-recovery instantly:** run `python3 nightmux.py --demo` after installing.
+
+Or install from PyPI manually:
 ```bash
 pipx install nightmux
 nightmux --setup
@@ -241,6 +249,18 @@ Prompts you type live get no snapshot — there is nothing unattended about them
 `!undo` lists a topic's snapshot branches, newest first, with the exact `git
 restore`/`git diff` commands to look at or roll back to one. It never runs them
 — a phone is a small thing to fat-finger a hard reset from.
+
+## Zero-Dependency Webhook API
+
+nightmux runs a local HTTP server (`127.0.0.1:9090`) to accept commands from outside Telegram. You can configure `"webhook_port": 9090` in your `~/.nightmux.json` to enable it.
+
+This turns nightmux into the central nervous system for your local agents. You can pipe GitHub Actions test failures or VS Code compiler errors straight into your agent's queue while you sleep.
+
+```bash
+curl -X POST http://127.0.0.1:9090/topic/api -d "review the staged changes"
+```
+
+Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
 ## How it works
 
