@@ -296,12 +296,27 @@ def tmux_git(cwd, *args):
     return run("git", "-C", cwd, *args, timeout=30).strip()
 
 
-def has_session(sess):
+def real_session(sess):
+    """tmux's own name for this target, or "" when it resolves to nothing.
+
+    A tmux target matches by exact name, then by prefix, then as a pattern, so
+    `has-session -t game_1` succeeds against a session called `game_1-15`.
+    Everywhere else nightmux compares session names as plain strings against
+    `list-panes` output, so !bind accepting the abbreviation bound a name that
+    never appears in live_sessions() — and the topic was told '💀 gone' one
+    tick after 'topic bound'. Bind what tmux says the session is called.
+    """
     try:
-        return subprocess.run(("tmux", "has-session", "-t", sess),
-                              capture_output=True, timeout=10).returncode == 0
+        p = subprocess.run(("tmux", "display", "-p", "-t", sess, "#{session_name}"),
+                           capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired:
-        return False
+        return ""
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def has_session(sess):
+    """Exact only. A prefix match here is the bug real_session describes."""
+    return real_session(sess) == sess
 
 
 # Session name -> the pane its agent actually lives in, refreshed once per watch
@@ -1977,6 +1992,7 @@ AGENTS = {
     "codex": ["codex", "resume --last"],
     "aider": ["aider", "--restore-chat-history"],
     "gemini": ["gemini", "--resume latest"],   # or an index: --resume 5
+    "opencode": ["opencode", "--continue"],
 }
 
 
@@ -2082,7 +2098,10 @@ def start_session(cfg, state, lock, topic, arg, key):
         cwd, flags = "", rest
     cwd = os.path.expanduser(cwd or "~")
     if not os.path.isdir(cwd):
-        return f"no dir {cwd}"
+        try:
+            os.makedirs(cwd, exist_ok=True)
+        except Exception as e:
+            return f"could not create dir {cwd}: {e}"
     note = ""
     m = re.search(r"(?:^|\s)@(\S+)", flags)
     if m:
@@ -2091,6 +2110,11 @@ def start_session(cfg, state, lock, topic, arg, key):
         if not wt:
             return f"{cwd} is not a git repo — @{branch} needs a worktree to live in"
         cwd, note = wt, f" @{branch}"
+    
+    active_cwds = {cfg.get("dirs", {}).get(t): s for t, s in cfg.get("topics", {}).items() if has_session(s)}
+    if cwd in active_cwds and active_cwds[cwd] != name:
+        return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
+
     spawn(name, cwd, f"{prog} {flags}".strip())
     with lock:
         cfg["topics"][topic] = name
@@ -2132,11 +2156,19 @@ def autobind(cfg, state, lock, topic):
     if not (root and name and os.path.isdir(root)):
         return None
     slug = re.sub(r"[^\w-]+", "-", name).strip("-")  # tmux rejects . and : in names
+    cand_path = None
     for cand in (name, slug, slug.lower()):
         if os.path.isdir(os.path.join(root, cand)):
-            return start_session(cfg, state, lock, topic,
-                                 f"{slug} {os.path.join(root, cand)}", "claude")
-    return None
+            cand_path = os.path.join(root, cand)
+            break
+    
+    if not cand_path:
+        # User requested to auto-create missing folders when adding a topic
+        cand_path = os.path.join(root, slug)
+        os.makedirs(cand_path, exist_ok=True)
+        
+    return start_session(cfg, state, lock, topic,
+                         f"{slug} {cand_path}", default_agent(cfg))
 
 
 def window(snap, key):
@@ -2306,13 +2338,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!bind":
         if not arg:
             return "usage: !bind <tmux-session>"
-        if not has_session(arg):
+        name = real_session(arg)     # an abbreviation binds the session it names
+        if not name:
             return f"no tmux session '{arg}'"
         with lock:
-            cfg["topics"][topic] = arg
+            cfg["topics"][topic] = name
             save_cfg(cfg)
-        state.pop(arg, None)
-        return f"topic bound to '{arg}'"
+        state.pop(name, None)
+        return f"topic bound to '{name}'"
     if cmd == "!unbind":
         with lock:
             old = cfg["topics"].pop(topic, None)
@@ -3081,6 +3114,46 @@ import http.server
 import socketserver
 
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
+    def resolve_topic(self, topic):
+        """Map a session name (e.g. 'api') back to its Telegram thread ID if needed."""
+        for t_id, s_name in self.server.cfg.get("topics", {}).items():
+            if s_name == topic:
+                return t_id
+        return topic
+
+    def do_GET(self):
+        parts = self.path.strip('/').split('/')
+        if len(parts) != 2 or parts[0] != 'topic':
+            self.send_response(404)
+            self.end_headers()
+            return
+            
+        topic = self.resolve_topic(parts[1])
+        sess = self.server.cfg.get("topics", {}).get(topic)
+        if not sess:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'{"error": "topic not bound"}\n')
+            return
+            
+        with self.server.lock:
+            st_s = self.server.state.get(sess) or {}
+            snap = st_s.get("snap")
+            alive = has_session(sess)
+            mode = st_s.get("mode") or "idle" if alive else "offline"
+            u_line = usage_line(self.server.cfg, snap, sep=" ") if snap else None
+            
+        import json
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "session": sess,
+            "alive": alive,
+            "mode": mode,
+            "usage": u_line
+        }).encode('utf-8'))
+
     def do_POST(self):
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
@@ -3088,7 +3161,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
             
-        topic = parts[1]
+        topic = self.resolve_topic(parts[1])
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8').strip()
         
@@ -3120,7 +3193,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         
         self.send_response(202)
         self.end_headers()
-        self.wfile.write(b"Accepted\\n")
+        self.wfile.write(b"Accepted\n")
 
     def log_message(self, format, *args):
         pass
@@ -3319,7 +3392,8 @@ def selfcheck():
     said = []
     try:
         with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False:
-                     (said.append(x), 1)[1]):
+                     (said.append(x), 1)[1],
+                     save_cfg=lambda c: None):     # !bind below must not touch CFG_PATH
             live_sessions()                        # fills _shell, as a tick does
             assert pane_state(visible("nm-selfcheck")) == "idle"  # nothing says stop
             assert agentless("nm-selfcheck") is True             # ...except this
@@ -3331,6 +3405,14 @@ def selfcheck():
                 watchdog({"chat_id": -1}, {"nm-selfcheck": st3}, "1",
                          "nm-selfcheck", True)
             assert sum("exited" in s for s in said) == 1, said
+            # tmux answers to a prefix; live_sessions() only ever answers to the
+            # whole name, so !bind has to store the whole name too.
+            assert real_session("nm-selfche") == "nm-selfcheck"
+            assert has_session("nm-selfche") is False
+            cfg9, lk9 = {"topics": {}, "chat_id": -1}, threading.Lock()
+            assert handle(cfg9, {}, lk9, "9", "!bind nm-selfche") == \
+                "topic bound to 'nm-selfcheck'"
+            assert cfg9["topics"]["9"] == "nm-selfcheck", cfg9
     finally:
         subprocess.run(("tmux", "kill-session", "-t", "nm-selfcheck"),
                        capture_output=True)
