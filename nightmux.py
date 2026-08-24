@@ -362,6 +362,12 @@ def visible(sess):
     return tmux("capture-pane", "-p", "-J", "-t", tgt(sess)).split("\n")
 
 
+def coloured(sess):
+    """The same rows with their colour escapes kept — a menu's only marker,
+    in a TUI that highlights its selection and prints no glyph for it."""
+    return tmux("capture-pane", "-p", "-e", "-J", "-t", tgt(sess)).split("\n")
+
+
 def sess_cwd(sess):
     return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
 
@@ -568,6 +574,13 @@ MENU = re.compile(r"^\s*[│┃]?\s*[❯>]?\s*(\d)[.)]\s+(\S.*?)\s*[│┃]?$")
 ARROWED = re.compile(r"↑↓\s*select|enter confirm|esc dismiss", re.I)
 # Whatever the TUI paints on the row the arrows are currently on.
 PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
+SGR = re.compile(r"\x1b\[[0-9;]*m")
+# The colour immediately in front of an option's number, from a `capture-pane -e`.
+# opencode marks its selection with colour and nothing else — no ❯, no ✓ — and a
+# plain capture throws that away, so every option looked identical and nightmux
+# could not say which one the arrows were on. No palette is hardcoded: the rows
+# are painted alike except the selected one, so the odd colour out is the answer.
+DIGIT_SGR = re.compile(r"(\x1b\[[0-9;]*m)(?=\d[.)])")
 # Same option line, but the border is required. opencode draws its modal inside
 # the border and the agent's own prose outside it, and prose numbers a plan:
 # "1. Core mechanic (wk 1)" is a MENU match and is not a choice anyone is being
@@ -809,7 +822,7 @@ def menu_buttons(lines, sess=None):
     """
     opts = {}
     for l in menu_rows(lines):
-        m = MENU.match(l)
+        m = MENU.match(plain(l))
         label = m.group(2)
         opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
@@ -1902,35 +1915,46 @@ def dialog_id(lines):
 def menu_digit(lines, want):
     """The digit of the first menu option whose label matches `want`."""
     for l in menu_rows(lines):
-        m = MENU.match(l)
+        m = MENU.match(plain(l))
         if want.match(m.group(2).strip()):
             return m.group(1)
     return None
 
 
+def plain(l):
+    """The line as a plain capture would have given it. No-op on one already."""
+    return SGR.sub("", l)
+
+
 def menu_rows(lines):
-    """The lines of the menu actually on screen, top to bottom.
+    """The lines of the menu actually on screen, top to bottom, colour intact.
 
     One menu is drawn one way, so the border wins only when most of the rows
     have it — that is a modal with prose behind it. A single boxed row among
     bare ones is the prose, and dropping the rest would offer two options where
     the pane is showing four.
     """
-    rows = [l for l in lines[-25:] if MENU.match(l)]
-    boxed = [l for l in rows if BOXED.match(l)]
+    rows = [l for l in lines[-25:] if MENU.match(plain(l))]
+    boxed = [l for l in rows if BOXED.match(plain(l))]
     return boxed if len(boxed) * 2 > len(rows) else rows
 
 
 def menu_opts(lines):
     """(the menu's option digits, top to bottom; index of the highlighted one).
 
-    The index is None unless exactly one row is marked — two marks, or none,
+    The index is None unless exactly one row stands out — none, or several,
     means the highlight is not something this can read, and nothing should move
     on a guess.
     """
     rows = menu_rows(lines)
-    marked = [i for i, l in enumerate(rows) if PICKED.search(l)]
-    return ([MENU.match(l).group(1) for l in rows],
+    marked = [i for i, l in enumerate(rows) if PICKED.search(plain(l))]
+    if len(marked) != 1:
+        # No glyph anywhere: fall back to colour, which needs a -e capture and
+        # is why pick() takes one. On plain lines every code is "" and this
+        # finds nothing, which is the honest answer there.
+        codes = [(DIGIT_SGR.search(l) or [""])[0] for l in rows]
+        marked = [i for i, c in enumerate(codes) if c and codes.count(c) == 1]
+    return ([MENU.match(plain(l)).group(1) for l in rows],
             marked[0] if len(marked) == 1 else None)
 
 
@@ -1947,8 +1971,8 @@ def pick(sess, want):
     Anything else: what went wrong, because a highlight nightmux cannot read is
     a highlight it must not confirm.
     """
-    lines = visible(sess)
-    if not ARROWED.search("\n".join(lines[-25:])):
+    lines = coloured(sess)      # the highlight is a colour, not a character
+    if not ARROWED.search(plain("\n".join(lines[-25:]))):
         return None
     opts, at = menu_opts(lines)
     if want not in opts:
@@ -1962,7 +1986,7 @@ def pick(sess, want):
         time.sleep(0.4)
     # Re-read before confirming: the marker above is a guess about someone
     # else's TUI, and the pane is the only thing that can settle it.
-    opts, at = menu_opts(visible(sess))
+    opts, at = menu_opts(coloured(sess))
     if at is None or opts[at] != want:
         return f"could not move '{sess}' onto option {want} — use ↑ ↓ ⏎"
     tmux("send-keys", "-t", tgt(sess), "Enter")
@@ -3690,40 +3714,52 @@ def selfcheck():
     # opencode: a modal drawn inside the border, over prose that numbers itself.
     # It names no question WAITING knows and answers to arrows, never the digit.
     oc = ["     5. Ship & iterate (wk 4+): soft-launch, measure D1",
-          "  ┃  Target platform?",
-          "  ┃  1. Android first (Recommended) ✓",
-          "  ┃     Larger casual audience",
-          "  ┃  2. iOS first",
-          "  ┃  3. Both",
-          "  ┃  ⇆ tab  ↑↓ select  enter confirm  esc dismiss"]
+          "  ┃  Unity can't run on this ARM64 server. How should we proceed?",
+          "  ┃  1. Godot 4 (Recommended)",
+          "  ┃     Native performance, ARM64-buildable here",
+          "  ┃  2. Web (TypeScript)",
+          "  ┃  3. Scaffold-only",
+          "  ┃  ↑↓ select  enter submit  esc dismiss"]
     assert pane_state(oc) == "waiting"
-    assert menu_opts(oc) == (["1", "2", "3"], 0), menu_opts(oc)   # prose 5. dropped
     assert [r[0]["callback_data"]
             for r in json.loads(menu_buttons(oc))["inline_keyboard"][:-1]] == \
-        ["!1", "!2", "!3"]
-    keyed, scr = [], [oc]
+        ["!1", "!2", "!3"]                                    # prose 5. dropped
+    assert menu_opts(oc) == (["1", "2", "3"], None)   # plain: no marker to read
+    # The same pane as tmux hands it over with -e. opencode paints the selected
+    # option's number in its accent colour and every other one grey; that is the
+    # whole of the marker, and it is the only thing that says where the arrows are.
+    ON, OFF, C = "\x1b[38;2;92;156;245m", "\x1b[38;2;128;128;128m", "\x1b[0m"
+
+    def paint(sel):
+        out = []
+        for l in oc:
+            m = MENU.match(l) if BOXED.match(l) else None
+            out.append(l.replace(m.group(1) + ".",
+                                 f"{ON if m.group(1) == sel else OFF}"
+                                 f"{m.group(1)}.{C}", 1) if m else l)
+        return out
+
+    keyed, sel = [], ["1"]
+    assert menu_opts(paint("1")) == (["1", "2", "3"], 0)
+    assert menu_opts(paint("3")) == (["1", "2", "3"], 2)
 
     def fake_tmux(*a):
         """A pane whose highlight follows the arrows, so the re-read is real."""
-        keys = a[3:]
-        keyed.append(keys)
-        if keys[0] in ("Up", "Down"):
-            rows = [i for i, l in enumerate(scr[0]) if BOXED.match(l)]
-            cur = next(i for i in rows if PICKED.search(scr[0][i]))
-            new = list(scr[0])
-            new[cur] = new[cur].replace(" ✓", "")
-            n = rows[rows.index(cur) + sum(1 if k == "Down" else -1 for k in keys)]
-            new[n] += " ✓"
-            scr[0] = new
+        if a[0] != "send-keys":
+            return "\n".join(paint(sel[0]))
+        keyed.append(a[3:])
+        if a[3] in ("Up", "Down"):
+            sel[0] = ["1", "2", "3"][["1", "2", "3"].index(sel[0])
+                                     + sum(1 if k == "Down" else -1 for k in a[3:])]
         return ""
 
-    with stubbed(visible=lambda s: scr[0], tmux=fake_tmux):
+    with stubbed(tmux=fake_tmux):
         assert pick("s", "3") == ""            # two rows down from the marked one
         assert keyed == [("Down", "Down"), ("Enter",)], keyed
         keyed[:] = []
         assert pick("s", "9").startswith("option 9 is not")   # no such option
         assert keyed == [], keyed                             # nothing pressed
-        scr[0] = [l.replace(" ✓", "") for l in oc]   # highlight not readable
+        sel[0] = ""                               # every row alike: unreadable
         assert pick("s", "3").startswith("can't tell") and keyed == []
     assert pane_state([l for l in oc if "┃" not in l]) == "idle"  # prose alone
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
