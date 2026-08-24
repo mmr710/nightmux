@@ -560,6 +560,19 @@ BUSY = re.compile(r"esc to (?:interrupt|cancel)"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
 MENU = re.compile(r"^\s*[│┃]?\s*[❯>]?\s*(\d)[.)]\s+(\S.*?)\s*[│┃]?$")
+# opencode's modal draws key hints where the other TUIs write a question, so
+# WAITING saw nothing and the pane read "idle": no 🟠, no buttons, and drain()
+# free to type a queued prompt into an open dialog. The hints are chrome and
+# say nothing on their own — hints *and* a numbered menu on screen is a dialog.
+# Same line says how it is driven: arrows, never the option's number.
+ARROWED = re.compile(r"↑↓\s*select|enter confirm|esc dismiss", re.I)
+# Whatever the TUI paints on the row the arrows are currently on.
+PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
+# Same option line, but the border is required. opencode draws its modal inside
+# the border and the agent's own prose outside it, and prose numbers a plan:
+# "1. Core mechanic (wk 1)" is a MENU match and is not a choice anyone is being
+# offered. Where both are on screen, the box is the menu.
+BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
 # The usage-limit banner. Phrasing lifted from Claude Code's own detector, so it
 # tracks what the CLI actually prints rather than what a changelog once said.
 LIMIT_HIT = re.compile(
@@ -756,7 +769,9 @@ def pane_state(lines):
     shell prints "⎿ Running… (7m · timeout 10m)" while the prompt is free.
     """
     tail = lines[-25:]
-    if WAITING.search("\n".join(tail)):
+    joined = "\n".join(tail)
+    if WAITING.search(joined) or (ARROWED.search(joined)
+                                  and any(BOXED.match(l) for l in tail)):
         return "waiting"
     live = "\n".join(l for l in tail if not DETAIL.match(l))
     return "busy" if BUSY.search(live) else "idle"
@@ -793,11 +808,10 @@ def menu_buttons(lines, sess=None):
     topic-binding alone cannot resolve it there.
     """
     opts = {}
-    for l in lines[-25:]:
+    for l in menu_rows(lines):
         m = MENU.match(l)
-        if m:
-            label = m.group(2)
-            opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+        label = m.group(2)
+        opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
     # No numbers means an arrow-driven selector (agy's trust prompt, /model):
     # the nav row alone drives it, exactly as you would in the terminal.
@@ -1887,11 +1901,72 @@ def dialog_id(lines):
 
 def menu_digit(lines, want):
     """The digit of the first menu option whose label matches `want`."""
-    for l in lines[-25:]:
+    for l in menu_rows(lines):
         m = MENU.match(l)
-        if m and want.match(m.group(2).strip()):
+        if want.match(m.group(2).strip()):
             return m.group(1)
     return None
+
+
+def menu_rows(lines):
+    """The lines of the menu actually on screen, top to bottom.
+
+    One menu is drawn one way, so the border wins only when most of the rows
+    have it — that is a modal with prose behind it. A single boxed row among
+    bare ones is the prose, and dropping the rest would offer two options where
+    the pane is showing four.
+    """
+    rows = [l for l in lines[-25:] if MENU.match(l)]
+    boxed = [l for l in rows if BOXED.match(l)]
+    return boxed if len(boxed) * 2 > len(rows) else rows
+
+
+def menu_opts(lines):
+    """(the menu's option digits, top to bottom; index of the highlighted one).
+
+    The index is None unless exactly one row is marked — two marks, or none,
+    means the highlight is not something this can read, and nothing should move
+    on a guess.
+    """
+    rows = menu_rows(lines)
+    marked = [i for i, l in enumerate(rows) if PICKED.search(l)]
+    return ([MENU.match(l).group(1) for l in rows],
+            marked[0] if len(marked) == 1 else None)
+
+
+def pick(sess, want):
+    """Answer an arrow-driven menu by moving its highlight, not by typing a digit.
+
+    opencode's modal ignores the number — "↑↓ select · enter confirm" is the
+    whole contract — so tapping 3 typed a 3 nowhere, press() saw the dialog
+    unchanged and sent Enter, and that confirmed whichever option was already
+    highlighted while the topic was told 3 had been answered. Wrong answers,
+    silently, which is worse than no button at all.
+
+    None: not that kind of menu, send the digit as before. "": answered.
+    Anything else: what went wrong, because a highlight nightmux cannot read is
+    a highlight it must not confirm.
+    """
+    lines = visible(sess)
+    if not ARROWED.search("\n".join(lines[-25:])):
+        return None
+    opts, at = menu_opts(lines)
+    if want not in opts:
+        return f"option {want} is not on '{sess}' right now"
+    if at is None:
+        return f"can't tell which option '{sess}' is on — use ↑ ↓ ⏎"
+    step = opts.index(want) - at
+    if step:
+        tmux("send-keys", "-t", tgt(sess),
+             *[("Down" if step > 0 else "Up")] * abs(step))
+        time.sleep(0.4)
+    # Re-read before confirming: the marker above is a guess about someone
+    # else's TUI, and the pane is the only thing that can settle it.
+    opts, at = menu_opts(visible(sess))
+    if at is None or opts[at] != want:
+        return f"could not move '{sess}' onto option {want} — use ↑ ↓ ⏎"
+    tmux("send-keys", "-t", tgt(sess), "Enter")
+    return ""
 
 
 def press(sess, key, confirm=False):
@@ -2547,6 +2622,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
             resolve_ask(cfg, st)
         if stale:
             return None
+        if key.isdigit():
+            miss = pick(sess, key)      # None: the digit is the answer after all
+            if miss is not None:
+                return miss or None
         press(sess, key, confirm=cmd in YES_NO or cmd[1:].isdigit())
         return None
     st = state.setdefault(sess, {})
@@ -3608,6 +3687,45 @@ def selfcheck():
     assert pane_state(agy_perm) == "waiting"
     picks = json.loads(menu_buttons(agy_perm))["inline_keyboard"][:3]
     assert [r[0]["callback_data"] for r in picks] == ["!1", "!2", "!4"], picks
+    # opencode: a modal drawn inside the border, over prose that numbers itself.
+    # It names no question WAITING knows and answers to arrows, never the digit.
+    oc = ["     5. Ship & iterate (wk 4+): soft-launch, measure D1",
+          "  ┃  Target platform?",
+          "  ┃  1. Android first (Recommended) ✓",
+          "  ┃     Larger casual audience",
+          "  ┃  2. iOS first",
+          "  ┃  3. Both",
+          "  ┃  ⇆ tab  ↑↓ select  enter confirm  esc dismiss"]
+    assert pane_state(oc) == "waiting"
+    assert menu_opts(oc) == (["1", "2", "3"], 0), menu_opts(oc)   # prose 5. dropped
+    assert [r[0]["callback_data"]
+            for r in json.loads(menu_buttons(oc))["inline_keyboard"][:-1]] == \
+        ["!1", "!2", "!3"]
+    keyed, scr = [], [oc]
+
+    def fake_tmux(*a):
+        """A pane whose highlight follows the arrows, so the re-read is real."""
+        keys = a[3:]
+        keyed.append(keys)
+        if keys[0] in ("Up", "Down"):
+            rows = [i for i, l in enumerate(scr[0]) if BOXED.match(l)]
+            cur = next(i for i in rows if PICKED.search(scr[0][i]))
+            new = list(scr[0])
+            new[cur] = new[cur].replace(" ✓", "")
+            n = rows[rows.index(cur) + sum(1 if k == "Down" else -1 for k in keys)]
+            new[n] += " ✓"
+            scr[0] = new
+        return ""
+
+    with stubbed(visible=lambda s: scr[0], tmux=fake_tmux):
+        assert pick("s", "3") == ""            # two rows down from the marked one
+        assert keyed == [("Down", "Down"), ("Enter",)], keyed
+        keyed[:] = []
+        assert pick("s", "9").startswith("option 9 is not")   # no such option
+        assert keyed == [], keyed                             # nothing pressed
+        scr[0] = [l.replace(" ✓", "") for l in oc]   # highlight not readable
+        assert pick("s", "3").startswith("can't tell") and keyed == []
+    assert pane_state([l for l in oc if "┃" not in l]) == "idle"  # prose alone
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                  "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
     assert pane_state(agy_trust) == "waiting"

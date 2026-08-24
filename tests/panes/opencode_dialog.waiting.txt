@@ -1,0 +1,27 @@
+     4. Monetization (wk 3–4): Interstitial every 2–3 deaths, rewarded ads
+     5. Ship & iterate (wk 4+): Soft-launch, measure CPI/D1, kill-or-iterate
+
+     ────────────────────────────────────────────────────────────────────
+
+     Key decisions before building either
+
+     → Asked 3 questions
+
+     ▣  Plan · Ox Alpha Free (Unlimited)
+
+  ┃
+  ┃   Engine   Plan choice   Platform   Confirm
+  ┃
+  ┃  Target platform?
+  ┃
+  ┃  1. Android first (Recommended) ✓
+  ┃     Larger casual audience, standard ad mediation
+  ┃  2. iOS first
+  ┃     Higher ARPU but $99/yr dev fee and stricter review
+  ┃  3. Both
+  ┃     More setup work but maximum reach
+  ┃  4. Type your own answer
+  ┃
+  ┃                                                            /www/game
+  ┃  ⇆ tab  ↑↓ select  enter confirm  esc dismiss
+  ┃                                                     • OpenCode 1.17.7

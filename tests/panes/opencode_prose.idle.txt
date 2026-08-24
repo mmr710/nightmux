@@ -1,0 +1,17 @@
+     Phases:
+
+     1. Core mechanic (wk 1): one satisfying interaction, fail state, restart
+     2. Collection layer (wk 2): ~20 unlockables, progress persistence
+     3. Polish (wk 3): haptics, sound design, near-miss feedback
+
+     ─────────────────────────────────────────────────────────────────────
+
+     Approve this plan and I'll begin implementation.
+
+     ▣  Plan · Ox Alpha Free (Unlimited) · 2h 2m
+
+  ┃
+  ┃
+  ┃  Plan · Ox Alpha Free (Unlimited) OpenCode Zen · high        /www/game
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                          13.4K (1%)  ctrl+p commands  • OpenCode 1.17.7
