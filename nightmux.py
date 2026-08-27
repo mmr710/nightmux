@@ -561,7 +561,11 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
 # The shape is what is stable: a glyph, one gerund ending in …, then a timer.
 # "✻ Cogitated for 14m 21s" is past tense and deliberately does not match — that
 # line is what a *finished* turn leaves on screen.
-BUSY = re.compile(r"esc to (?:interrupt|cancel)"
+# "to" is optional: opencode's footer says plain "esc interrupt", and without
+# this its working pane read idle. A provider retry redraws a countdown once a
+# second — "[retrying in 58m 6s attempt #13]" — and every redraw looked like a
+# finished turn with new output, so the topic got a ✅ per second for an hour.
+BUSY = re.compile(r"esc (?:to )?(?:interrupt|cancel)"
                   r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
@@ -3777,6 +3781,7 @@ def selfcheck():
     box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
     assert pane_state(["● done"] + box) == "idle"
     assert pane_state(["✻ Brewing… (12s · esc to interrupt)"]) == "busy"
+    assert pane_state(["  ⬝⬝⬝ retrying in 58m 6s attempt #13    esc interrupt"]) == "busy"
     assert pane_state(["Do you want to proceed?", "❯ 1. Yes", "  2. No"]) == "waiting"
 
     menu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes",

@@ -1,0 +1,7 @@
+     ▣  Plan · Ox Alpha Free (Unlimited)
+
+  ┃
+  ┃
+  ┃  Plan · Ox Alpha Free (Unlimited) OpenCode Zen · high            /www/game
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝⬝ Error from provider (Console): Upstream request failed: Endpoint is unavailable. [retrying in 58m 6s attempt #13]                    esc interrupt    • OpenCode 1.17.7
