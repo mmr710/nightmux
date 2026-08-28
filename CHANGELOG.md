@@ -14,6 +14,10 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   lists the bench. Stored as `bench` in the config; `topics`, `dirs` and
   `started` are unchanged, so an existing config needs no edit.
 
+- `!agents` marks a session with no context figure, and the context warning says
+  so once per session when `autocompact` is on: `ctx_pct` comes from Claude
+  Code's status line, so on agy, codex or opencode the whole context brain was
+  off and silent about it.
 - macOS service install. `--setup` now writes a launchd agent
   (`~/Library/LaunchAgents/com.nightmux.plist`) on Darwin instead of stopping at
   "the service install is systemd". Everything else was already portable; this
@@ -99,6 +103,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   first consumed the new output and the other was told nothing, which reads
   exactly like output landing in the wrong topic. `!bind` refuses it, `!status`
   flags any pair already in the config.
+- The context warning fired *after* the compaction it warns about. `CTX_WARN`
+  was a fixed 75 while `autocompact` commonly sits at 70, so the warning was
+  dead code; it now lands 10 points ahead of whatever `autocompact` is set to.
+- A `/compact` that never landed — keystrokes eaten by an open menu, a turn
+  starting on the same tick — was never retried. `compacted` stayed set, the
+  `pct < at` re-arm never fired, and the session carried a full context for the
+  rest of its life in silence. Retried once after a grace period, then reported.
 - The directory-collision guard refused a topic a second agent on its own tree.
   Another topic's session in that directory is a collision; the topic's own is
   not.

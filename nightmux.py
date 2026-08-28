@@ -1048,6 +1048,7 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
 
 WARN_AT = (80, 90)   # say something before the wall, not at it
 CTX_WARN = 75        # a context this full costs double for the same work
+CTX_LEAD = 10        # ...and the warning lands this far ahead of autocompact
 # Account-wide: every session shares the same 5-hour and weekly windows, so six
 # bound topics must not mean six warnings. First one to notice speaks — and it
 # outlives the process, because a restart used to re-arm every threshold the
@@ -1100,12 +1101,43 @@ def warn_usage(cfg, st, topic, sess):
                  mode="plain")
 
 
+def ctx_trip(cfg):
+    """Where the context warning fires.
+
+    It has to land *before* the thing it is warning about. autocompact at 70 and
+    a fixed warning at 75 means the compaction happens first and the warning is
+    dead code -- which is what a config of {"autocompact": 70} used to get.
+    """
+    at = cfg.get("autocompact")
+    # Floored: {"autocompact": 5} would put the trip point below zero and warn
+    # about a context that is empty.
+    return max(CTX_LEAD, min(CTX_WARN, at - CTX_LEAD)) if at else CTX_WARN
+
+
 def warn_ctx(cfg, st, topic, sess):
-    """Warn once when a session's context window gets expensive to carry."""
+    """Warn once when a session's context window gets expensive to carry.
+
+    And say once when there is no figure to warn on. `ctx_pct` is written by
+    Claude Code's status line, so on agy, codex or opencode -- and on a Claude
+    with no sidecar wired -- !ctx, autocompact and the idle hint are all off,
+    silently. Silence that reads as "nothing to report" is the worse failure:
+    it looks exactly like a session politely staying under the threshold. Only
+    said to someone who turned autocompact on, since they are the one expecting
+    it to be running.
+    """
     pct = (st.get("snap") or {}).get("ctx_pct")
     if pct is None:
+        if cfg.get("autocompact") and st.get("mode") and not st.get("ctx_blind"):
+            st["ctx_blind"] = True
+            send(cfg, topic, f"🙈 no context figure for {sess}\n"
+                 "it comes from Claude Code's status line, so !ctx, autocompact "
+                 f"({cfg['autocompact']}%) and the idle hint do not run here\n"
+                 "!agents shows which of this topic's agents do report",
+                 mode="plain")
         return
-    if pct < CTX_WARN:
+    st.pop("ctx_blind", None)        # a sidecar appeared: say it again if it goes
+    trip = ctx_trip(cfg)
+    if pct < trip:
         st.pop("ctx_warned", None)   # compacted or cleared: arm again
     elif not st.get("ctx_warned"):
         st["ctx_warned"] = True
@@ -1323,17 +1355,39 @@ def autocompact(cfg, state, topic, sess):
     pct = (st.get("snap") or {}).get("ctx_pct")
     if not at or pct is None:
         return
-    if pct < at:
-        st.pop("compacted", None)      # back under: arm again for the next climb
+    if pct < at:                       # back under: arm again for the next climb
+        for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
+            st.pop(k, None)
         return
-    if st.get("compacted") or st.get("mode") != "idle" or st.get("queue"):
+    if st.get("mode") != "idle" or st.get("queue"):
         return
+    if st.get("compacted"):
+        # The keystrokes can be eaten -- a menu open, a turn starting on the same
+        # tick, an agent that does not take /compact at all. Nothing looked again:
+        # pct stays high, so the `pct < at` re-arm never fires, and the session
+        # carries a full context for the rest of its life with nothing said. Give
+        # it the grace period, then try once more, then stop and say so.
+        if (time.time() - st.get("compact_at", 0) < COMPACT_GRACE
+                or st.get("compact_tries", 0) >= COMPACT_TRIES):
+            if (st.get("compact_tries", 0) >= COMPACT_TRIES
+                    and not st.get("compact_gave_up")):
+                st["compact_gave_up"] = True
+                send(cfg, topic, f"⚠️ {sess} still {pct:.0f}% after "
+                     f"{COMPACT_TRIES}x /compact — run it by hand, or "
+                     "!autocompact off", mode="plain")
+            return
+        st.pop("compacted", None)      # grace is up and it did not take: retry
     st["compacted"] = True
+    st["compact_at"] = time.time()
+    st["compact_tries"] = st.get("compact_tries", 0) + 1
     send(cfg, topic, f"🧹 {sess} context {pct:.0f}% ≥ {at}% — running /compact\n"
          "!autocompact off to stop this", mode="plain")
     inject(sess, "/compact")
     remember(state, sess, "/compact")
 
+
+COMPACT_GRACE = 120    # how long /compact gets to land before it is retried
+COMPACT_TRIES = 2      # ...and how many goes it gets before nightmux says so
 
 IDLE_PARK = 6 * 3600   # untouched this long and it is parked, not paused
 IDLE_CTX = 50          # ...and this full is worth clearing before resuming
@@ -2377,8 +2431,13 @@ def usage_line(cfg, snap, sep="  "):
     return sep + sep.join(out) if out else ""
 
 
-def agent_report(cfg, topic):
-    """This topic's bench: every agent it has a session for, the live one marked."""
+def agent_report(cfg, state, topic):
+    """This topic's bench: every agent it has a session for, the live one marked.
+
+    A session with no context figure is marked, not omitted: autocompact and the
+    idle hint are off for it, and that is worth knowing before you park a long
+    job on it.
+    """
     cur = cfg["topics"].get(topic)
     bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
     if cur:
@@ -2389,8 +2448,14 @@ def agent_report(cfg, topic):
     rows = []
     for k, sess in sorted(bench.items()):
         mark = "\u25cf" if sess == cur else "\u25cb"
-        dead = "" if has_session(sess) else "  \U0001f480 gone, !%s restarts it" % k
-        rows.append("%s !%-9s %s%s" % (mark, k, sess, dead))
+        snap = (state.get(sess) or {}).get("snap") or {}
+        if not has_session(sess):
+            note = "  \U0001f480 gone, !%s restarts it" % k
+        elif snap.get("ctx_pct") is None:
+            note = "  \U0001f648 no ctx figure"
+        else:
+            note = "  ctx %.0f%%" % snap["ctx_pct"]
+        rows.append("%s !%-9s %s%s" % (mark, k, sess, note))
     rest = [k for k in agents(cfg) if k not in bench]
     return ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
             + "bare !<agent> switches" + ("; not here yet: " + ", ".join(rest) if rest else ""))
@@ -2557,7 +2622,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             save_cfg(cfg)
         return f"unbound '{old}'" if old else "not bound"
     if cmd == "!agents":
-        return agent_report(cfg, topic)
+        return agent_report(cfg, state, topic)
     if cmd == "!new" or cmd[1:] in agents(cfg):
         # Bare !<agent> in a topic that already knows its directory means "switch
         # this topic to that agent" -- same project, different agent, and the one
@@ -4096,6 +4161,25 @@ def selfcheck():
     st["snap"]["ctx_pct"] = 12                     # compacted: re-arm
     warn_ctx(cfg, st, "1", "s")
     assert "ctx_warned" not in st and len(sent) == n + 1
+
+    # The warning has to land ahead of the compaction it warns about, or a
+    # config of {"autocompact": 70} compacts at 70 and warns at 75: never.
+    assert ctx_trip({}) == CTX_WARN and ctx_trip({"autocompact": 70}) == 60
+    assert ctx_trip({"autocompact": 5}) == CTX_LEAD    # never below an empty window
+    n = len(sent)
+    st["snap"]["ctx_pct"] = 64
+    warn_ctx({"autocompact": 70}, st, "1", "s")
+    assert sent[-1].startswith("\U0001f9e0 s context 64% full"), sent[-1]
+
+    # No figure at all -- agy, codex, a Claude with no sidecar. Said once, and
+    # only to someone who turned autocompact on and is expecting it to run.
+    blind, n = {"mode": "idle", "snap": {"ts": time.time()}}, len(sent)
+    warn_ctx({}, blind, "1", "agy1")
+    assert len(sent) == n, sent[n:]                # never asked for it: not nagged
+    warn_ctx({"autocompact": 70}, blind, "1", "agy1")
+    assert sent[-1].startswith("\U0001f648 no context figure for agy1"), sent[-1]
+    warn_ctx({"autocompact": 70}, blind, "1", "agy1")
+    assert len(sent) == n + 1                      # once per session, not per tick
     n, typed[:] = len(sent), []                   # auto /compact, tightly gated
     st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 82})
     autocompact({"topics": {}}, state, "1", "s")
@@ -4115,6 +4199,28 @@ def selfcheck():
     st["snap"]["ctx_pct"] = 20                     # compacted: re-arm for next climb
     autocompact(ac, state, "1", "s")
     assert "compacted" not in st and typed == ["/compact"]
+
+    # A /compact that never landed: retried once past the grace period, then
+    # reported. Without this the session sits full for ever and says nothing.
+    st["snap"]["ctx_pct"] = 82
+    autocompact(ac, state, "1", "s")
+    assert typed == ["/compact"] * 2 and st["compact_tries"] == 1, typed
+    autocompact(ac, state, "1", "s")
+    assert typed == ["/compact"] * 2                # inside the grace period: wait
+    st["compact_at"] = time.time() - COMPACT_GRACE - 1
+    autocompact(ac, state, "1", "s")
+    assert typed == ["/compact"] * 3 and st["compact_tries"] == 2, typed
+    n = len(sent)
+    st["compact_at"] = time.time() - COMPACT_GRACE - 1
+    autocompact(ac, state, "1", "s")
+    assert typed == ["/compact"] * 3                # out of tries: stops typing
+    assert sent[-1].startswith("\u26a0\ufe0f s still 82% after"), sent[-1]
+    st["compact_at"] = time.time() - COMPACT_GRACE - 1
+    autocompact(ac, state, "1", "s")
+    assert len(sent) == n + 1                       # ...and says so once
+    st["snap"]["ctx_pct"] = 20                      # leave it armed for what follows
+    autocompact(ac, state, "1", "s")
+    typed[:] = ["/compact"]
     st.pop("snap"), typed.clear()
 
     n = len(sent)                                 # parked session still holding one
