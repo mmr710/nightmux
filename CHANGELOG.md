@@ -8,6 +8,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- **One topic, several agents.** A bare `!<agent>` in a bound topic switches that
+  topic between claude, agy, codex, opencode and anything in `agents` — same
+  directory, a tmux session per agent, the one you left still running. `!agents`
+  lists the bench. Stored as `bench` in the config; `topics`, `dirs` and
+  `started` are unchanged, so an existing config needs no edit.
+
 - macOS service install. `--setup` now writes a launchd agent
   (`~/Library/LaunchAgents/com.nightmux.plist`) on Darwin instead of stopping at
   "the service install is systemd". Everything else was already portable; this
@@ -87,6 +93,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   session instead of needing one run per topic.
 
 ### Fixed
+
+- Two topics could be bound to one tmux session. `state` is keyed by session
+  name, so they shared a scrape cursor: whichever topic the watcher reached
+  first consumed the new output and the other was told nothing, which reads
+  exactly like output landing in the wrong topic. `!bind` refuses it, `!status`
+  flags any pair already in the config.
+- The directory-collision guard refused a topic a second agent on its own tree.
+  Another topic's session in that directory is a collision; the topic's own is
+  not.
+
 
 - Without a status-line snapshot, a session now resolves to the pane running a
   known agent binary before falling back to the focused one — so a split window

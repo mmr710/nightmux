@@ -2181,6 +2181,71 @@ def worktree_path(repo, branch):
     return wt if os.path.isdir(wt) else None
 
 
+def bound_to(cfg, name, topic):
+    """The other topic already bound to session `name`, or None.
+
+    `state` is keyed by session name alone, so two topics pointing at one session
+    share a single scrape cursor: whichever topic the watcher reaches first
+    consumes the new output and the other is told nothing. From the phone that
+    looks exactly like output landing in the wrong topic. Refuse the second bind
+    instead -- a topic that wants another agent gets a session of its own, which
+    is what switch_agent gives it.
+    """
+    return next((t for t, s in cfg.get("topics", {}).items()
+                 if s == name and str(t) != str(topic)), None)
+
+
+def switch_agent(cfg, state, lock, topic, key):
+    """Bare !<key> in a bound topic: route this topic to that agent, in the same
+    directory, leaving the agent it was on running.
+
+    One topic, several agents, one of them live. The alternative -- a topic per
+    agent on the same project -- is how two topics end up sharing a directory
+    and a session. Each agent keeps its own tmux session (`<base>-<key>`), so
+    switching back lands in the conversation it was in, not a fresh one.
+    """
+    cur = cfg["topics"].get(topic)
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
+    if cur:   # whatever the topic is on now is the first thing on its bench
+        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+    if not cwd:
+        return "usage: !%s <name> [dir] [flags] [@branch]" % key
+    if cur and bench.get(key) == cur and has_session(cur):
+        return "already on %s ('%s')" % (key, cur)
+    base = cur or os.path.basename(cwd.rstrip("/")) or ("topic%s" % topic)
+    for k in agents(cfg):                      # don't stack game-agy-codex-claude
+        if base.endswith("-" + k):
+            base = base[:-len(k) - 1]
+            break
+    name = bench.get(key) or ("%s-%s" % (base, key))
+    other = bound_to(cfg, name, topic)   # the invariant !bind enforces, enforced here
+    if other:
+        return "'%s' is topic %s's session — !unbind there first" % (name, other)
+    if has_session(name):
+        with lock:
+            cfg["topics"][topic] = name
+            cfg.setdefault("started", {})[topic] = key
+            bench[key] = name
+            cfg.setdefault("bench", {})[str(topic)] = bench
+            save_cfg(cfg)
+        state.pop(name, None)   # rebaseline: nothing watched this pane meanwhile
+        out = "\u2192 %s ('%s')" % (key, name)
+    else:
+        out = start_session(cfg, state, lock, topic, "%s %s" % (name, cwd), key)
+        if cfg["topics"].get(topic) != name:
+            return out          # start_session refused; leave the bench alone
+        with lock:
+            bench[key] = name
+            cfg.setdefault("bench", {})[str(topic)] = bench
+            save_cfg(cfg)
+    others = sorted(s for k, s in bench.items() if k != key and has_session(s))
+    if others:  # two agents, one working tree: say so once, every switch
+        out += ("\n\u26a0\ufe0f also live in the same tree: " + ", ".join(others)
+                + "\n!agents to switch back; @branch at start for a worktree of its own")
+    return out
+
+
 def start_session(cfg, state, lock, topic, arg, key):
     """New session running agent `key`, bound to this topic. Flags pass through.
 
@@ -2214,7 +2279,12 @@ def start_session(cfg, state, lock, topic, arg, key):
             return f"{cwd} is not a git repo — @{branch} needs a worktree to live in"
         cwd, note = wt, f" @{branch}"
     
-    active_cwds = {cfg.get("dirs", {}).get(t): s for t, s in cfg.get("topics", {}).items() if has_session(s)}
+    # Another topic's session in this directory is a collision; this topic's own
+    # is not. A topic restarting itself, or benching a second agent on its own
+    # tree with !<key>, is deliberate -- and the guard used to refuse both.
+    active_cwds = {cfg.get("dirs", {}).get(t): s
+                   for t, s in cfg.get("topics", {}).items()
+                   if str(t) != str(topic) and has_session(s)}
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
@@ -2307,6 +2377,25 @@ def usage_line(cfg, snap, sep="  "):
     return sep + sep.join(out) if out else ""
 
 
+def agent_report(cfg, topic):
+    """This topic's bench: every agent it has a session for, the live one marked."""
+    cur = cfg["topics"].get(topic)
+    bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
+    if cur:
+        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+    if not bench:
+        return ("no agents in this topic yet\n!<agent> <name> <dir> starts one: "
+                + ", ".join(agents(cfg)))
+    rows = []
+    for k, sess in sorted(bench.items()):
+        mark = "\u25cf" if sess == cur else "\u25cb"
+        dead = "" if has_session(sess) else "  \U0001f480 gone, !%s restarts it" % k
+        rows.append("%s !%-9s %s%s" % (mark, k, sess, dead))
+    rest = [k for k in agents(cfg) if k not in bench]
+    return ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
+            + "bare !<agent> switches" + ("; not here yet: " + ", ".join(rest) if rest else ""))
+
+
 def status_report(cfg, state):
     if not cfg["topics"]:
         return "no topics bound"
@@ -2330,6 +2419,12 @@ def status_report(cfg, state):
         held = f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else ""
         rows.append(f"{icon} {sess:<14} topic {topic}  {mode}  {age}s quiet{tag}"
                     + (f"  📥{q}" if q else "") + held + usage_line(cfg, snap))
+    seen, dupes = set(), set()
+    for s in cfg["topics"].values():
+        (dupes if s in seen else seen).add(s)
+    if dupes:   # one scrape cursor between them, so one of the two goes silent
+        rows.append("\u26a0\ufe0f bound to two topics, only one of which gets the "
+                    "output: " + ", ".join(sorted(dupes)) + " \u2014 !unbind one")
     return "\n".join(rows)
 
 
@@ -2380,6 +2475,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("!bind <session> | !unbind | !sessions\n"
                 f"!new <name> [dir] [flags] [@branch], or !<agent>: "
                 f"{', '.join(agents(cfg))}\n"
+                "!agents = this topic's agents; bare !<agent> switches between them\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
                 "!worktrees = git worktrees of this topic's repo, and who is in each\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
@@ -2444,6 +2540,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
         name = real_session(arg)     # an abbreviation binds the session it names
         if not name:
             return f"no tmux session '{arg}'"
+        other = bound_to(cfg, name, topic)
+        if other:
+            return ("'%s' is topic %s's session -- one session, one topic\n"
+                    "(they would share one scrape cursor, and one of them goes "
+                    "silent)\n!unbind there first, or !<agent> here for a session "
+                    "of your own" % (name, other))
         with lock:
             cfg["topics"][topic] = name
             save_cfg(cfg)
@@ -2454,7 +2556,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
             old = cfg["topics"].pop(topic, None)
             save_cfg(cfg)
         return f"unbound '{old}'" if old else "not bound"
+    if cmd == "!agents":
+        return agent_report(cfg, topic)
     if cmd == "!new" or cmd[1:] in agents(cfg):
+        # Bare !<agent> in a topic that already knows its directory means "switch
+        # this topic to that agent" -- same project, different agent, and the one
+        # it was on left running. With arguments it still starts a named session.
+        if cmd != "!new" and not arg and (cfg.get("dirs") or {}).get(topic):
+            return switch_agent(cfg, state, lock, topic, cmd[1:])
         return start_session(cfg, state, lock, topic, arg,
                              default_agent(cfg) if cmd == "!new" else cmd[1:])
     if cmd in ("!resume", "!restore"):    # !restore: same relaunch, easier to guess
@@ -4614,6 +4723,42 @@ def selfcheck():
     out = handle(cfg2, {}, lk, "91", "!restore")
     assert spawned[-1][:2] == ("ghost", "/tmp") and "topic bound" in out, out
     assert cfg2["started"]["91"] == "claude"
+
+    # One topic, several agents. Bare !<agent> moves the topic to that agent in
+    # the same directory and leaves the one it was on running; switching back
+    # must reuse that session, or "switch" would mean "start a new conversation".
+    live = {"box"}
+    globals()["has_session"] = lambda s: s in live
+    cfg2["topics"]["9"], cfg2["started"]["9"] = "box", "codex"
+    cfg2["dirs"]["9"] = "/tmp"
+    out = handle(cfg2, {}, lk, "9", "!agy")
+    assert spawned[-1][:2] == ("box-agy", "/tmp"), spawned[-1]
+    assert cfg2["topics"]["9"] == "box-agy" and cfg2["started"]["9"] == "agy"
+    assert cfg2["bench"]["9"] == {"codex": "box", "agy": "box-agy"}, cfg2["bench"]
+    assert "also live in the same tree: box" in out, out   # two agents, one tree
+    live.add("box-agy")
+    n = len(spawned)
+    assert "\u2192 codex ('box')" in handle(cfg2, {}, lk, "9", "!codex")
+    assert len(spawned) == n, "switching back respawned instead of reusing"
+    assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
+    assert "already on codex" in handle(cfg2, {}, lk, "9", "!codex")
+    assert "\u25cf !codex" in handle(cfg2, {}, lk, "9", "!agents")
+    handle(cfg2, {}, lk, "9", "!agy named /tmp")   # with args: still start-by-name
+    assert spawned[-1][0] == "named" and cfg2["bench"]["9"]["agy"] == "box-agy"
+
+    # ...and one session must never be two topics'. They share a scrape cursor,
+    # so the watcher hands the output to whichever topic it reaches first.
+    assert bound_to(cfg2, "box", "9") is None
+    cfg2["topics"]["94"] = "box"
+    assert bound_to(cfg2, "box", "9") == "94"
+    cfg2["bench"]["9"]["aider"] = "box"           # a bench entry another topic owns
+    assert "topic 94's session" in handle(cfg2, {}, lk, "9", "!aider")
+    del cfg2["bench"]["9"]["aider"]
+    with stubbed(real_session=lambda a: "box"):
+        assert "one session, one topic" in handle(cfg2, {}, lk, "95", "!bind box")
+    assert "95" not in cfg2["topics"], cfg2["topics"]
+    cfg2["topics"].pop("94")
+    globals()["has_session"] = lambda s: False
 
     # restore_startup: a dead topic gets a button unless auto_restore says relaunch.
     cfg3 = {"topics": {"1": "gone1", "2": "alive2"}, "dirs": {"1": "/tmp"}, "chat_id": -1}

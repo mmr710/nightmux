@@ -88,6 +88,18 @@ to get out of sync and nothing to lose when the daemon restarts.
 numbers are Claude Code specific — every other agent degrades to reading the
 terminal, which is how nightmux worked before the hooks existed.
 
+**One topic, several agents.** A bare `!agy`, `!codex` or `!opencode` in a topic
+that already has a directory switches *that topic* to that agent — same project,
+its own tmux session, and the agent you were on left running. `!agents` lists the
+bench and marks the live one; switching back lands in the conversation it was in,
+not a fresh one. Give a name and a directory (`!agy side ~/code/api`) and it
+still means start-a-new-session, as before.
+
+One session belongs to one topic. Two topics pointing at the same session share a
+single scrape cursor, so whichever one the watcher reaches first gets the output
+and the other goes quiet; `!bind` refuses that now, and `!status` flags any pair
+already in your config.
+
 **Not for you if** you want a polished app instead of a chat window, you're on
 Windows ([#2](https://github.com/mmr710/nightmux/issues/2) — macOS and Linux
 both install as a service), or you want your
@@ -171,6 +183,8 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 |---|---|
 | `!new <name> [dir] [flags] [@branch]` | start a session with the default agent, bind this topic to it |
 | `!codex` / `!aider` / `!gemini` / `!agy` … | same, with that agent |
+| `!<agent>` with no arguments | switch this topic to that agent, in the same directory |
+| `!agents` | this topic's agents, which one is live, and which report a context figure |
 | `!resume [agent]` / `!restore` | relaunch this topic's directory, resuming the last conversation |
 | `!bind <session>` / `!unbind` / `!kill` | attach, detach, stop (kill asks first) |
 | `!sessions` / `!status` | tmux sessions; every topic and its state |
