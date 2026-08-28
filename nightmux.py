@@ -761,7 +761,7 @@ def tail_transcript(st, path):
         return []
     if pos == size:
         return []
-    out = []
+    out, spent = [], 0.0
     with open(path, "rb") as f:
         f.seek(pos)
         while True:
@@ -772,10 +772,21 @@ def tail_transcript(st, path):
             line_str = line.decode("utf8", "replace").strip()
             if line_str:
                 try:
-                    out += render(json.loads(line_str))
+                    rec = json.loads(line_str)
                 except ValueError:
                     continue
+                # Claude Code writes a usage record per assistant turn. Weighing
+                # it here is free -- these bytes are being decoded anyway -- and
+                # it is what lets the spend cap count cost instead of turns.
+                u = (rec.get("message") or {}).get("usage") or {}
+                spent += (u.get("input_tokens", 0) * WEIGHT["in"]
+                          + u.get("cache_creation_input_tokens", 0) * WEIGHT["write"]
+                          + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
+                          + u.get("output_tokens", 0) * WEIGHT["out"])
+                out += render(rec)
     st["tpos"] = pos
+    if spent:
+        st.setdefault("spend", []).append((time.time(), spent))
     return out
 
 
@@ -1146,12 +1157,28 @@ def warn_ctx(cfg, st, topic, sess):
              mode="plain")
 
 
+_ctx_cache = {}   # path -> ((size, top), report)
+
+
 def ctx_report(path, top=8):
     """What is actually occupying the context window, biggest first.
 
     Tool results are the bulk of it and they are attributed to the tool that
     produced them, so the answer is actionable: it names what to stop doing.
+
+    Cached on (size, top). A transcript is append-only, so the same size is the
+    same file, and !ctx typed twice on a session between turns used to walk tens
+    of megabytes twice for the same answer.
+    ponytail: still a whole-file re-read the moment it grows by one line. If a
+    long session makes !ctx feel slow, accumulate the tallies incrementally off
+    tail_transcript's byte offset instead.
     """
+    try:
+        ckey = (os.path.getsize(path), top)   # not `key`: the loop below binds that
+    except OSError:
+        ckey = None
+    if ckey and (_ctx_cache.get(path) or (None,))[0] == ckey:
+        return _ctx_cache[path][1]
     names, tally, text, turns, repeat = {}, {}, 0, 0, {}
     for line in open(path, errors="replace"):
         if not line.strip():
@@ -1198,7 +1225,12 @@ def ctx_report(path, top=8):
         out.append("\nfetched again and again (each copy stays):")
         for c, (nm, arg) in dupes:
             out.append(f"  {c:>3}x {nm[:8]:<9}{arg[:46]}")
-    return "\n".join(out)
+    report = "\n".join(out)
+    if ckey:
+        if len(_ctx_cache) > 8:
+            _ctx_cache.clear()   # one report per live session is plenty to hold
+        _ctx_cache[path] = (ckey, report)
+    return report
 
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -1206,6 +1238,26 @@ PROJECTS = os.path.expanduser("~/.claude/projects")
 # of fresh input, which is exactly why a large context is expensive to merely
 # carry: cheap per token, ruinous at a quarter million of them every turn.
 WEIGHT = {"in": 1.0, "write": 1.25, "read": 0.1, "out": 5.0}
+
+
+def spend_cap(cfg):
+    """(turns, base-equivalent tokens) from cfg["spendcap"] -- only one is set.
+
+    A number is turns, which is what this has always meant. A string with a k or
+    M suffix is tokens instead: a turn is one grep or two hundred, so a turn
+    count says nothing about what a loop is actually costing. Tokens come out of
+    the transcript, so that form only bites on a Claude Code session.
+    """
+    v = cfg.get("spendcap")
+    if isinstance(v, str):
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*", v)
+        if not m:
+            return None, None
+        n, suf = float(m.group(1)), (m.group(2) or "").lower()
+        if not suf:
+            return int(n) or None, None      # "12" is still twelve turns
+        return None, int(n * (1e3 if suf == "k" else 1e6))
+    return (v, None) if v else (None, None)
 
 
 def token_tally(paths):
@@ -1649,9 +1701,14 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         turns = [t for t in st.get("turns", []) if now - t < 300]
         turns.append(now)
         st["turns"] = turns
-        cap = cfg.get("spendcap")
-        if cap and len(turns) >= cap:
-            send(cfg, topic, f"🛑 {sess} hit spend cap of {cap} turns in 5m — interrupting loop\n"
+        cap, tcap = spend_cap(cfg)
+        st["spend"] = spend = [(t, n) for t, n in st.get("spend", []) if now - t < 300]
+        burnt = int(sum(n for _, n in spend))
+        hit = (f"{cap} turns" if cap and len(turns) >= cap else
+               f"{tcap:,} base-equiv tokens ({burnt:,} burnt)"
+               if tcap and burnt >= tcap else None)
+        if hit:
+            send(cfg, topic, f"🛑 {sess} hit spend cap of {hit} in 5m — interrupting loop\n"
                              "!spendcap off to disable", mode="plain")
             tmux("send-keys", "-t", tgt(sess), "C-c")
     seen = set(prev_scr)
@@ -2098,7 +2155,7 @@ TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and it
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
            "idlectx": "flag parked sessions above N% context, or off",
-           "spendcap": "pause agent after N turns in 5 mins, or off"}
+           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -2556,7 +2613,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
                 "!autocompact <pct|off> | !idlectx <pct|off>\n"
-                "!spendcap <turns|off> = interrupt if agent exceeds turns in 5m\n"
+                "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
+                "turns, or tokens, in 5m\n"
                 "type / for the same commands with autocomplete\n"
                 "!model <name> | !effort <low|medium|high>\n"
                 "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode\n"
@@ -2700,12 +2758,23 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "auto /compact off — !autocompact 70 to enable")
     if cmd == "!spendcap":
         if arg:
+            if arg in ("off", "0"):
+                v = None
+            elif re.fullmatch(r"\d+(?:\.\d+)?[kKmM]", arg):
+                v = arg.lower()          # a suffix means tokens, kept as written
+            elif arg.isdigit():
+                v = int(arg)
+            else:
+                return "usage: !spendcap <turns> | <500k|2M> tokens | off"
             with lock:
-                cfg["spendcap"] = None if arg in ("off", "0") else int(arg)
+                cfg["spendcap"] = v
                 save_cfg(cfg)
-        cap = cfg.get("spendcap")
+        cap, tcap = spend_cap(cfg)
+        if tcap:
+            return (f"spend cap set to {tcap:,} base-equiv tokens in 5 minutes\n"
+                    "counted from the transcript, so Claude Code sessions only")
         return (f"spend cap set to {cap} turns in 5 minutes" if cap else
-                "spend cap off — !spendcap 10 to enable")
+                "spend cap off — !spendcap 10 (turns) or !spendcap 2M (tokens)")
     if cmd == "!idlectx":
         if arg:
             with lock:
@@ -3762,7 +3831,21 @@ def selfcheck():
     with open(tp, "w") as f:                       # /clear: file shrank, rebaseline
         f.write(rec + "\n")
     assert tail_transcript(tst, tp) == []
+    assert "spend" not in tst                      # no usage records, nothing to weigh
+    with open(tp, "a") as f:                       # what a turn actually cost
+        f.write(json.dumps({"type": "assistant", "message": {
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+            "content": [{"type": "text", "text": "hi"}]}}) + "\n")
+    tail_transcript(tst, tp)
+    assert int(tst["spend"][-1][1]) == 150, tst["spend"]   # 100*1.0 + 10*5.0
     os.remove(tp)
+
+    assert spend_cap({}) == (None, None)
+    assert spend_cap({"spendcap": 12}) == (12, None)
+    assert spend_cap({"spendcap": "12"}) == (12, None)     # a bare string is turns
+    assert spend_cap({"spendcap": "500k"}) == (None, 500000)
+    assert spend_cap({"spendcap": "2M"}) == (None, 2000000)
+    assert spend_cap({"spendcap": "nope"}) == (None, None)
 
     globals()["STATE_DIR"] = os.path.join(FILE_DIR, "state")
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -3832,6 +3915,11 @@ def selfcheck():
     assert "Bash" in rep.split("\n")[2] and "1,000" in rep, rep   # biggest first
     assert "assistant text" in rep and "2 tool calls" in rep, rep
     assert f"{(4000 + 800 + 400) // 4:,}" in rep.split("\n")[-1], rep
+    assert ctx_report(tcx) is rep                  # same size: not re-read
+    with open(tcx, "a") as f:                      # ...and a grown file is
+        f.write(json.dumps({"message": {"content": [
+            {"type": "text", "text": "x" * 40}]}}) + "\n")
+    assert ctx_report(tcx) is not rep, "a grown transcript kept the stale report"
     os.remove(tcx)
     noon = time.mktime((2026, 8, 7, 12, 0, 0, 0, 0, -1))   # display shifts, never parse
     assert clock({}, noon) == "12:00" and clock({"tz_offset": 0}, noon) == \
@@ -3985,6 +4073,34 @@ def selfcheck():
     globals()["sess_cwd"] = lambda s: "/nonexistent-nightmux-selfcheck"
     twice = lambda: (flush_new(cfg, state, "1", "s"), flush_new(cfg, state, "1", "s"))
 
+    # A cap in tokens counts what the turns cost. Two greps and two hundred are
+    # both "one turn"; only one of them is a loop worth interrupting.
+    state.clear(), sent.clear()
+    keys, cap_cfg = [], dict(cfg, spendcap="1k")
+    with stubbed(tmux=lambda *a: keys.append(a) or ""):
+        state["s"] = {"spend": [(time.time(), 900.0)]}
+        screen[:] = ["hello"] + box
+        flush_new(cap_cfg, state, "1", "s")
+        screen[:] = ["✻ Brewing… (2s · esc to interrupt)"]
+        flush_new(cap_cfg, state, "1", "s")        # turn starts: 900 < 1000
+        assert keys == [] and not any("spend cap" in x for x in sent), sent
+        screen[:] = ["hello"] + box
+        flush_new(cap_cfg, state, "1", "s")        # back to idle: re-arm
+        state["s"]["spend"].append((time.time(), 200.0))
+        screen[:] = ["✻ Brewing… (2s · esc to interrupt)"]
+        flush_new(cap_cfg, state, "1", "s")        # 1100 >= 1000: cut it off
+        assert any("hit spend cap of 1,000 base-equiv tokens (1,100 burnt)" in x
+                   for x in sent), sent
+        assert keys and keys[-1][-1] == "C-c", keys
+        state["s"]["spend"] = [(time.time() - 400, 9e9)]   # older than the window
+        screen[:] = ["hello"] + box
+        flush_new(cap_cfg, state, "1", "s")
+        screen[:] = ["✻ Brewing… (2s · esc to interrupt)"]
+        n = len(keys)
+        flush_new(cap_cfg, state, "1", "s")
+        assert len(keys) == n, "spend outside the 5m window still counted"
+    state.clear(), sent.clear()
+
     screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
     flush_new(cfg, state, "1", "s")   # restart with a prompt already on screen
     assert sent[-1].startswith("🟠 needs input s\n") and len(sent) == 1, sent
@@ -4004,6 +4120,7 @@ def selfcheck():
     screen[:] = ["hello", "answer line 1", "● two", "  ⎿  noise"] + box
     twice()                                       # tool detail dropped by default
     assert sent[-1] == "✅ s\n● two", sent[-1]
+
     cfg["verbose"] = ["1"]
     screen[:] = screen[:-4] + ["● three", "  ⎿  noise"] + box
     twice()

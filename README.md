@@ -194,6 +194,7 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!undo` | list snapshot branches for this repo and the restore commands — never runs them |
 | `!ctx` / `!cost [days]` / `!usage` | context breakdown, token spend, limit windows |
 | `!autocompact <pct\|off>` | auto-`/compact` at a context threshold |
+| `!spendcap <turns\|500k\|2M\|off>` | interrupt a session that runs up that many turns, or that many base-equivalent tokens, in 5 minutes |
 | `!idlectx <pct\|off>` | flag parked sessions still holding a big context |
 | `!queue [clear\|now]` | prompts held for a rate-limit reset |
 | `!at 03:00 <prompt>`, `!at +90m …` | run a prompt later |

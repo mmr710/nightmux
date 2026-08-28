@@ -14,6 +14,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   lists the bench. Stored as `bench` in the config; `topics`, `dirs` and
   `started` are unchanged, so an existing config needs no edit.
 
+- `!spendcap` can cap what the turns cost, not how many there were: a suffixed
+  value (`!spendcap 500k`, `!spendcap 2M`) counts base-equivalent tokens over 5
+  minutes and interrupts past it. A bare number is still turns, so an existing
+  config means exactly what it did. Tokens come out of the transcript, so that
+  form only bites on Claude Code sessions.
 - `!agents` marks a session with no context figure, and the context warning says
   so once per session when `autocompact` is on: `ctx_pct` comes from Claude
   Code's status line, so on agy, codex or opencode the whole context brain was
@@ -103,6 +108,9 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   first consumed the new output and the other was told nothing, which reads
   exactly like output landing in the wrong topic. `!bind` refuses it, `!status`
   flags any pair already in the config.
+- `!ctx` re-read the whole transcript every time it was typed. The report is
+  cached on the file's size, which for an append-only transcript is the same
+  thing as its contents.
 - The context warning fired *after* the compaction it warns about. `CTX_WARN`
   was a fixed 75 while `autocompact` commonly sits at 70, so the warning was
   dead code; it now lands 10 points ahead of whatever `autocompact` is set to.
