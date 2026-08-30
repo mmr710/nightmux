@@ -3824,8 +3824,10 @@ def selfcheck():
     with stubbed(run=lambda *a, **k: "[tmux timed out after 10s]"):
         assert tmux("list-panes") == "[tmux timed out after 10s]"   # unchanged
     # tmux_out reads the exit status, not the text: a failing tmux is None too.
+    # Both commands answer without a server, because CI has no tmux running and
+    # `display-message` there fails for that reason rather than the one intended.
     assert tmux_out("no-such-tmux-command") is None
-    assert tmux_out("display-message", "-p", "ok") == "ok\n"
+    assert (tmux_out("-V") or "").startswith("tmux")
 
     # The outage is announced once, and so is its end — not once per session per
     # tick, which is what nine topics of 💀 looked like.
