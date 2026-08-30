@@ -658,7 +658,13 @@ STATE_DIR = os.path.expanduser("~/.nightmux-state")
 # on the percentages. The path age matches the prune window, because an hour of
 # silence used to drop a session back to pane scraping without saying so; a path
 # that has genuinely gone away simply stops growing, which costs nothing.
-STATE_FRESH = 86400
+# A snapshot is addressed by pane id, and every caller passes a pane that
+# live_sessions() just saw, so this is not really guarding staleness — it guards
+# a pane id reused after a tmux server restart, which is the one way %7 can mean
+# a different pane than it did. Long enough to cover a session parked over a
+# holiday; prune drops the snapshot as soon as its pane is gone, so a recycled
+# id would have to land inside the same hour to be read at all.
+STATE_FRESH = 7 * 86400
 USAGE_FRESH = 180
 NOTIFY_FRESH = 90    # the Notification hook already announced this prompt
 PRUNE_EVERY = 3600   # uploads and status-line snapshots both accumulate forever
@@ -1948,10 +1954,30 @@ def nudge(cfg, state, topic, sess):
         st["nudge_msg"] = send(cfg, topic, text, mode="plain", buttons=buttons)
 
 
-def prune(now, last):
-    """Uploads and status-line snapshots both pile up forever otherwise."""
+def snap_pane(path):
+    """The pane a status-line snapshot describes, or None if it is unreadable."""
+    try:
+        with open(path) as f:
+            return json.load(f).get("pane")
+    except (OSError, ValueError):
+        return None
+
+
+def prune(now, last, live=()):
+    """Uploads and status-line snapshots both pile up forever otherwise.
+
+    A snapshot whose pane is still alive is not stale, however old it is: it is
+    the only description of that pane there is. Age here measures how long the
+    agent has been quiet, not how wrong the file is — Claude Code rewrites it
+    when it redraws its status line, and an idle session does not redraw. So the
+    snapshots this swept first were the *parked* sessions, which is exactly what
+    idle_hint and !ctx exist to talk about, and taking the file also took the
+    transcript path: the topic dropped to scraping and went quiet on its context
+    with nothing said. One box had five snapshots for twelve panes this way.
+    """
     if now - last < PRUNE_EVERY:
         return last
+    live = set(live)
     for d, days in ((FILE_DIR, 7), (STATE_DIR, 1)):
         cut = now - days * 86400
         for n in os.listdir(d) if os.path.isdir(d) else []:
@@ -1959,8 +1985,11 @@ def prune(now, last):
                 continue   # held prompts are state, not a cache: only rewritten
             p = os.path.join(d, n)   # when they change, so mtime says nothing
             try:
-                if os.path.getmtime(p) < cut:
-                    os.remove(p)
+                if os.path.getmtime(p) >= cut:
+                    continue
+                if d == STATE_DIR and snap_pane(p) in live:
+                    continue   # its pane is still there; this is all we know of it
+                os.remove(p)
             except OSError:
                 pass
     return now
@@ -2071,7 +2100,10 @@ def watcher(cfg, state, lock):
             else:
                 tmux_missing(cfg, False)
                 _target.update(alive)     # captures and keystrokes share one pane
-                pruned = prune(time.time(), pruned)
+                # The live panes: a snapshot for one of them is kept however
+                # old, because age here means the agent has been quiet, not that
+                # the file is wrong.
+                pruned = prune(time.time(), pruned, set(alive.values()))
             for topic, sess in bound:
                 try:
                     if watchdog(cfg, state, topic, sess, sess in alive):
@@ -4027,6 +4059,22 @@ def selfcheck():
     open(qp, "w").close(), os.utime(qp, (0, 0))
     assert prune(time.time() + 2 * PRUNE_EVERY, 0) and os.path.exists(qp)
     os.remove(qp)
+
+    # A snapshot for a pane that is still alive survives any age. Age here says
+    # the agent has been quiet, not that the file is wrong — and the sessions
+    # that go quiet longest are the parked ones idle_hint exists to talk about.
+    lp = os.path.join(STATE_DIR, "live.json")
+    with open(lp, "w") as f:
+        json.dump({"pane": "%77", "ctx_pct": 61}, f)
+    os.utime(lp, (0, 0))                                  # ancient, and parked
+    assert snap_pane(lp) == "%77" and snap_pane("/no/such") is None
+    assert prune(time.time() + 4 * PRUNE_EVERY, 0, {"%77"}) and os.path.exists(lp)
+    assert prune(time.time() + 6 * PRUNE_EVERY, 0, {"%1"}) and not os.path.exists(lp)
+    with open(lp, "w") as f:                              # unreadable: not kept
+        f.write("{ not json")
+    os.utime(lp, (0, 0))
+    prune(time.time() + 8 * PRUNE_EVERY, 0, {"%77"})
+    assert not os.path.exists(lp)
     for n_ in ("a", "b", "d"):                       # hours of silence must not
         os.remove(os.path.join(STATE_DIR, f"{n_}.json"))          # drop to scraping
     with open(os.path.join(STATE_DIR, "e.json"), "w") as f:

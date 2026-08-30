@@ -103,6 +103,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- The status-line snapshot of a parked session was swept after a day, taking
+  its context figure, its usage windows and its transcript path with it. Claude
+  Code rewrites that file when it redraws its status line, and an idle session
+  does not redraw — so age measured how long the agent had been quiet, not how
+  wrong the file was, and the sessions pruned first were the parked ones
+  `idle_hint` and `!ctx` exist to talk about. One box was down to five snapshots
+  for twelve panes. A snapshot whose pane is still alive is now kept however
+  old, and `STATE_FRESH` covers a session parked over a holiday.
+
+
 - A session whose name matched a *window* name elsewhere was reported gone by
   every command typed at it. `real_session` asked `tmux display -t <name>`, and
   `-t` there is a target-**pane**, a grammar in which a bare word is a window
