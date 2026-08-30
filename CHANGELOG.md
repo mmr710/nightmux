@@ -103,6 +103,22 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- A tmux call that timed out was read as "no sessions are running". `run()`
+  reports a timeout by returning `[tmux timed out after 10s]` — text, which
+  `live_sessions()` then parsed as an empty pane list, so every bound topic was
+  told its session had died and was rebaselined on the way back. Rebaselining
+  drops the transcript byte offset, so whatever the agents produced during the
+  gap was skipped silently. One box logged 209 of these timeouts and 72 false
+  deaths in three days. `live_sessions()` now returns None when tmux did not
+  answer and the watcher skips the tick, keeping the panes it already knows.
+- A tmux server that stops answering is announced once, and its return once,
+  instead of nine topics' worth of 💀 and ↩️ per outage.
+- `track_cwd` spawned one `display-message` per session per tick to read a
+  working directory the tick's own `list-panes` call could have returned. That
+  is nine fewer processes per tick against the single-threaded tmux server these
+  timeouts come from.
+
+
 - Two topics could be bound to one tmux session. `state` is keyed by session
   name, so they shared a scrape cursor: whichever topic the watcher reached
   first consumed the new output and the other was told nothing, which reads

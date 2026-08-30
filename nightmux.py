@@ -292,6 +292,25 @@ def tmux(*args):
     return run("tmux", *args)
 
 
+def tmux_out(*args, **kw):
+    """tmux's stdout, or None when tmux itself did not answer.
+
+    run() reports a timeout by returning "[tmux timed out after 10s]", and that
+    is *text*: anything that parses the result reads the banner as data. The
+    call this exists for is list-panes, where an unanswered call parsed as an
+    empty pane list — which is indistinguishable from every session on the box
+    having died at the same instant, and was reported as exactly that.
+    """
+    timeout = kw.pop("timeout", 10)
+    try:
+        pr = subprocess.run(("tmux",) + args, capture_output=True, text=True,
+                            timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print("tmux %s: %s" % (" ".join(args), e), file=sys.stderr, flush=True)
+        return None
+    return pr.stdout if pr.returncode == 0 else None
+
+
 def tmux_git(cwd, *args):
     return run("git", "-C", cwd, *args, timeout=30).strip()
 
@@ -338,6 +357,11 @@ SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh"}
 # tick as _target. Listed by shell rather than by agent on purpose: an agent
 # nobody has told nightmux about must not read as a crash, but a shell always is.
 _shell = {}
+
+
+# Session name -> its pane's working directory, filled by the same tick as
+# _target. Read by track_cwd; every other caller wants a live answer and spawns.
+_cwd = {}
 
 
 def agentless(sess):
@@ -426,16 +450,29 @@ def live_sessions():
     written from — and only failing that the session's active pane, which is what
     nightmux used to assume. Both the capture and the keystrokes take this, so
     they cannot end up addressing two different panes.
+
+    None when tmux did not answer. "No sessions are running" and "I could not
+    ask" are different facts, and returning {} for both told every bound topic
+    its session had died — 72 times in three days here — then rebaselined each
+    one, which drops the transcript offset and with it whatever the agent
+    produced during the gap. Callers must handle None; the watcher skips the
+    tick, which is the only reading that invents nothing.
     """
-    out = tmux("list-panes", "-a", "-F",
-               "#{session_name}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}")
-    seen, active, running, cmd = {}, {}, {}, {}
+    out = tmux_out("list-panes", "-a", "-F",
+                   "#{session_name}\t#{pane_id}\t#{pane_active}\t"
+                   "#{pane_current_command}\t#{pane_current_path}")
+    if out is None:
+        return None
+    seen, active, running, cmd, cwd = {}, {}, {}, {}, {}
     for l in out.split("\n"):
-        f = l.split("\t")
-        if len(f) != 4:
+        # The path is last and taken whole: a directory may hold a tab, and
+        # splitting it into a sixth field would drop the pane entirely.
+        f = l.split("\t", 4)
+        if len(f) != 5:
             continue
         seen.setdefault(f[0], []).append(f[1])
         cmd[f[1]] = f[3]
+        cwd[f[1]] = f[4]
         if f[2] == "1":
             active.setdefault(f[0], f[1])
         if f[3] in AGENT_BINS:
@@ -446,6 +483,11 @@ def live_sessions():
           for s, pids in seen.items()}
     _shell.clear()
     _shell.update({s: cmd.get(p) in SHELLS for s, p in at.items()})
+    # Free: this call already walked every pane, and track_cwd asking each
+    # session separately was one `display-message` spawn per session per tick,
+    # on the same single-threaded tmux server that these timeouts come from.
+    _cwd.clear()
+    _cwd.update({s: cwd.get(p) for s, p in at.items() if cwd.get(p)})
     return at
 
 
@@ -1956,7 +1998,7 @@ def track_cwd(cfg, lock, topic, sess):
     session is the only honest answer and it is readable only while it is
     alive, which is exactly when nobody is asking.
     """
-    cwd = sess_cwd(sess)
+    cwd = _cwd.get(sess) or sess_cwd(sess)   # this tick already read it
     if not cwd or not os.path.isdir(cwd):
         return
     with lock:
@@ -1964,6 +2006,40 @@ def track_cwd(cfg, lock, topic, sess):
             return
         cfg.setdefault("dirs", {})[topic] = cwd
         save_cfg(cfg)
+
+
+TMUX_MISSES = 5   # unanswered ticks before the daemon says tmux has gone quiet
+_tmux_miss = [0]
+
+
+def daemon_topic(cfg):
+    """Where a daemon-wide problem is announced: the command center if one is
+    set, else the lowest-numbered bound topic. None when nothing is bound, which
+    is also when there is nothing being missed."""
+    center = cfg.get("center_topic")
+    if center:
+        return str(center)
+    return min((cfg.get("topics") or {}), key=int, default=None)
+
+
+def tmux_missing(cfg, missed):
+    """Report a tmux server that stopped answering, once, and its return, once.
+
+    Skipping the tick keeps a wedged tmux from inventing nine dead sessions, but
+    silence is the failure this daemon is worst at: from a phone, "no output" is
+    what a quiet night looks like too. So an outage that outlasts TMUX_MISSES
+    ticks says so — one message, not one per session per tick.
+    """
+    was, _tmux_miss[0] = _tmux_miss[0], (_tmux_miss[0] + 1) if missed else 0
+    topic = daemon_topic(cfg)
+    if not topic:
+        return
+    if missed and _tmux_miss[0] == TMUX_MISSES:
+        send(cfg, topic, f"⚠️ tmux has not answered for {TMUX_MISSES} ticks\n"
+             "every session is being left alone until it does — no output is "
+             "lost, it is only late", mode="plain")
+    elif not missed and was >= TMUX_MISSES:
+        send(cfg, topic, "✅ tmux is answering again", mode="plain")
 
 
 def watcher(cfg, state, lock):
@@ -1976,8 +2052,17 @@ def watcher(cfg, state, lock):
             with lock:
                 bound = list(cfg["topics"].items())
             alive = live_sessions()   # one tmux call for every topic's liveness
-            _target.update(alive)     # captures and keystrokes share one pane
-            pruned = prune(time.time(), pruned)
+            if alive is None:
+                # tmux did not answer. Everything below reads an empty pane list
+                # as "every session died", so the only safe tick is no tick: keep
+                # the last known targets, touch no state, and look again in a
+                # second. Under load this is a handful of ticks, not an outage.
+                tmux_missing(cfg, True)
+                bound = []            # nothing runs below; the sleep still does
+            else:
+                tmux_missing(cfg, False)
+                _target.update(alive)     # captures and keystrokes share one pane
+                pruned = prune(time.time(), pruned)
             for topic, sess in bound:
                 try:
                     if watchdog(cfg, state, topic, sess, sess in alive):
@@ -2254,6 +2339,8 @@ def resume_session(cfg, state, lock, topic, arg=""):
     name = sess or f"topic{topic}"
     if has_session(name):
         live_sessions()          # _shell is a tick old, and this branch kills
+        # (None here just leaves _shell as it was: one tick stale, never wrong
+        # about a session that is plainly alive.)
         if not agentless(name):
             return f"'{name}' is alive; type /resume in it to pick a conversation"
         # A shell where the agent used to be. Killing it is what makes !restore
@@ -2522,6 +2609,9 @@ def status_report(cfg, state):
     if not cfg["topics"]:
         return "no topics bound"
     now, rows, alive = time.time(), [], live_sessions()
+    if alive is None:
+        return ("tmux is not answering — status would report every session as "
+                "gone, which is a guess, not a reading. Try again in a moment.")
     for topic, sess in sorted(cfg["topics"].items(), key=lambda kv: int(kv[0])):
         st = state.get(sess, {})
         if sess not in alive:
@@ -3703,19 +3793,64 @@ def selfcheck():
     # Which pane a session means. The agent is wherever its status line was last
     # written from, which is not always the pane holding the focus — and reading
     # one pane while typing into another is indistinguishable from a hang.
-    panes = ["api\t%1\t0\tclaude\napi\t%2\t1\tbash\nweb\t%9\t1\tvim"]
-    with stubbed(tmux=lambda *a: panes[0], snapped=lambda: {"%1": 100.0}):
+    panes = ["api\t%1\t0\tclaude\t/w/api\napi\t%2\t1\tbash\t/w/api\n"
+             "web\t%9\t1\tvim\t/w/web"]
+    with stubbed(tmux_out=lambda *a, **k: panes[0], snapped=lambda: {"%1": 100.0}):
         assert live_sessions() == {"api": "%1", "web": "%9"}   # sidecar over focus
         with stubbed(snapped=lambda: {"%1": 100.0, "%2": 200.0}):
             assert live_sessions()["api"] == "%2"              # two: the newer
         with stubbed(snapped=lambda: {}):                      # no sidecar at all:
             assert live_sessions() == {"api": "%1", "web": "%9"}   # the agent pane
-            panes[0] = "api\t%1\t0\tbash\napi\t%2\t1\tbash"     # nothing to go on:
+            panes[0] = "api\t%1\t0\tbash\t/w/api\napi\t%2\t1\tbash\t/w/api"
             assert live_sessions() == {"api": "%2"}             # back to the focus
+    assert _cwd == {"api": "/w/api"}, _cwd     # read from the same call, not a spawn
+    with stubbed(tmux_out=lambda *a, **k: "s\t%1\t1\tclaude\t/w/has\ttab"):
+        live_sessions()
+        assert _cwd == {"s": "/w/has\ttab"}, _cwd   # a tab in the path keeps the pane
+    _cwd.clear()
     assert tgt("api") == "api"        # never seen: the session name, as before
     _target["api"] = "%2"
     assert tgt("api") == "%2"
     _target.clear()
+
+    # A tmux that does not answer must not read as a tmux with no sessions. It
+    # used to: run() reports a timeout by returning "[tmux timed out]", which is
+    # text, so the pane list parsed as empty and every bound topic was told its
+    # session had died — then rebaselined, dropping the transcript offset and
+    # whatever arrived during the gap. 72 of those in three days on one box.
+    with stubbed(tmux_out=lambda *a, **k: None):
+        assert live_sessions() is None
+        assert status_report({"topics": {"1": "s"}}, {}).startswith("tmux is not")
+    with stubbed(run=lambda *a, **k: "[tmux timed out after 10s]"):
+        assert tmux("list-panes") == "[tmux timed out after 10s]"   # unchanged
+    # tmux_out reads the exit status, not the text: a failing tmux is None too.
+    assert tmux_out("no-such-tmux-command") is None
+    assert tmux_out("display-message", "-p", "ok") == "ok\n"
+
+    # The outage is announced once, and so is its end — not once per session per
+    # tick, which is what nine topics of 💀 looked like.
+    tsent = []
+    with stubbed(send=lambda c, t, x, **k: tsent.append(x)):
+        cfgm = {"topics": {"9": "b", "3": "a"}}
+        assert daemon_topic(cfgm) == "3"                    # lowest bound topic
+        assert daemon_topic(dict(cfgm, center_topic=77)) == "77"   # or the center
+        assert daemon_topic({"topics": {}}) is None
+        _tmux_miss[0] = 0
+        for _ in range(TMUX_MISSES - 1):
+            tmux_missing(cfgm, True)
+        assert tsent == [], tsent                     # a blip says nothing
+        tmux_missing(cfgm, True)
+        assert len(tsent) == 1 and tsent[0].startswith("⚠️ tmux has not answered")
+        for _ in range(4):
+            tmux_missing(cfgm, True)
+        assert len(tsent) == 1, tsent                 # still out: not again
+        tmux_missing(cfgm, False)
+        assert tsent[-1] == "✅ tmux is answering again" and _tmux_miss[0] == 0
+        tmux_missing(cfgm, False)
+        assert len(tsent) == 2, tsent                 # recovery is said once too
+        _tmux_miss[0] = 0
+        tmux_missing(cfgm, True), tmux_missing(cfgm, False)
+        assert len(tsent) == 2, tsent                 # a blip that healed: silent
 
     globals()["CFG_PATH"] = os.path.join(FILE_DIR, "selfcheck.json")
     globals()["OFFSET_PATH"] = os.path.join(FILE_DIR, "selfcheck.offset")
