@@ -103,6 +103,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- A session whose name matched a *window* name elsewhere was reported gone by
+  every command typed at it. `real_session` asked `tmux display -t <name>`, and
+  `-t` there is a target-**pane**, a grammar in which a bare word is a window
+  name — so a session called `claude` resolved to whichever session held one of
+  the windows every Claude Code pane is called, and the topic bound to it got
+  "tmux session 'claude' is gone" for everything it typed while the watcher saw
+  the session alive. The target is now `<name>:`, which addresses a session and
+  still resolves the abbreviation `!bind` accepts.
+
+
 - A tmux call that timed out was read as "no sessions are running". `run()`
   reports a timeout by returning `[tmux timed out after 10s]` — text, which
   `live_sessions()` then parsed as an empty pane list, so every bound topic was

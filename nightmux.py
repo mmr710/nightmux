@@ -324,9 +324,18 @@ def real_session(sess):
     `list-panes` output, so !bind accepting the abbreviation bound a name that
     never appears in live_sessions() — and the topic was told '💀 gone' one
     tick after 'topic bound'. Bind what tmux says the session is called.
+
+    The trailing colon is what makes this a *session*. `display -t` takes a
+    target-pane, and in that grammar a bare word is a **window** name, so
+    `-t claude` found the window every Claude Code pane is called and answered
+    with whichever session happened to hold it. A session actually named claude
+    was then reported gone by every command that asked — while the watcher, which
+    matches against list-panes output, saw it alive. `-t "claude:"` addresses the
+    session, and still resolves an abbreviation the way !bind needs.
     """
     try:
-        p = subprocess.run(("tmux", "display", "-p", "-t", sess, "#{session_name}"),
+        p = subprocess.run(("tmux", "display", "-p", "-t", sess + ":",
+                            "#{session_name}"),
                            capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired:
         return ""
@@ -3896,6 +3905,20 @@ def selfcheck():
             # whole name, so !bind has to store the whole name too.
             assert real_session("nm-selfche") == "nm-selfcheck"
             assert has_session("nm-selfche") is False
+            # A window elsewhere with this session's name must not answer for
+            # it. Every Claude Code pane is a window called "claude", so a
+            # session called claude resolved to whichever session held one of
+            # them, and every command in that topic replied "is gone".
+            subprocess.run(("tmux", "new-session", "-d", "-s", "nm-sc-decoy",
+                            "-c", "/"), capture_output=True)
+            subprocess.run(("tmux", "rename-window", "-t", "nm-sc-decoy:",
+                            "nm-selfcheck"), capture_output=True)
+            try:
+                assert real_session("nm-selfcheck") == "nm-selfcheck"
+                assert has_session("nm-selfcheck") is True
+            finally:
+                subprocess.run(("tmux", "kill-session", "-t", "nm-sc-decoy"),
+                               capture_output=True)
             cfg9, lk9 = {"topics": {}, "chat_id": -1}, threading.Lock()
             assert handle(cfg9, {}, lk9, "9", "!bind nm-selfche") == \
                 "topic bound to 'nm-selfcheck'"
