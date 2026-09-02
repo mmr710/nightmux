@@ -840,6 +840,13 @@ def tail_transcript(st, path):
                           + u.get("cache_creation_input_tokens", 0) * WEIGHT["write"]
                           + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
                           + u.get("output_tokens", 0) * WEIGHT["out"])
+                if u:
+                    # What this turn carried in: the context size, in tokens, as
+                    # the model billed it. The status line only gives a percentage
+                    # of a window whose size it never states.
+                    st["ctx_tok"] = (u.get("input_tokens", 0)
+                                     + u.get("cache_creation_input_tokens", 0)
+                                     + u.get("cache_read_input_tokens", 0))
                 out += render(rec)
     st["tpos"] = pos
     if spent:
@@ -1176,7 +1183,10 @@ def ctx_trip(cfg):
     a fixed warning at 75 means the compaction happens first and the warning is
     dead code -- which is what a config of {"autocompact": 70} used to get.
     """
-    at = cfg.get("autocompact")
+    at, tok_at = compact_at(cfg)
+    if tok_at:
+        return CTX_WARN   # the compaction is on tokens; the percentage warning
+                          # has nothing to stay ahead of, so leave it where it is
     # Floored: {"autocompact": 5} would put the trip point below zero and warn
     # about a context that is empty.
     return max(CTX_LEAD, min(CTX_WARN, at - CTX_LEAD)) if at else CTX_WARN
@@ -1297,24 +1307,46 @@ PROJECTS = os.path.expanduser("~/.claude/projects")
 WEIGHT = {"in": 1.0, "write": 1.25, "read": 0.1, "out": 5.0}
 
 
-def spend_cap(cfg):
-    """(turns, base-equivalent tokens) from cfg["spendcap"] -- only one is set.
+def parse_amount(v):
+    """(bare, tokens) from a config value: 12 -> (12, None); "2M" -> (None, 2e6).
 
-    A number is turns, which is what this has always meant. A string with a k or
-    M suffix is tokens instead: a turn is one grep or two hundred, so a turn
-    count says nothing about what a loop is actually costing. Tokens come out of
-    the transcript, so that form only bites on a Claude Code session.
+    Two knobs are this shape. !spendcap counts turns or tokens; !autocompact
+    takes a percentage or tokens. In both, a bare number keeps the unit the
+    setting has always had and a k/M suffix means tokens, so neither existing
+    config changes meaning.
     """
-    v = cfg.get("spendcap")
     if isinstance(v, str):
         m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*", v)
         if not m:
             return None, None
         n, suf = float(m.group(1)), (m.group(2) or "").lower()
         if not suf:
-            return int(n) or None, None      # "12" is still twelve turns
+            return int(n) or None, None      # "12" is still twelve of the unit
         return None, int(n * (1e3 if suf == "k" else 1e6))
     return (v, None) if v else (None, None)
+
+
+def spend_cap(cfg):
+    """(turns, base-equivalent tokens) from cfg["spendcap"] -- only one is set.
+
+    A turn is one grep or two hundred, so a turn count says nothing about what a
+    loop is actually costing. Tokens come out of the transcript, so that form
+    only bites on a Claude Code session.
+    """
+    return parse_amount(cfg.get("spendcap"))
+
+
+def compact_at(cfg):
+    """(percent of the window, absolute tokens) from cfg["autocompact"].
+
+    A percentage stops being a cost control once the window is large. Measured
+    on one box: windows of 530k-700k tokens, so `autocompact: 70` would not fire
+    until a turn carried ~490k tokens — while the sessions sat at 264k-319k and
+    re-read every one of those tokens on every turn. The knob was unreachable
+    and the bill was already the problem it exists to prevent. A suffixed value
+    (`!autocompact 150k`) trips on what a turn actually carries instead.
+    """
+    return parse_amount(cfg.get("autocompact"))
 
 
 def token_tally(paths):
@@ -1454,17 +1486,28 @@ def grep_transcripts(needle, days=7, limit=25):
 def autocompact(cfg, state, topic, sess):
     """Compact a session before carrying its context gets expensive.
 
-    Opt-in via cfg["autocompact"], the percentage to act at. Fires only on an
-    idle session with an empty queue, and only once per crossing: mid-turn it
-    would interrupt real work, and a second one would undo the first. Announced
-    every time, because it types into your session without being asked.
+    Opt-in via cfg["autocompact"]: a percentage of the context window, or a
+    suffixed token count (150k) for the windows where a percentage never trips.
+    Fires only on an idle session with an empty queue, and only once per
+    crossing: mid-turn it would interrupt real work, and a second one would undo
+    the first. Announced every time, because it types into your session without
+    being asked.
     """
-    at = cfg.get("autocompact")
+    at, tok_at = compact_at(cfg)
     st = state.get(sess) or {}
     pct = (st.get("snap") or {}).get("ctx_pct")
-    if not at or pct is None:
+    tok = st.get("ctx_tok")
+    if tok_at:
+        over, now_at = (tok is not None and tok >= tok_at), tok_at
+        reading = "%s tokens" % format(tok or 0, ",")
+        target = "%s" % format(tok_at, ",")
+    else:
+        over, now_at = (pct is not None and pct >= at) if at else (False, None), at
+        reading = "%.0f%%" % (pct or 0)
+        target = "%s%%" % at
+    if not now_at or (pct is None and tok is None):
         return
-    if pct < at:                       # back under: arm again for the next climb
+    if not over:                       # back under: arm again for the next climb
         for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
             st.pop(k, None)
         return
@@ -1481,7 +1524,7 @@ def autocompact(cfg, state, topic, sess):
             if (st.get("compact_tries", 0) >= COMPACT_TRIES
                     and not st.get("compact_gave_up")):
                 st["compact_gave_up"] = True
-                send(cfg, topic, f"⚠️ {sess} still {pct:.0f}% after "
+                send(cfg, topic, f"⚠️ {sess} still at {reading} after "
                      f"{COMPACT_TRIES}x /compact — run it by hand, or "
                      "!autocompact off", mode="plain")
             return
@@ -1489,7 +1532,7 @@ def autocompact(cfg, state, topic, sess):
     st["compacted"] = True
     st["compact_at"] = time.time()
     st["compact_tries"] = st.get("compact_tries", 0) + 1
-    send(cfg, topic, f"🧹 {sess} context {pct:.0f}% ≥ {at}% — running /compact\n"
+    send(cfg, topic, f"🧹 {sess} context {reading} ≥ {target} — running /compact\n"
          "!autocompact off to stop this", mode="plain")
     inject(sess, "/compact")
     remember(state, sess, "/compact")
@@ -1963,6 +2006,33 @@ def snap_pane(path):
         return None
 
 
+def newest_per_pane(live):
+    """The one snapshot worth keeping for each live pane: the newest.
+
+    Claude Code names these after its own session id, so a pane collects another
+    file every time a conversation starts in it. Keeping every snapshot whose
+    pane is alive — which is what "alive means not stale" says on its own — holds
+    all of them for the life of the pane, and snapshot() rescans the pile on
+    every look. The newest is the one it would have picked anyway; the rest are
+    finished conversations and go back to ageing out.
+    """
+    best = {}
+    for n in os.listdir(STATE_DIR) if os.path.isdir(STATE_DIR) else []:
+        if n.startswith(("queue.json", "warned.json")):
+            continue
+        p = os.path.join(STATE_DIR, n)
+        pane = snap_pane(p)
+        if pane not in live:
+            continue
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt > best.get(pane, (-1, None))[0]:   # -1: an mtime of 0 is still a file
+            best[pane] = (mt, p)
+    return {p for _, p in best.values()}
+
+
 def prune(now, last, live=()):
     """Uploads and status-line snapshots both pile up forever otherwise.
 
@@ -1977,7 +2047,7 @@ def prune(now, last, live=()):
     """
     if now - last < PRUNE_EVERY:
         return last
-    live = set(live)
+    keep = newest_per_pane(set(live))
     for d, days in ((FILE_DIR, 7), (STATE_DIR, 1)):
         cut = now - days * 86400
         for n in os.listdir(d) if os.path.isdir(d) else []:
@@ -1985,10 +2055,10 @@ def prune(now, last, live=()):
                 continue   # held prompts are state, not a cache: only rewritten
             p = os.path.join(d, n)   # when they change, so mtime says nothing
             try:
+                if d == STATE_DIR and p in keep:
+                    continue   # its pane is still there; this is all we know of it
                 if os.path.getmtime(p) >= cut:
                     continue
-                if d == STATE_DIR and snap_pane(p) in live:
-                    continue   # its pane is still there; this is all we know of it
                 os.remove(p)
             except OSError:
                 pass
@@ -2743,7 +2813,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
-                "!autocompact <pct|off> | !idlectx <pct|off>\n"
+                "!autocompact <pct|150k|off> = /compact at a share of the window, "
+                "or at a token count\n!idlectx <pct|off>\n"
                 "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
                 "turns, or tokens, in 5m\n"
                 "type / for the same commands with autocomplete\n"
@@ -2881,12 +2952,23 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return None
     if cmd == "!autocompact":
         if arg:
+            if arg in ("off", "0"):
+                v = None
+            elif re.fullmatch(r"\d+(?:\.\d+)?[kKmM]", arg):
+                v = arg.lower()          # a suffix means tokens, kept as written
+            elif arg.isdigit():
+                v = int(arg)
+            else:
+                return "usage: !autocompact <pct> | <150k|1M> tokens | off"
             with lock:
-                cfg["autocompact"] = None if arg in ("off", "0") else int(arg)
+                cfg["autocompact"] = v
                 save_cfg(cfg)
-        at = cfg.get("autocompact")
-        return (f"auto /compact at {at}% context" if at else
-                "auto /compact off — !autocompact 70 to enable")
+        at, tok_at = compact_at(cfg)
+        if tok_at:
+            return (f"auto /compact when a turn carries {tok_at:,} tokens\n"
+                    "counted from the transcript, so Claude Code sessions only")
+        return (f"auto /compact at {at}% of the context window" if at else
+                "auto /compact off — !autocompact 70 (pct) or 150k (tokens)")
     if cmd == "!spendcap":
         if arg:
             if arg in ("off", "0"):
@@ -4032,6 +4114,15 @@ def selfcheck():
     assert int(tst["spend"][-1][1]) == 150, tst["spend"]   # 100*1.0 + 10*5.0
     os.remove(tp)
 
+    # One parser, two knobs: a bare number keeps each setting's original unit,
+    # a k/M suffix means tokens in both.
+    assert parse_amount(None) == (None, None) and parse_amount("nope") == (None, None)
+    assert parse_amount(70) == (70, None) and parse_amount("150k") == (None, 150000)
+    assert compact_at({"autocompact": 70}) == (70, None)
+    assert compact_at({"autocompact": "150k"}) == (None, 150000)
+    # A percentage stops being a cost control on a big window, so the token form
+    # has to leave the percentage warning where it is rather than chase it.
+    assert ctx_trip({"autocompact": "150k"}) == CTX_WARN
     assert spend_cap({}) == (None, None)
     assert spend_cap({"spendcap": 12}) == (12, None)
     assert spend_cap({"spendcap": "12"}) == (12, None)     # a bare string is turns
@@ -4069,6 +4160,17 @@ def selfcheck():
     os.utime(lp, (0, 0))                                  # ancient, and parked
     assert snap_pane(lp) == "%77" and snap_pane("/no/such") is None
     assert prune(time.time() + 4 * PRUNE_EVERY, 0, {"%77"}) and os.path.exists(lp)
+    # ...but only the newest per pane. A pane collects a snapshot per Claude
+    # session id, so keeping every one whose pane is alive hoards them for the
+    # life of the pane and makes snapshot() rescan the pile on every look.
+    lp2 = os.path.join(STATE_DIR, "live2.json")
+    with open(lp2, "w") as f:
+        json.dump({"pane": "%77", "ctx_pct": 62}, f)     # same pane, newer file
+    os.utime(lp2, (time.time(), time.time()))
+    assert newest_per_pane({"%77"}) == {lp2}, newest_per_pane({"%77"})
+    prune(time.time() + 10 * PRUNE_EVERY, 0, {"%77"})
+    assert os.path.exists(lp2) and not os.path.exists(lp), "kept the stale twin"
+    os.remove(lp2)
     assert prune(time.time() + 6 * PRUNE_EVERY, 0, {"%1"}) and not os.path.exists(lp)
     with open(lp, "w") as f:                              # unreadable: not kept
         f.write("{ not json")
@@ -4539,12 +4641,31 @@ def selfcheck():
     st["compact_at"] = time.time() - COMPACT_GRACE - 1
     autocompact(ac, state, "1", "s")
     assert typed == ["/compact"] * 3                # out of tries: stops typing
-    assert sent[-1].startswith("\u26a0\ufe0f s still 82% after"), sent[-1]
+    assert sent[-1].startswith("\u26a0\ufe0f s still at 82% after"), sent[-1]
     st["compact_at"] = time.time() - COMPACT_GRACE - 1
     autocompact(ac, state, "1", "s")
     assert len(sent) == n + 1                       # ...and says so once
     st["snap"]["ctx_pct"] = 20                      # leave it armed for what follows
     autocompact(ac, state, "1", "s")
+    typed[:] = ["/compact"]
+
+    # An absolute cap, for the windows a percentage never reaches. Measured on
+    # one box: a 700k window means `autocompact: 70` waits for 490k tokens.
+    tokc, n = {"autocompact": "150k", "topics": {}}, len(sent)
+    st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 22})
+    for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
+        st.pop(k, None)
+    st["ctx_tok"] = 90000
+    autocompact(tokc, state, "1", "s")
+    assert typed == ["/compact"], "fired under the token cap"   # 90k < 150k
+    st["ctx_tok"] = 160000                       # over, though only 22% of window
+    autocompact(tokc, state, "1", "s")
+    assert typed == ["/compact"] * 2, typed
+    assert "160,000 tokens ≥ 150,000" in sent[-1], sent[-1]
+    st["ctx_tok"] = 10000                        # compacted: re-arm
+    autocompact(tokc, state, "1", "s")
+    assert "compacted" not in st and typed == ["/compact"] * 2
+    st.pop("ctx_tok"), typed.clear()
     typed[:] = ["/compact"]
     st.pop("snap"), typed.clear()
 

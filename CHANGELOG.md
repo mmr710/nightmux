@@ -6,6 +6,24 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+### Added
+
+- `!autocompact 150k` — compact on what a turn actually carries, not on a share
+  of the context window. Measured on one box: windows of 530k–700k tokens, so
+  `autocompact: 70` would not have fired until a turn carried ~490k tokens,
+  while the sessions sat at 264k–319k and re-read every one of those tokens on
+  every turn. The percentage form is unchanged, so existing configs keep their
+  meaning.
+
+### Fixed
+
+- Keeping a snapshot for as long as its pane lives kept *every* snapshot for
+  that pane. Claude Code names them after its own session id, so a pane collects
+  another file each time a conversation starts, and `snapshot()` rescanned the
+  pile on every look. Only the newest per live pane is kept now; the rest go
+  back to ageing out.
+
+
 ## [1.2.0] — 2026-09-02
 
 ### Added
