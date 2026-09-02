@@ -30,7 +30,7 @@ to the topic. Approvals arrive as tap buttons.
 
 No container, no DNS, no certificates, no ports open, no relay service. It
 attaches to tmux sessions you already have, on the machine you already use.
-Python stdlib only — one file, ~3,400 lines you can read in an afternoon.
+Python stdlib only — one file, ~5,400 lines you can read in an afternoon.
 
 ![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
 

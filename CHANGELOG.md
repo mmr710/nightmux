@@ -6,6 +6,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-02
+
 ### Added
 
 - **One topic, several agents.** A bare `!<agent>` in a bound topic switches that

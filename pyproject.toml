@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nightmux"
-version = "1.1.0"
+version = "1.2.0"
 description = "Run Claude Code, Codex or any terminal coding agent from Telegram — one forum topic per tmux session."
 readme = "README.md"
 license = { file = "LICENSE" }
