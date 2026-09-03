@@ -1904,7 +1904,8 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                    lines, prompt_key(lines)):
             return
     elif body:
-        send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
+        if not consult_capture(topic, sess, body):
+            send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
     else:
         return
     if st.get("react"):
@@ -2189,6 +2190,7 @@ def watcher(cfg, state, lock):
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
+            consult_tick(cfg, state)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -2504,6 +2506,199 @@ def bound_to(cfg, name, topic):
                  if s == name and str(t) != str(topic)), None)
 
 
+# ---------- consult: two agents on one question ----------
+
+# Round 1 goes out blind on purpose. Showing each agent the other's answer up
+# front gets agreement rather than a second opinion, and agreement between two
+# models that read each other is worth much less than two independent reads.
+CONSULT_R1 = """[nightmux consult - round 1 of 2]
+You and another AI coding agent have been given this same question, separately.
+Answer for yourself. In the next round you will be shown what the other said.
+
+QUESTION
+{q}
+
+Answer briefly and concretely:
+1. the approach you recommend
+2. the biggest risk or unknown in it
+3. what you would check before committing to it
+
+Do not ask me anything. Where something is unspecified, state your assumption
+and carry on."""
+
+CONSULT_R2 = """[nightmux consult - round 2 of 2]
+This is how {other} answered the same question.
+
+--- {other} said ---
+{body}
+--- end of {other} ---
+
+First, one or two lines: where are they right and you were not, or where do you
+still disagree, and why.
+
+Then write THE PROMPT - one self-contained prompt that could be handed to a
+coding agent to get this done properly, folding in whatever of their answer
+beats yours. Put it in a single fenced block, last, with nothing after it."""
+
+CONSULT_TIMEOUT = 900   # a round nobody finished in this long is given up on
+
+# topic -> the running consultation. Deliberately not on disk: a consultation is
+# a conversation in flight, and half of one restored into two sessions that have
+# since moved on is worse than no consultation at all. A restart cancels it and
+# the topic is told.
+_consult = {}
+
+
+def fenced(body):
+    """The last fenced block in a body - where round 2 is told to put the prompt."""
+    blocks = re.findall(r"```[A-Za-z0-9_+-]*\n(.*?)```", body or "", re.S)
+    return blocks[-1].strip() if blocks else ""
+
+
+def consult_capture(topic, sess, body):
+    """True when this finished turn is a consultation round, not an answer to you.
+
+    The caller then does not post it. The rounds are working notes: posting both
+    agents' drafts is most of what this feature exists to spare you. Nothing is
+    lost - every draft comes back in the report.
+    """
+    c = _consult.get(str(topic))
+    if not c or sess not in c["want"] or sess in c["got"]:
+        return False
+    c["got"][sess] = body
+    return True
+
+
+def consult_start(cfg, state, topic, question):
+    """!consult <question>: put it to every agent on this topic's bench."""
+    if question.strip() in ("cancel", "off", "stop"):
+        return "consult cancelled" if _consult.pop(str(topic), None) else "no consult running"
+    if not question.strip():
+        return ("usage: !consult <question>\n"
+                "asks every agent on this topic's bench, independently, then has "
+                "them read each other and return one prompt\n!consult cancel stops it")
+    if str(topic) in _consult:
+        return "a consult is already running here - !consult cancel to drop it"
+    bench = bench_of(cfg, topic)
+    live = {s: k for k, s in bench.items() if has_session(s)}
+    if len(live) < 2:
+        return ("consult needs two agents in this topic; it has %d (%s)\n"
+                "!<agent> starts another in the same directory"
+                % (len(live), ", ".join(sorted(bench)) or "none"))
+    _consult[str(topic)] = c = {"q": question.strip(), "round": 1, "want": live,
+                                "got": {}, "at": time.time(), "r1": {}}
+    for sess in live:
+        send_prompt(cfg, state, topic, sess, CONSULT_R1.format(q=c["q"]))
+    return ("🤝 consult round 1 - asking %s, separately\n"
+            "they read each other in round 2; I will come back with the prompt"
+            % ", ".join(sorted(live.values())))
+
+
+def consult_advance(cfg, state, topic, c):
+    """Round 1 is in. Give each agent the others' answers and ask for one prompt."""
+    c["r1"] = {c["want"][s]: b for s, b in c["got"].items()}
+    if len(c["r1"]) < 2:      # only one answered: nothing to cross-read
+        return consult_report(cfg, topic, c)
+    send(cfg, topic, "🤝 consult round 2 - each now reads the other", mode="plain")
+    answered, c["round"], c["at"] = dict(c["got"]), 2, time.time()
+    c["want"] = {s: k for s, k in c["want"].items() if s in answered}
+    c["got"] = {}
+    for sess, key in c["want"].items():
+        other = next((k for k in c["r1"] if k != key), None)
+        send_prompt(cfg, state, topic, sess,
+                    CONSULT_R2.format(other=other, body=c["r1"][other]))
+    return None
+
+
+def consult_report(cfg, topic, c):
+    """Deliver what came back: each agent's prompt, and its reasoning behind it."""
+    finals = [(c["want"][s], fenced(b), b) for s, b in c["got"].items()]
+    named = ", ".join(sorted(k for k, _, _ in finals))
+    with_prompt = [(k, p) for k, p, _ in finals if p]
+    if not with_prompt:
+        # They answered but nobody fenced a prompt. Their prose is the result;
+        # inventing a merge from it here would be nightmux having an opinion.
+        send(cfg, topic, "🤝 consult done - %s answered but neither fenced a "
+             "prompt. Their answers follow." % named, mode="plain")
+        for k, _, b in finals:
+            send(cfg, topic, "%s said\n\n%s" % (k, b))
+        return None
+    agreed = len({p for _, p in with_prompt}) == 1
+    send(cfg, topic, "🤝 consult done - %s\nQ: %s\n%s" % (
+        named, c["q"][:200],
+        "they landed on the same prompt" if agreed else
+        "they differ; both are below, yours to pick"), mode="plain")
+    for k, prompt in with_prompt:
+        send(cfg, topic, "%s's prompt\n\n%s" % (k, prompt))
+        if agreed:
+            break
+    return None
+
+
+def consult_tick(cfg, state):
+    """Advance any running consultation. One call per watch tick, not per session."""
+    for topic in list(_consult):
+        c = _consult[topic]
+        try:
+            late = [s for s in c["want"] if s not in c["got"]]
+            if late and time.time() - c["at"] < CONSULT_TIMEOUT:
+                continue
+            if late:
+                send(cfg, topic, "⏳ consult: %s did not finish round %d in %s - "
+                     "going on with what came back"
+                     % (", ".join(late), c["round"], left(CONSULT_TIMEOUT)),
+                     mode="plain")
+            if not c["got"]:
+                send(cfg, topic, "🤝 consult: nobody answered - dropped", mode="plain")
+                _consult.pop(topic, None)
+                continue
+            if c["round"] == 1:
+                consult_advance(cfg, state, topic, c)
+            else:
+                consult_report(cfg, topic, c)
+                _consult.pop(topic, None)
+        except Exception as e:
+            print("consult %s: %s" % (topic, e), file=sys.stderr)
+            _consult.pop(topic, None)
+
+
+def bench_of(cfg, topic):
+    """{agent key: session} for this topic, including the one it is on now.
+
+    The live agent is not always written into cfg["bench"] — a topic bound
+    before benches existed, or bound with !bind, has only cfg["topics"] — so it
+    is folded in here rather than in each of the three callers.
+    """
+    bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
+    cur = cfg["topics"].get(topic)
+    if cur:
+        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+    return bench
+
+
+def address(cfg, state, topic, text):
+    """@agent <prompt>: send one prompt to a bench agent without switching to it.
+
+    Switching is the wrong verb when a project keeps claude and agy side by
+    side and you want to put one question to one of them. The topic stays where
+    it is; only this prompt is routed. Returns None when the text is not
+    addressed to anybody, so ordinary text falls through unchanged.
+    """
+    m = re.match(r"@([A-Za-z0-9_-]+)\s+(.+)", text, re.S)
+    if not m:
+        return None
+    key, prompt = m.group(1).lower(), m.group(2).strip()
+    bench = bench_of(cfg, topic)
+    if key not in bench:
+        return ("no %s in this topic — it has: %s\n!%s starts one"
+                % (key, ", ".join(sorted(bench)) or "nothing", key))
+    sess = bench[key]
+    if not has_session(sess):
+        return f"{key}'s session '{sess}' is gone — !{key} restarts it"
+    reply = send_prompt(cfg, state, topic, sess, prompt)
+    return reply or f"→ {key} ({sess})"
+
+
 def switch_agent(cfg, state, lock, topic, key):
     """Bare !<key> in a bound topic: route this topic to that agent, in the same
     directory, leaving the agent it was on running.
@@ -2515,9 +2710,7 @@ def switch_agent(cfg, state, lock, topic, key):
     """
     cur = cfg["topics"].get(topic)
     cwd = (cfg.get("dirs") or {}).get(topic)
-    bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
-    if cur:   # whatever the topic is on now is the first thing on its bench
-        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+    bench = bench_of(cfg, topic)
     if not cwd:
         return "usage: !%s <name> [dir] [flags] [@branch]" % key
     if cur and bench.get(key) == cur and has_session(cur):
@@ -2694,9 +2887,7 @@ def agent_report(cfg, state, topic):
     job on it.
     """
     cur = cfg["topics"].get(topic)
-    bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
-    if cur:
-        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+    bench = bench_of(cfg, topic)
     if not bench:
         return ("no agents in this topic yet\n!<agent> <name> <dir> starts one: "
                 + ", ".join(agents(cfg)))
@@ -2756,6 +2947,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+              "!consult",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -2799,6 +2991,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 f"!new <name> [dir] [flags] [@branch], or !<agent>: "
                 f"{', '.join(agents(cfg))}\n"
                 "!agents = this topic's agents; bare !<agent> switches between them\n"
+                "@claude <text> / @agy <text> = send one prompt to one of them, "
+                "without switching\n"
+                "!consult <question> = ask them separately, let them read each "
+                "other, get one prompt back\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
                 "!worktrees = git worktrees of this topic's repo, and who is in each\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
@@ -2881,8 +3077,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
             old = cfg["topics"].pop(topic, None)
             save_cfg(cfg)
         return f"unbound '{old}'" if old else "not bound"
+    if cmd == "!consult":
+        return consult_start(cfg, state, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
+    if cmd.startswith("@"):
+        routed = address(cfg, state, topic, text)
+        if routed is not None:
+            return routed          # not addressed to anyone: falls through as text
     if cmd == "!new" or cmd[1:] in agents(cfg):
         # Bare !<agent> in a topic that already knows its directory means "switch
         # this topic to that agent" -- same project, different agent, and the one
@@ -5300,6 +5502,78 @@ def selfcheck():
 
     # ...and one session must never be two topics'. They share a scrape cursor,
     # so the watcher hands the output to whichever topic it reaches first.
+    # @agent: one prompt to one bench agent, without moving the topic.
+    # Put topic 9 back exactly as found: the tests below turn on which session
+    # it is on, and switch_agent short-circuits when the bench already names it.
+    was9 = (cfg2["topics"].get("9"), cfg2["started"].get("9"),
+            dict((cfg2.get("bench") or {}).get("9") or {}))
+    cfg2.setdefault("bench", {})["9"] = {"codex": "box", "agy": "box-agy"}
+    cfg2["topics"]["9"], cfg2["started"]["9"] = "box", "codex"
+    assert bench_of(cfg2, "9") == {"codex": "box", "agy": "box-agy"}
+    sent_to = []
+    with stubbed(has_session=lambda s: True,
+                 send_prompt=lambda c, st, t, se, tx, mid=None: sent_to.append((se, tx))):
+        assert address(cfg2, {}, "9", "no prefix here") is None      # falls through
+        assert address(cfg2, {}, "9", "@agy fix the parser") == "→ agy (box-agy)"
+        assert sent_to[-1] == ("box-agy", "fix the parser"), sent_to[-1]
+        assert cfg2["topics"]["9"] == "box", "addressing must not switch the topic"
+        assert "no gemini in this topic" in address(cfg2, {}, "9", "@gemini hi")
+        assert address(cfg2, {}, "9", "@agy") is None                # no prompt: text
+    with stubbed(has_session=lambda s: False):
+        assert "is gone" in address(cfg2, {}, "9", "@agy hello")
+
+    # consult: two agents, two rounds, one prompt back.
+    assert fenced("noise\n```py\nfirst\n```\nmid\n```\nLAST ONE\n```") == "LAST ONE"
+    assert fenced("no fence here") == ""
+    csent, cprompts = [], []
+    with stubbed(has_session=lambda s: True,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: csent.append(x),
+                 send_prompt=lambda c, st, t, se, tx, mid=None: cprompts.append((se, tx))):
+        _consult.clear()
+        assert "needs two agents" in consult_start({"topics": {"9": "solo"},
+                                                    "bench": {}}, {}, "9", "q?")
+        out = consult_start(cfg2, {}, "9", "how should we shard this?")
+        assert "round 1" in out and len(cprompts) == 2, out
+        assert "how should we shard this?" in cprompts[0][1]
+        assert "already running" in consult_start(cfg2, {}, "9", "again?")
+        c = _consult["9"]
+        # round 1 lands: the drafts are captured, not posted to the topic
+        assert consult_capture("9", "box", "codex draft") is True
+        assert consult_capture("9", "box", "twice") is False   # one per round
+        assert consult_capture("9", "somebody-else", "x") is False
+        assert consult_capture("9", "box-agy", "agy draft") is True
+        n = len(cprompts)
+        consult_tick(cfg2, {})
+        assert len(cprompts) == n + 2, "round 2 did not go out"
+        assert "agy draft" in cprompts[-1][1] or "agy draft" in cprompts[-2][1]
+        assert c["round"] == 2 and c["got"] == {}
+        # round 2 lands with a fenced prompt from each
+        consult_capture("9", "box", "I agree.\n```\nDO THE THING\n```")
+        consult_capture("9", "box-agy", "Mostly.\n```\nDO IT DIFFERENTLY\n```")
+        consult_tick(cfg2, {})
+        assert "9" not in _consult, "consult did not finish"
+        assert any("they differ" in x for x in csent), csent[-3:]
+        assert any("DO THE THING" in x for x in csent), csent[-3:]
+        assert any("DO IT DIFFERENTLY" in x for x in csent), csent[-3:]
+        # agreement is reported as agreement, and said once
+        _consult.clear(), csent.clear(), cprompts.clear()
+        consult_start(cfg2, {}, "9", "same?")
+        consult_capture("9", "box", "a"), consult_capture("9", "box-agy", "b")
+        consult_tick(cfg2, {})
+        consult_capture("9", "box", "```\nSAME\n```")
+        consult_capture("9", "box-agy", "```\nSAME\n```")
+        consult_tick(cfg2, {})
+        assert any("same prompt" in x for x in csent), csent[-2:]
+        assert sum("SAME" in x for x in csent) == 1, "agreed prompt sent twice"
+        # a round nobody answers is given up on, not left hanging
+        _consult.clear(), csent.clear()
+        consult_start(cfg2, {}, "9", "silence?")
+        _consult["9"]["at"] = time.time() - CONSULT_TIMEOUT - 1
+        consult_tick(cfg2, {})
+        assert "9" not in _consult and any("nobody answered" in x for x in csent)
+    _consult.clear()
+    cfg2["topics"]["9"], cfg2["started"]["9"], cfg2["bench"]["9"] = was9
+
     assert bound_to(cfg2, "box", "9") is None
     cfg2["topics"]["94"] = "box"
     assert bound_to(cfg2, "box", "9") == "94"

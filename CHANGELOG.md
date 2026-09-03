@@ -8,6 +8,17 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `@claude <text>` / `@agy <text>` — send one prompt to one agent on the topic's
+  bench without switching the topic to it. Switching is the wrong verb when a
+  project keeps two agents side by side and you want to put one question to one
+  of them.
+- `!consult <question>` — ask every agent on the bench separately, then have each
+  read the other's answer and return one self-contained prompt. Round one is
+  blind on purpose: two independent reads are worth more than an agreement
+  reached after they have seen each other.
+
+### Added
+
 - `!autocompact 150k` — compact on what a turn actually carries, not on a share
   of the context window. Measured on one box: windows of 530k–700k tokens, so
   `autocompact: 70` would not have fired until a turn carried ~490k tokens,

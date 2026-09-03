@@ -185,6 +185,8 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!codex` / `!aider` / `!gemini` / `!agy` … | same, with that agent |
 | `!<agent>` with no arguments | switch this topic to that agent, in the same directory |
 | `!agents` | this topic's agents, which one is live, and which report a context figure |
+| `@claude <text>` / `@agy <text>` | send one prompt to one agent on the bench, without switching the topic |
+| `!consult <question>` | ask every agent separately, let them read each other, get one prompt back |
 | `!resume [agent]` / `!restore` | relaunch this topic's directory, resuming the last conversation |
 | `!bind <session>` / `!unbind` / `!kill` | attach, detach, stop (kill asks first) |
 | `!sessions` / `!status` | tmux sessions; every topic and its state |
@@ -227,6 +229,30 @@ branches, no stepping on each other's uncommitted work. `!worktrees` lists every
 worktree of the current topic's repo and which session (if any) is sitting in
 it. Nothing here routes work between agents or merges anything — that part is
 still yours; this is just isolation.
+
+## Consulting two agents at once
+
+`!consult <question>` puts the same question to every agent on the topic's
+bench, separately. Round one goes out blind — showing each of them the other's
+answer first gets agreement, and agreement between two models that read each
+other is worth much less than two independent reads. Round two hands each one
+what the other said and asks for a single self-contained prompt, fenced.
+
+What comes back is one message per prompt, or one message if they converged on
+the same wording. The drafts in between are not posted: they are working notes,
+and both of them arrive in the report anyway.
+
+```
+!consult should the parser stream or buffer?
+🤝 consult round 1 — asking agy, claude, separately
+🤝 consult round 2 — each now reads the other
+🤝 consult done — agy, claude
+   they differ; both are below, yours to pick
+```
+
+A consultation lives in memory only. Restarting the daemon cancels it, on
+purpose: half a conversation restored into two sessions that have since moved
+on is worse than none.
 
 ## Command center
 
