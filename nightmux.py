@@ -3362,6 +3362,16 @@ def handle(cfg, state, lock, topic, text, mid=None):
             resolve_ask(cfg, st)
         if stale:
             return None
+        # An answer key only means anything to a pane that is asking something.
+        # Sent to a working one it is just a keystroke: Claude Code queues it as
+        # a message, so tapping 3 five times at a busy agent leaves "33333"
+        # waiting to go in as a prompt, and the topic was told nothing at all.
+        # Keys meant for a working pane — esc, C-c, the arrows, tab — are not
+        # answers and are deliberately not covered by this.
+        if (key.isdigit() or cmd in YES_NO) and pane_state(visible(sess)) != "waiting":
+            return (f"nothing is asking in {sess} right now\n"
+                    "a digit sent to a working agent is typed in as text, not "
+                    "taken as an answer\n!pane to look · !raw <text> to type anyway")
         if key.isdigit():
             miss = pick(sess, key)      # None: the digit is the answer after all
             if miss is not None:
@@ -4621,6 +4631,20 @@ def selfcheck():
     # A session suffix on every button: a mirrored copy in the command center
     # has no topic binding to resolve a bare "!1" against.
     qmenu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes", "  2. No"], "api")
+    # An answer key sent to a pane that is not asking is typed in as text and
+    # queued by the agent, which is how five taps became "33333" in a prompt box.
+    kcfg, klk = {"topics": {"1": "s"}, "chat_id": -1}, threading.Lock()
+    with stubbed(has_session=lambda x: True, visible=lambda x: ["working…"],
+                 pane_state=lambda l: "busy", press=lambda *a, **k: None,
+                 resolve_ask=lambda *a: None):
+        assert "nothing is asking" in handle(kcfg, {}, klk, "1", "!3")
+        assert "nothing is asking" in handle(kcfg, {}, klk, "1", "!y")
+        assert handle(kcfg, {}, klk, "1", "!esc") is None    # not an answer key
+        assert handle(kcfg, {}, klk, "1", "!int") is None    # nor is C-c
+    with stubbed(has_session=lambda x: True, visible=lambda x: ["❯ 1. Yes"],
+                 pane_state=lambda l: "waiting", press=lambda *a, **k: None,
+                 pick=lambda s, w: None, resolve_ask=lambda *a: None):
+        assert handle(kcfg, {}, klk, "1", "!3") is None      # a real menu: answered
     picks_q = json.loads(qmenu)["inline_keyboard"]
     assert picks_q[0][0]["callback_data"] == "!1 api", picks_q
     assert picks_q[-1][0]["callback_data"] == "!esc api", picks_q
@@ -5331,7 +5355,10 @@ def selfcheck():
     assert ok is True and len(sent) == sent_n + 2      # origin, then the mirror
     assert st["asked_msgs"] == [("1", 77), ("999", 77)], st["asked_msgs"]
     pressed, edits_n = [], len(edits)
-    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+    # The pane really is asking — a mirrored button only exists because it was.
+    # The answer-key guard reads the live pane, so this has to present one.
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
         assert handle(cfg, state, threading.Lock(), "999", "!1 s") is None  # mirror tapped first
     assert pressed == [("s", "1")], pressed
     assert "asked_msgs" not in st                      # resolved: nothing left to answer
@@ -5339,7 +5366,8 @@ def selfcheck():
     with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
         assert handle(cfg, state, threading.Lock(), "1", "!1 s") is None    # origin's own copy, too late
     assert pressed == [("s", "1")], pressed             # the racing second tap: no-op
-    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
         handle(cfg, state, threading.Lock(), "1", "!1")   # bare, no session: unaffected
     assert pressed == [("s", "1"), ("s", "1")], pressed
     cfg["center_topic"] = None

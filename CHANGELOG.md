@@ -8,6 +8,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- A menu digit or `!y`/`!n` sent to a pane that was not asking anything was
+  typed into the agent as text. Claude Code queues that as a message, so five
+  taps of `!3` at a working agent left `33333` sitting in its prompt box waiting
+  to be sent, and the topic was told nothing. Answer keys now require a waiting
+  pane; `!esc`, `!int`, the arrows and tab are meant for a working pane and are
+  unaffected.
+
 - The watcher only read the session a topic was bound to, so a benched agent
   could be written to and never read. `@agy <prompt>` sent a prompt whose answer
   nobody would ever see, and `!consult` sat out its full timeout on an agent that
