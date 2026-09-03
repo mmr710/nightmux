@@ -626,7 +626,10 @@ MENU = re.compile(r"^\s*[│┃]?\s*[❯>]?\s*(\d)[.)]\s+(\S.*?)\s*[│┃]?$")
 # free to type a queued prompt into an open dialog. The hints are chrome and
 # say nothing on their own — hints *and* a numbered menu on screen is a dialog.
 # Same line says how it is driven: arrows, never the option's number.
-ARROWED = re.compile(r"↑↓\s*select|enter confirm|esc dismiss", re.I)
+# "enter to confirm" as well as "enter confirm": the same dialog words it both
+# ways across versions. The esc half is deliberately not widened to "esc to
+# cancel" — BUSY already claims that phrasing for a working pane.
+ARROWED = re.compile(r"↑↓\s*select|enter (?:to )?confirm|esc dismiss", re.I)
 # Whatever the TUI paints on the row the arrows are currently on.
 PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -641,6 +644,20 @@ DIGIT_SGR = re.compile(r"(\x1b\[[0-9;]*m)(?=\d[.)])")
 # "1. Core mechanic (wk 1)" is a MENU match and is not a choice anyone is being
 # offered. Where both are on screen, the box is the menu.
 BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
+
+# A highlighted option that is not numbered and not boxed. Claude Code's trust
+# prompt used to be a boxed numbered list and is now a bare pointed one:
+#
+#     ❯ No, exit
+#       Yes, I trust this folder
+#     Enter to confirm · Esc to cancel
+#
+# Nothing matched that, so the pane read idle, so the next prompt was typed into
+# it and Enter took the highlighted option — which is "No, exit". The session
+# died on the first thing anyone sent it. The pointer alone cannot be the test,
+# because ❯ turns up in ordinary output; it counts only next to one of ARROWED's
+# footers, which render on menus and nowhere else.
+CHOICE = re.compile(r"^\s*[│┃]?\s*❯\s+\S")
 # The usage-limit banner. Phrasing lifted from Claude Code's own detector, so it
 # tracks what the CLI actually prints rather than what a changelog once said.
 LIMIT_HIT = re.compile(
@@ -863,7 +880,8 @@ def pane_state(lines):
     tail = lines[-25:]
     joined = "\n".join(tail)
     if WAITING.search(joined) or (ARROWED.search(joined)
-                                  and any(BOXED.match(l) for l in tail)):
+                                  and any(BOXED.match(l) or CHOICE.match(l)
+                                          for l in tail)):
         return "waiting"
     live = "\n".join(l for l in tail if not DETAIL.match(l))
     return "busy" if BUSY.search(live) else "idle"
@@ -2595,10 +2613,15 @@ def consult_start(cfg, state, topic, question):
 
 
 def consult_advance(cfg, state, topic, c):
-    """Round 1 is in. Give each agent the others' answers and ask for one prompt."""
+    """Round 1 is in. Give each agent the others' answers and ask for one prompt.
+
+    True when the consultation is already finished and the caller should drop it:
+    one answer is not a consultation, and there is nothing to cross-read.
+    """
     c["r1"] = {c["want"][s]: b for s, b in c["got"].items()}
-    if len(c["r1"]) < 2:      # only one answered: nothing to cross-read
-        return consult_report(cfg, topic, c)
+    if len(c["r1"]) < 2:
+        consult_report(cfg, topic, c)
+        return True
     send(cfg, topic, "🤝 consult round 2 - each now reads the other", mode="plain")
     answered, c["round"], c["at"] = dict(c["got"]), 2, time.time()
     c["want"] = {s: k for s, k in c["want"].items() if s in answered}
@@ -2607,7 +2630,7 @@ def consult_advance(cfg, state, topic, c):
         other = next((k for k in c["r1"] if k != key), None)
         send_prompt(cfg, state, topic, sess,
                     CONSULT_R2.format(other=other, body=c["r1"][other]))
-    return None
+    return False
 
 
 def consult_report(cfg, topic, c):
@@ -2641,6 +2664,17 @@ def consult_tick(cfg, state):
         c = _consult[topic]
         try:
             late = [s for s in c["want"] if s not in c["got"]]
+            gone = [s for s in late if not has_session(s) or agentless(s)]
+            if gone:
+                # A dead participant is not going to answer, and waiting the full
+                # timeout on it holds up everyone who did. Found the first time
+                # this ran for real: a fresh Claude exited on its trust prompt
+                # and the consultation sat there for fifteen minutes.
+                send(cfg, topic, "🤝 consult: %s is gone — carrying on without it"
+                     % ", ".join(sorted(gone)), mode="plain")
+                for sess in gone:
+                    c["want"].pop(sess, None)
+                late = [s for s in c["want"] if s not in c["got"]]
             if late and time.time() - c["at"] < CONSULT_TIMEOUT:
                 continue
             if late:
@@ -2653,7 +2687,8 @@ def consult_tick(cfg, state):
                 _consult.pop(topic, None)
                 continue
             if c["round"] == 1:
-                consult_advance(cfg, state, topic, c)
+                if consult_advance(cfg, state, topic, c):
+                    _consult.pop(topic, None)   # it reported; nothing to wait for
             else:
                 consult_report(cfg, topic, c)
                 _consult.pop(topic, None)
@@ -5565,6 +5600,14 @@ def selfcheck():
         consult_tick(cfg2, {})
         assert any("same prompt" in x for x in csent), csent[-2:]
         assert sum("SAME" in x for x in csent) == 1, "agreed prompt sent twice"
+        # a participant whose session dies is dropped, not waited on
+        _consult.clear(), csent.clear()
+        consult_start(cfg2, {}, "9", "one dies?")
+        with stubbed(has_session=lambda s: s != "box-agy", agentless=lambda s: False):
+            consult_capture("9", "box", "the survivor's draft")
+            consult_tick(cfg2, {})
+        assert any("box-agy is gone" in x for x in csent), csent
+        assert "9" not in _consult, "a lone survivor should report, not wait"
         # a round nobody answers is given up on, not left hanging
         _consult.clear(), csent.clear()
         consult_start(cfg2, {}, "9", "silence?")

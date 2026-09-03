@@ -6,6 +6,21 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code's trust prompt stopped being recognised, and the session that
+  showed it was killed by the next thing sent to it. The dialog changed from a
+  boxed numbered list to a bare pointed one (`❯ No, exit` / `Yes, I trust this
+  folder` / `Enter to confirm`), which matched none of the waiting patterns — so
+  the pane read idle, the prompt was typed into it, and Enter took the
+  highlighted option, which is "No, exit". `CHOICE` matches a pointed option
+  that is neither numbered nor boxed, counted only alongside one of `ARROWED`'s
+  footers, and `ARROWED` now accepts "enter to confirm" as well as "enter
+  confirm". Both dialog shapes are in the pane corpus.
+- `!consult` waited the full timeout on a participant whose session had died,
+  and hung outright when only one agent answered round one.
+
+
 ### Added
 
 - `@claude <text>` / `@agy <text>` — send one prompt to one agent on the topic's
