@@ -187,6 +187,7 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!agents` | this topic's agents, which one is live, and which report a context figure |
 | `@claude <text>` / `@agy <text>` | send one prompt to one agent on the bench, without switching the topic |
 | `!consult <question>` | ask every agent separately, let them read each other, get one prompt back |
+| `!use [agent]` | run the prompt a consult settled on, in this topic's agent |
 | `!resume [agent]` / `!restore` | relaunch this topic's directory, resuming the last conversation |
 | `!bind <session>` / `!unbind` / `!kill` | attach, detach, stop (kill asks first) |
 | `!sessions` / `!status` | tmux sessions; every topic and its state |
@@ -249,6 +250,12 @@ and both of them arrive in the report anyway.
 🤝 consult done — agy, claude
    they differ; both are below, yours to pick
 ```
+
+What comes back carries a button. `!use` — or a tap on **run it** — sends that
+prompt into the agent this topic is on, so the answer to "what should I ask for"
+becomes the thing being asked without anyone retyping it on a phone. When the two
+disagree you get one button each, and `!use agy` / `!use claude` pick between
+them.
 
 A consultation lives in memory only. Restarting the daemon cancels it, on
 purpose: half a conversation restored into two sessions that have since moved

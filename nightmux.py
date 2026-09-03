@@ -2585,6 +2585,11 @@ CONSULT_TIMEOUT = 900   # a round nobody finished in this long is given up on
 # the topic is told.
 _consult = {}
 
+# topic -> {agent key: the prompt it settled on}, kept after the report so !use
+# can run one without anybody retyping it. Transient like _consult: a prompt is
+# worth a tap for as long as you are looking at it, not across a restart.
+_verdict = {}
+
 
 def fenced(body):
     """The last fenced block in a body - where round 2 is told to put the prompt."""
@@ -2676,15 +2681,45 @@ def consult_report(cfg, topic, c):
             send(cfg, topic, "%s said\n\n%s" % (k, b))
         return None
     agreed = len({p for _, p in with_prompt}) == 1
+    _verdict[str(topic)] = dict(with_prompt)
+    # The whole point is the prompt, and a prompt you have to retype on a phone
+    # is a prompt that does not get run. One tap sends it to the agent this
+    # topic is on.
+    run = ([("run it", "!use")] if agreed else
+           [("run %s's" % k, "!use " + k) for k, _ in with_prompt][:3])
     send(cfg, topic, "🤝 consult done - %s\nQ: %s\n%s" % (
         named, c["q"][:200],
         "they landed on the same prompt" if agreed else
-        "they differ; both are below, yours to pick"), mode="plain")
+        "they differ; both are below, yours to pick"), mode="plain",
+        buttons=kb([run]))
     for k, prompt in with_prompt:
         send(cfg, topic, "%s's prompt\n\n%s" % (k, prompt))
         if agreed:
             break
     return None
+
+
+def use_prompt(cfg, state, topic, arg):
+    """!use [agent]: run the prompt the consultation settled on, as a prompt.
+
+    It goes to the agent the topic is on, not to whoever wrote it: the point of
+    asking two of them was to get a better instruction for the one you actually
+    work with. @agent <text> is still there for sending it somewhere else.
+    """
+    v = _verdict.get(str(topic))
+    if not v:
+        return "no consult result in this topic — !consult <question> first"
+    if arg in v:
+        key = arg
+    elif len(v) == 1:
+        key = next(iter(v))
+    else:
+        return "which one? " + " · ".join("!use " + k for k in sorted(v))
+    sess = cfg["topics"].get(topic)
+    if not sess or not has_session(sess):
+        return "this topic has no live session to run it in"
+    reply = send_prompt(cfg, state, topic, sess, v[key])
+    return reply or "▶️ running %s's prompt in %s" % (key, sess)
 
 
 def consult_tick(cfg, state):
@@ -3011,7 +3046,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult",
+              "!consult", "!use",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -3059,6 +3094,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "without switching\n"
                 "!consult <question> = ask them separately, let them read each "
                 "other, get one prompt back\n"
+                "!use [agent] = run the prompt a consult settled on, in this "
+                "topic's agent\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
                 "!worktrees = git worktrees of this topic's repo, and who is in each\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
@@ -3143,6 +3180,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return f"unbound '{old}'" if old else "not bound"
     if cmd == "!consult":
         return consult_start(cfg, state, topic, arg)
+    if cmd == "!use":
+        return use_prompt(cfg, state, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -5652,6 +5691,16 @@ def selfcheck():
         assert any("they differ" in x for x in csent), csent[-3:]
         assert any("DO THE THING" in x for x in csent), csent[-3:]
         assert any("DO IT DIFFERENTLY" in x for x in csent), csent[-3:]
+        # ...and the verdict is runnable without anyone retyping it
+        assert _verdict["9"] == {"codex": "DO THE THING",
+                                 "agy": "DO IT DIFFERENTLY"}, _verdict["9"]
+        assert "which one?" in use_prompt(cfg2, {}, "9", "")   # two: say which
+        ran = []
+        with stubbed(send_prompt=lambda c, st, t, se, tx, mid=None: ran.append((se, tx))):
+            out = use_prompt(cfg2, {}, "9", "agy")
+            assert ran == [(cfg2["topics"]["9"], "DO IT DIFFERENTLY")], ran
+            assert out.startswith("▶️ running agy's prompt"), out
+        assert "no consult result" in use_prompt(cfg2, {}, "404", "")
         # agreement is reported as agreement, and said once
         _consult.clear(), csent.clear(), cprompts.clear()
         consult_start(cfg2, {}, "9", "same?")

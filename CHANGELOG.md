@@ -40,6 +40,9 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   bench without switching the topic to it. Switching is the wrong verb when a
   project keeps two agents side by side and you want to put one question to one
   of them.
+- `!use [agent]` — run the prompt a consultation settled on, in the agent the
+  topic is on. The report carries it as a button: a prompt you have to retype on
+  a phone is a prompt that does not get run.
 - `!consult <question>` — ask every agent on the bench separately, then have each
   read the other's answer and return one self-contained prompt. Round one is
   blind on purpose: two independent reads are worth more than an agreement
