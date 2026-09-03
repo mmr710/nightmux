@@ -8,6 +8,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- The watcher only read the session a topic was bound to, so a benched agent
+  could be written to and never read. `@agy <prompt>` sent a prompt whose answer
+  nobody would ever see, and `!consult` sat out its full timeout on an agent that
+  had answered on screen minutes earlier. It now walks every session on a topic's
+  bench.
+
 - Claude Code's trust prompt stopped being recognised, and the session that
   showed it was killed by the next thing sent to it. The dialog changed from a
   boxed numbered list to a bare pointed one (`❯ No, exit` / `Yes, I trust this

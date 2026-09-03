@@ -2169,6 +2169,25 @@ def tmux_missing(cfg, missed):
         send(cfg, topic, "✅ tmux is answering again", mode="plain")
 
 
+def watched(cfg):
+    """[(topic, session)] for everything a topic is answerable for.
+
+    Not just the session it is bound to: every agent on its bench. The watcher
+    used to walk cfg["topics"] alone, so a benched agent was written to and never
+    read — @agy sent a prompt nobody would ever see the answer to, and !consult
+    waited out its whole timeout on an agent that had answered on screen minutes
+    earlier. One session belongs to one topic (bound_to enforces it), so nothing
+    here can be claimed twice.
+    """
+    seen, out = set(), []
+    for topic, sess in cfg["topics"].items():
+        for s in [sess] + sorted(bench_of(cfg, topic).values()):
+            if s and (topic, s) not in seen:
+                seen.add((topic, s))
+                out.append((topic, s))
+    return out
+
+
 def watcher(cfg, state, lock):
     pruned = 0.0
     bound = []
@@ -2177,7 +2196,7 @@ def watcher(cfg, state, lock):
         # is a nightmux that answers commands while quietly monitoring nothing.
         try:
             with lock:
-                bound = list(cfg["topics"].items())
+                bound = watched(cfg)   # bound sessions and everything benched
             alive = live_sessions()   # one tmux call for every topic's liveness
             if alive is None:
                 # tmux did not answer. Everything below reads an empty pane list
@@ -5616,6 +5635,14 @@ def selfcheck():
         assert "9" not in _consult and any("nobody answered" in x for x in csent)
     _consult.clear()
     cfg2["topics"]["9"], cfg2["started"]["9"], cfg2["bench"]["9"] = was9
+
+    # The watcher has to read every agent a topic can be written to, or a
+    # benched one takes prompts and its answers go nowhere.
+    wcfg = {"topics": {"5": "a", "6": "b"},
+            "bench": {"5": {"claude": "a", "agy": "a-agy"}},
+            "started": {"5": "claude", "6": "claude"}}
+    assert watched(wcfg) == [("5", "a"), ("5", "a-agy"), ("6", "b")], watched(wcfg)
+    assert len(watched(wcfg)) == len(set(watched(wcfg))), "a session watched twice"
 
     assert bound_to(cfg2, "box", "9") is None
     cfg2["topics"]["94"] = "box"
