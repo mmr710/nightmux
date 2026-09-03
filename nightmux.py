@@ -2619,9 +2619,19 @@ def consult_start(cfg, state, topic, question):
     bench = bench_of(cfg, topic)
     live = {s: k for k, s in bench.items() if has_session(s)}
     if len(live) < 2:
-        return ("consult needs two agents in this topic; it has %d (%s)\n"
-                "!<agent> starts another in the same directory"
-                % (len(live), ", ".join(sorted(bench)) or "none"))
+        # Name the command and the directory it would use, and offer the tap.
+        # "!<agent> starts another" is true and was not enough: it was hit three
+        # times in three topics in one sitting without anyone acting on it.
+        cwd = (cfg.get("dirs") or {}).get(topic) or "this topic's directory"
+        spare = [k for k in ("agy", "codex", "opencode", "gemini", "aider")
+                 if k in agents(cfg) and k not in bench][:3]
+        send(cfg, topic,
+             "consult needs two agents; this topic has %d (%s).\n"
+             "Start a second one in %s, then !consult again:"
+             % (len(live), ", ".join(sorted(bench)) or "none", cwd),
+             mode="plain",
+             buttons=kb([[("start " + k, "!" + k) for k in spare]]) if spare else None)
+        return None
     _consult[str(topic)] = c = {"q": question.strip(), "round": 1, "want": live,
                                 "got": {}, "at": time.time(), "r1": {}}
     for sess in live:
@@ -5612,8 +5622,13 @@ def selfcheck():
                  send=lambda c, t, x, mode="mono", buttons=None, quiet=False: csent.append(x),
                  send_prompt=lambda c, st, t, se, tx, mid=None: cprompts.append((se, tx))):
         _consult.clear()
-        assert "needs two agents" in consult_start({"topics": {"9": "solo"},
-                                                    "bench": {}}, {}, "9", "q?")
+        # Too few agents: said with the command that fixes it and a button,
+        # so it is sent rather than returned.
+        n_ = len(csent)
+        assert consult_start({"topics": {"9": "solo"}, "bench": {},
+                              "dirs": {"9": "/www/x"}}, {}, "9", "q?") is None
+        assert "this topic has 1" in csent[-1] and "/www/x" in csent[-1], csent[-1]
+        assert len(csent) == n_ + 1
         out = consult_start(cfg2, {}, "9", "how should we shard this?")
         assert "round 1" in out and len(cprompts) == 2, out
         assert "how should we shard this?" in cprompts[0][1]
