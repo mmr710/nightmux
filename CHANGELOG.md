@@ -36,6 +36,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!autoyes <agent|off>` — answer one agent's own permission menus for it, per
+  topic, never global and never on by default. A permission dialog is the last
+  gate before an agent acts on the machine, so it presses only an option it can
+  positively identify as the affirmative one (a menu with no recognisable yes is
+  left for a human), announces every answer, and stops after 25 in an hour so a
+  dialog loop cannot run all night.
+
 - `@claude <text>` / `@agy <text>` — send one prompt to one agent on the topic's
   bench without switching the topic to it. Switching is the wrong verb when a
   project keeps two agents side by side and you want to put one question to one

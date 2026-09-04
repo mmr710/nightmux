@@ -2220,6 +2220,7 @@ def watcher(cfg, state, lock):
                         nudge(cfg, state, topic, sess)
                         due(cfg, state, topic, sess)
                         drain(cfg, state, topic, sess)
+                        autoyes(cfg, state, topic, sess)
                         autocompact(cfg, state, topic, sess)
                         idle_hint(cfg, state, topic, sess)
                 except Exception as e:
@@ -2761,6 +2762,58 @@ def consult_tick(cfg, state):
             _consult.pop(topic, None)
 
 
+AUTOYES_GAP = 4       # never answer the same pane twice inside one tick storm
+AUTOYES_MAX = 25      # ...and this many in an hour, then stop and say so
+
+
+def agent_key(cfg, topic, sess):
+    """Which bench key this session is for this topic, or None."""
+    return next((k for k, s in bench_of(cfg, topic).items() if s == sess), None)
+
+
+def autoyes(cfg, state, topic, sess):
+    """Answer an agent's own menus for it, where the topic has opted in.
+
+    cfg["autoyes"] = {"878": ["agy"]} — per topic, per agent, never global and
+    never on by default. A permission dialog is the last gate before an agent
+    acts on the machine, so this only ever presses an option it can positively
+    identify as the affirmative one: menu_digit matches the option text against
+    YES_NO, and a menu with no recognisable yes is left alone for a human. It
+    announces every answer, because it is typing into your session unasked, and
+    it stops after AUTOYES_MAX in an hour so a dialog loop cannot run all night.
+    """
+    keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
+    st = state.get(sess) or {}
+    if not keys or agent_key(cfg, topic, sess) not in keys:
+        return
+    if st.get("mode") != "waiting":
+        st.pop("autoyes_at", None)
+        return
+    now = time.time()
+    if now - st.get("autoyes_at", 0) < AUTOYES_GAP:
+        return
+    hits = [t for t in st.get("autoyes_hits", []) if now - t < 3600]
+    if len(hits) >= AUTOYES_MAX:
+        if not st.get("autoyes_capped"):
+            st["autoyes_capped"] = True
+            send(cfg, topic, f"🛑 auto-yes stopped in {sess} — {AUTOYES_MAX} "
+                 "answers in an hour looks like a loop, not progress\n"
+                 "answer it yourself, or !autoyes off", mode="plain")
+        return
+    lines = visible(sess)
+    digit = menu_digit(lines, YES_NO["!y"])
+    if not digit:
+        return          # nothing here reads as "yes": a human decides this one
+    st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
+    st.pop("autoyes_capped", None)
+    question = next((l.strip() for l in lines[-15:] if WAITING.search(l)), "?")
+    send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
+         "!autoyes off to stop", mode="plain")
+    if pick(sess, digit) is None:      # not an arrow menu: the digit is the answer
+        press(sess, digit, confirm=True)
+    remember(state, sess, digit)
+
+
 def bench_of(cfg, topic):
     """{agent key: session} for this topic, including the one it is on now.
 
@@ -3046,7 +3099,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use",
+              "!consult", "!use", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -3096,6 +3149,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "other, get one prompt back\n"
                 "!use [agent] = run the prompt a consult settled on, in this "
                 "topic's agent\n"
+                "!autoyes <agent|off> = answer that agent's own permission menus "
+                "for it\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
                 "!worktrees = git worktrees of this topic's repo, and who is in each\n"
                 "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
@@ -3182,6 +3237,33 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return consult_start(cfg, state, topic, arg)
     if cmd == "!use":
         return use_prompt(cfg, state, topic, arg)
+    if cmd == "!autoyes":
+        cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
+        if arg in ("off", "none"):
+            with lock:
+                (cfg.setdefault("autoyes", {})).pop(str(topic), None)
+                save_cfg(cfg)
+            return "auto-yes off in this topic"
+        if arg:
+            bench = bench_of(cfg, topic)
+            picks = [a for a in arg.replace(",", " ").split() if a in bench]
+            if not picks:
+                return ("usage: !autoyes <agent[,agent]> | off\n"
+                        "this topic has: " + (", ".join(sorted(bench)) or "nothing"))
+            with lock:
+                cfg.setdefault("autoyes", {})[str(topic)] = picks
+                save_cfg(cfg)
+            cur = picks
+        if not cur:
+            return ("auto-yes off — !autoyes <agent> answers that agent's own "
+                    "permission menus for it\n"
+                    "⚠️ a permission dialog is the last gate before an agent acts "
+                    "on this machine; only the affirmative option is ever pressed, "
+                    "every answer is announced, and it stops after "
+                    f"{AUTOYES_MAX} in an hour")
+        return ("auto-yes on for: " + ", ".join(cur)
+                + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
+                  "\n!autoyes off to stop")
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -5735,6 +5817,40 @@ def selfcheck():
             "started": {"5": "claude", "6": "claude"}}
     assert watched(wcfg) == [("5", "a"), ("5", "a-agy"), ("6", "b")], watched(wcfg)
     assert len(watched(wcfg)) == len(set(watched(wcfg))), "a session watched twice"
+
+    # auto-yes: opt-in per topic and agent, only ever the affirmative option,
+    # and it gives up rather than looping.
+    ycfg = {"topics": {"7": "ay"}, "bench": {"7": {"agy": "ay", "claude": "ay-c"}},
+            "started": {"7": "agy"}, "chat_id": -1, "autoyes": {"7": ["agy"]}}
+    assert agent_key(ycfg, "7", "ay") == "agy" and agent_key(ycfg, "7", "no") is None
+    menu = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    ysent, ypress = [], []
+    yst = {"ay": {"mode": "waiting"}}
+    with stubbed(visible=lambda x: menu, press=lambda s_, k_, confirm=False: ypress.append(k_),
+                 pick=lambda s_, w_: None, remember=lambda *a: None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: ysent.append(x)):
+        autoyes(ycfg, yst, "7", "ay")
+        assert ypress == ["1"] and ysent[-1].startswith("🤖 auto-yes ay → 1"), (ypress, ysent)
+        autoyes(ycfg, yst, "7", "ay")
+        assert ypress == ["1"], "answered the same screen twice inside the gap"
+        # an agent the topic did not opt in for is never touched
+        yst["ay-c"] = {"mode": "waiting"}
+        autoyes(ycfg, yst, "7", "ay-c")
+        assert ypress == ["1"], "answered an agent that was not opted in"
+        # a menu with no recognisable yes is left for a human
+        yst["ay"].update(mode="waiting", autoyes_at=0)
+        with stubbed(visible=lambda x: ["Pick a model", "❯ 1. Opus", "  2. Sonnet"]):
+            autoyes(ycfg, yst, "7", "ay")
+        assert ypress == ["1"], "pressed something that was not a yes"
+        # ...and it stops rather than looping all night
+        yst["ay"].update(mode="waiting", autoyes_at=0,
+                         autoyes_hits=[time.time()] * AUTOYES_MAX)
+        n_ = len(ysent)
+        autoyes(ycfg, yst, "7", "ay")
+        assert ypress == ["1"] and "auto-yes stopped" in ysent[-1], ysent[-1]
+        autoyes(ycfg, yst, "7", "ay")
+        assert len(ysent) == n_ + 1, "said it was capped more than once"
+    assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
     cfg2["topics"]["94"] = "box"
