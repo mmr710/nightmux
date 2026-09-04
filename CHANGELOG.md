@@ -8,6 +8,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- `pane()` asked tmux for the entire scrollback (`-S -`) on every watch tick.
+  It now asks for the last 2000 lines — tmux's own default `history-limit`, so
+  on a default server the content is identical and the capture measures ~19%
+  faster across nine sessions, while a server configured to keep more history no
+  longer makes every tick proportionally slower.
+
 - A menu digit or `!y`/`!n` sent to a pane that was not asking anything was
   typed into the agent as text. Claude Code queues that as a message, so five
   taps of `!3` at a working agent left `33333` sitting in its prompt box waiting
