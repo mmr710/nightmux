@@ -904,9 +904,19 @@ def pane_state(lines):
                                           for l in tail)):
         return "waiting"
     live = "\n".join(l for l in tail if not DETAIL.match(l))
-    return "busy" if BUSY.search(live) else "idle"
+    if BUSY.search(live): return "busy"
+    if IDLE.search(live): return "idle"
+    print(f"pane_state unknown: {repr(tail)}", file=sys.stderr)
+    return "unknown"
 
 
+IDLE = re.compile(
+    r"^\s*[│┃]?\s*[❯>]\s*$|"          # bare prompt
+    r"^\s*[│┃]?\s*[❯>]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
+    r"^\s*[\w.-]+@[a-zA-Z0-9.-]+:[~/\w.-]+[#$%>]\s*$|" # typical shell prompt
+    r"╹▀{5,}",                           # opencode bottom bar
+    re.M
+)
 THOUGHT = re.compile(r"^\s*▸ Thought for")
 
 
@@ -1241,17 +1251,30 @@ def warn_ctx(cfg, st, topic, sess):
     said to someone who turned autocompact on, since they are the one expecting
     it to be running.
     """
+    if agentless(sess):
+        return
+    if agent_key(cfg, topic, sess) != "claude":
+        return
+        
     pct = (st.get("snap") or {}).get("ctx_pct")
     if pct is None:
-        if cfg.get("autocompact") and st.get("mode") and not st.get("ctx_blind"):
-            st["ctx_blind"] = True
-            send(cfg, topic, f"🙈 no context figure for {sess}\n"
-                 "it comes from Claude Code's status line, so !ctx, autocompact "
-                 f"({cfg['autocompact']}%) and the idle hint do not run here\n"
-                 "!agents shows which of this topic's agents do report",
-                 mode="plain")
+        if cfg.get("autocompact") and st.get("mode"):
+            wk = f"ctx_blind_{sess}"
+            if not _warned.get(wk):
+                _warned[wk] = (1, 1)
+                save_warned()
+                send(cfg, topic, f"🙈 no context figure for {sess}\n"
+                     "it comes from Claude Code's status line, so !ctx, autocompact "
+                     f"({cfg['autocompact']}%) and the idle hint do not run here\n"
+                     "!agents shows which of this topic's agents do report",
+                     mode="plain")
         return
-    st.pop("ctx_blind", None)        # a sidecar appeared: say it again if it goes
+        
+    wk = f"ctx_blind_{sess}"
+    if wk in _warned:
+        _warned.pop(wk)
+        save_warned()
+        
     trip = ctx_trip(cfg)
     if pct < trip:
         st.pop("ctx_warned", None)   # compacted or cleared: arm again
@@ -1549,7 +1572,7 @@ def autocompact(cfg, state, topic, sess):
         for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
             st.pop(k, None)
         return
-    if st.get("mode") != "idle" or st.get("queue"):
+    if st.get("mode") not in ("idle", "unknown") or st.get("queue"):
         return
     if st.get("compacted"):
         # The keystrokes can be eaten -- a menu open, a turn starting on the same
@@ -1599,7 +1622,7 @@ def idle_hint(cfg, state, topic, sess):
         st.pop("parked", None)     # it moved: arm again for the next park
         return
     pct = (st.get("snap") or {}).get("ctx_pct")
-    if (not at or st.get("parked") or st.get("mode") != "idle"
+    if (not at or st.get("parked") or st.get("mode") not in ("idle", "unknown")
             or st.get("queue") or pct is None or pct < at):
         return
     st["parked"] = True
@@ -1697,7 +1720,7 @@ def drain(cfg, state, topic, sess):
         elif not st.get("queue"):
             send(cfg, topic, f"▶️ {sess} usage window reset · resuming shift",
                  mode="plain")
-        elif st.get("mode") != "idle":
+        elif st.get("mode") not in ("idle", "unknown"):
             # The window is open and the queue still cannot move, which from the
             # topic looks exactly like a hold that never lifted. Say which it is.
             send(cfg, topic, f"▶️ {sess} usage window reset · {len(st['queue'])} "
@@ -2127,9 +2150,12 @@ def watchdog(cfg, state, topic, sess, alive):
             st["shell_seen"] = st.get("shell_seen", 0) + 1
             if st["shell_seen"] == 2:
                 held = len(st.get("queue") or []) + len(st.get("shift") or [])
+                tail_lines = pane(sess)[-15:]
+                capture = "\n".join(tail_lines)
                 send(cfg, topic,
                      f"💀 the agent in '{sess}' exited — its pane is a shell now"
-                     + (f", {held} prompt(s) held" if held else ""), mode="plain",
+                     + (f", {held} prompt(s) held" if held else "")
+                     + f"\n\nPane's final state:\n```\n{capture}\n```", mode="plain",
                      buttons=kb([[("restore", "!restore")]]))
         elif st.pop("shell_seen", 0) >= 2:
             send(cfg, topic, f"↩️ an agent is running in '{sess}' again", mode="plain")
@@ -2514,6 +2540,11 @@ def resume_session(cfg, state, lock, topic, arg=""):
         # about a session that is plainly alive.)
         if not agentless(name):
             return f"'{name}' is alive; type /resume in it to pick a conversation"
+        
+        tail_lines = pane(name)[-40:]
+        capture = "\n".join(tail_lines)
+        send(cfg, topic, f"Pane's final state before kill:\n```\n{capture}\n```", mode="plain")
+        
         # A shell where the agent used to be. Killing it is what makes !restore
         # one button that repairs both cases, instead of a button that works
         # only for the failure tmux happened to notice.
@@ -2842,7 +2873,7 @@ def bench_of(cfg, topic):
     is folded in here rather than in each of the three callers.
     """
     bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
-    cur = cfg["topics"].get(topic)
+    cur = cfg.get("topics", {}).get(topic)
     if cur:
         bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
     return bench
@@ -2880,7 +2911,7 @@ def switch_agent(cfg, state, lock, topic, key):
     and a session. Each agent keeps its own tmux session (`<base>-<key>`), so
     switching back lands in the conversation it was in, not a fresh one.
     """
-    cur = cfg["topics"].get(topic)
+    cur = cfg.get("topics", {}).get(topic)
     cwd = (cfg.get("dirs") or {}).get(topic)
     bench = bench_of(cfg, topic)
     if not cwd:
@@ -3058,7 +3089,7 @@ def agent_report(cfg, state, topic):
     idle hint are off for it, and that is worth knowing before you park a long
     job on it.
     """
-    cur = cfg["topics"].get(topic)
+    cur = cfg.get("topics", {}).get(topic)
     bench = bench_of(cfg, topic)
     if not bench:
         return ("no agents in this topic yet\n!<agent> <name> <dir> starts one: "
@@ -3652,6 +3683,16 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         save_queue(state)
         return (f"📥 queued ({len(st['queue'])}) · {sess} is working\n"
                 "sends when it finishes · !queue to list, !queue clear to drop")
+    if mode == "unknown":
+        st.setdefault("queue", []).append(text)
+        save_queue(state)
+        msg = f"📥 queued ({len(st['queue'])}) · {sess} screen is unrecognised\n"
+        if not st.get("unknown_warned"):
+            st["unknown_warned"] = True
+            msg += "nightmux does not know if it is safe to type. It will send when idle again.\n!raw <text> types it now anyway."
+        else:
+            msg += "sends when idle again · !raw overrides"
+        return msg
     text = spill(sess, text)
     if not inject(sess, text):
         # No agent under the pane. Holding it is the whole point: typed into a
@@ -4422,7 +4463,7 @@ def selfcheck():
                      (said.append(x), 1)[1],
                      save_cfg=lambda c: None):     # !bind below must not touch CFG_PATH
             live_sessions()                        # fills _shell, as a tick does
-            assert pane_state(visible("nm-selfcheck")) == "idle"  # nothing says stop
+            assert pane_state(visible("nm-selfcheck")) == "unknown"  # nothing says stop
             assert agentless("nm-selfcheck") is True             # ...except this
             assert inject("nm-selfcheck", "rm -rf /") is False    # nothing typed
             st3 = {"queue": ["held"]}
@@ -4754,7 +4795,7 @@ def selfcheck():
         assert keyed == [], keyed                             # nothing pressed
         sel[0] = ""                               # every row alike: unreadable
         assert pick("s", "3").startswith("can't tell") and keyed == []
-    assert pane_state([l for l in oc if "┃" not in l]) == "idle"  # prose alone
+    assert pane_state([l for l in oc if "┃" not in l]) == "unknown"  # prose alone
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                  "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
     assert pane_state(agy_trust) == "waiting"
@@ -5034,18 +5075,26 @@ def selfcheck():
     assert ctx_trip({"autocompact": 5}) == CTX_LEAD    # never below an empty window
     n = len(sent)
     st["snap"]["ctx_pct"] = 64
-    warn_ctx({"autocompact": 70}, st, "1", "s")
+    warn_ctx(dict(cfg, autocompact=70), st, "1", "s")
     assert sent[-1].startswith("\U0001f9e0 s context 64% full"), sent[-1]
 
-    # No figure at all -- agy, codex, a Claude with no sidecar. Said once, and
+    # No figure at all -- a Claude with no sidecar. Said once, and
     # only to someone who turned autocompact on and is expecting it to run.
+    # Non-Claude agents are skipped entirely.
     blind, n = {"mode": "idle", "snap": {"ts": time.time()}}, len(sent)
-    warn_ctx({}, blind, "1", "agy1")
+    c_cfg = {"topics": {"1": "c1"}, "started": {"1": "claude"}}
+    c_cfg_auto = {"topics": {"1": "c1"}, "started": {"1": "claude"}, "autocompact": 70}
+    warn_ctx(c_cfg, blind, "1", "c1")
     assert len(sent) == n, sent[n:]                # never asked for it: not nagged
-    warn_ctx({"autocompact": 70}, blind, "1", "agy1")
-    assert sent[-1].startswith("\U0001f648 no context figure for agy1"), sent[-1]
-    warn_ctx({"autocompact": 70}, blind, "1", "agy1")
+    warn_ctx(c_cfg_auto, blind, "1", "c1")
+    assert sent[-1].startswith("\U0001f648 no context figure for c1"), sent[-1]
+    warn_ctx(c_cfg_auto, blind, "1", "c1")
     assert len(sent) == n + 1                      # once per session, not per tick
+    
+    # Non-claude agent
+    a_cfg_auto = {"topics": {"1": "agy1"}, "started": {"1": "agy"}, "autocompact": 70}
+    warn_ctx(a_cfg_auto, blind, "1", "agy1")
+    assert len(sent) == n + 1                      # still n+1, no new message
     n, typed[:] = len(sent), []                   # auto /compact, tightly gated
     st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 82})
     autocompact({"topics": {}}, state, "1", "s")

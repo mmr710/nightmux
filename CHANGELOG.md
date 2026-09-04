@@ -8,6 +8,24 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- `pane_state()` read anything that didn't match a known busy pattern as idle —
+  including a screen it had never seen before, which is exactly the case a
+  misread dialog comes from. It now checks for a recognised idle shape too
+  (a bare prompt, a shell prompt, opencode's bottom bar) and returns `unknown`
+  for neither, instead of guessing. `send_prompt()` holds a prompt on `unknown`
+  the same as on `busy` rather than typing into a screen nobody has confirmed
+  is safe; `!raw` still overrides. Unrecognised screens are logged to stderr
+  as they happen, so a new dialog shape shows up as a log line before it shows
+  up as a bug report.
+- A session whose agent exited into a bare shell, and a session about to be
+  killed by `!restore`, now carry the pane's last lines in the message —
+  the crash context used to disappear at exactly the moment someone would
+  want to read it.
+- The "no context figure" warning fired for every agent, including ones that
+  never had a context figure to begin with — only Claude Code's status line
+  reports one. It's gated to Claude Code sessions now, and the "already
+  warned" flag survives a daemon restart instead of re-nagging once per boot.
+
 - `pane()` asked tmux for the entire scrollback (`-S -`) on every watch tick.
   It now asks for the last 2000 lines — tmux's own default `history-limit`, so
   on a default server the content is identical and the capture measures ~19%

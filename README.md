@@ -208,6 +208,7 @@ Claude's own `/compact`, `/clear`, `/model` — is typed into the session.
 | `!board` | every topic at a glance, from any topic |
 | `!all <targets\|--all> <prompt>` | send one prompt into several sessions at once |
 | `!grep <text> [days]` | search every transcript on the machine |
+| `!autoyes <agent\|off>` | answer one agent's own permission menus for it, per topic, off by default |
 | `!verbose` / `!raw <text>` / `!keys <keys>` | tool detail, type past a menu, raw tmux keys |
 | `!1`..`!9` `!y` `!n` `!esc` `!int` `!enter` `!tab` | menu picks and keys |
 
@@ -325,6 +326,10 @@ The daemon reads the session's JSONL transcript when the sidecar is installed,
 which is why output arrives as clean text with a real tool trace. Without it,
 nightmux falls back to scraping `tmux capture-pane` — everything still works, just
 noisier and without the usage numbers.
+
+A screen the classifier does not recognise is never guessed as idle — it is held
+as `unknown` and treated like a busy pane: a prompt sent to it queues instead of
+typing into a state nobody has confirmed is safe, with `!raw` to type it anyway.
 
 One watcher thread polls every bound session; each topic gets its own worker
 thread, so a slow command in one topic never blocks another. The polling offset
