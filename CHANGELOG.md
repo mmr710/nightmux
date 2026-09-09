@@ -31,6 +31,21 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   on a default server the content is identical and the capture measures ~19%
   faster across nine sessions, while a server configured to keep more history no
   longer makes every tick proportionally slower.
+- The watcher polled every bound session serially — one tmux round-trip at a
+  time — so a single slow or hung session stalled every other session's state
+  update behind it for the rest of that tick, up to that call's own 10s
+  timeout. Each session's slice of a tick (`watch_one`) now runs in a small
+  thread pool, `min(len(bound), 8)` workers (capped so a large bench doesn't
+  open dozens of tmux client processes against the one tmux server at once),
+  so N sessions' tmux round-trips overlap instead of queueing. Measured on this
+  box, a healthy 14-session tick went from ~0.25s to ~0.15–0.20s; the point of
+  it is the tail, not the average — one laggy session no longer costs every
+  other session up to 10s of silence. Two writes in the per-session chain were
+  not session-scoped and needed a lock now that sessions run concurrently: the
+  account-wide usage-limit warning dedup (`_warned`, one 5-hour/weekly window
+  shared by every session on the account) and the chat-wide progress-message
+  throttle (`_prog_at`). Everything else in the chain already lived in that
+  session's own `state[sess]` dict and needed nothing.
 
 - A menu digit or `!y`/`!n` sent to a pane that was not asking anything was
   typed into the agent as text. Claude Code queues that as a message, so five

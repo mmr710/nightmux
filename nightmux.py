@@ -15,6 +15,7 @@ Config: ~/.nightmux.json
 }
 """
 import calendar
+import concurrent.futures
 import contextlib
 import html
 import json
@@ -278,7 +279,7 @@ def fetch_file(cfg, file_id, name=None):
 # ---------- tmux ----------
 
 def run(*argv, **kw):
-    """A child process that cannot wedge the single watcher thread."""
+    """A child process that cannot wedge the calling thread forever."""
     timeout = kw.pop("timeout", 10)
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -962,6 +963,8 @@ def menu_buttons(lines, sess=None):
 
 
 _prog_at = [0.0]  # chat-wide, so N busy sessions cannot outrun the rate limit
+_prog_lock = threading.Lock()   # sessions now poll in parallel; the gap check
+                                 # above must still be one thread at a time
 
 
 def started(cfg, state, topic, sess, mid):
@@ -988,9 +991,12 @@ def progress(cfg, st, topic, sess, lines, tbuf=None):
     answer text, instead of whatever the screen happened to be showing.
     """
     now = time.time()
-    if now - st.get("prog_at", 0) < PROG_EVERY or now - _prog_at[0] < PROG_GAP:
+    if now - st.get("prog_at", 0) < PROG_EVERY:
         return
-    _prog_at[0] = now
+    with _prog_lock:
+        if now - _prog_at[0] < PROG_GAP:
+            return
+        _prog_at[0] = now
     body = ("\n".join(tbuf).split("\n") if tbuf is not None
             else strip_noise(lines[-60:]))
     body = "\n".join(body[-PROG_LINES:]).strip()
@@ -1177,7 +1183,12 @@ CTX_LEAD = 10        # ...and the warning lands this far ahead of autocompact
 # outlives the process, because a restart used to re-arm every threshold the
 # window had already crossed and announce it a second time. Three restarts in an
 # afternoon is three duplicate warnings for one window nobody had left.
+# "First one to notice speaks" relied on the sessions being polled one at a
+# time; now that they run in parallel, two sessions on the same account can
+# both notice the same crossing in the same tick, so the read-decide-write
+# below (and the file it saves to) need to be one thread at a time again.
 _warned = {}
+_warned_lock = threading.Lock()
 
 
 def warned_path():
@@ -1211,14 +1222,16 @@ def warn_usage(cfg, st, topic, sess):
         pct, at = w.get("used_percentage"), w.get("resets_at")
         if pct is None or not at:
             continue
-        armed, done = _warned.get(key, (None, 0))
-        if armed != at:           # a new window: last time's warnings do not carry
-            armed, done = at, 0
-        step = max((t for t in WARN_AT if pct >= t), default=0)
-        before, _warned[key] = _warned.get(key), (armed, max(step, done))
-        if _warned[key] != before:   # a crossed threshold, or a window turning over
-            save_warned()
-        if step > done:
+        with _warned_lock:
+            armed, done = _warned.get(key, (None, 0))
+            if armed != at:        # a new window: last time's warnings do not carry
+                armed, done = at, 0
+            step = max((t for t in WARN_AT if pct >= t), default=0)
+            before, _warned[key] = _warned.get(key), (armed, max(step, done))
+            if _warned[key] != before:   # a crossed threshold, or a window turning over
+                save_warned()
+            fire = step > done
+        if fire:   # send() outside the lock: it can block on Telegram's rate gap
             send(cfg, topic, f"🔶 {label} limit {pct:.0f}% used\n"
                  f"resets {clock(cfg, at)} (in {left(at - time.time())})",
                  mode="plain")
@@ -1260,21 +1273,25 @@ def warn_ctx(cfg, st, topic, sess):
     if pct is None:
         if cfg.get("autocompact") and st.get("mode"):
             wk = f"ctx_blind_{sess}"
-            if not _warned.get(wk):
-                _warned[wk] = (1, 1)
-                save_warned()
+            with _warned_lock:   # wk is sess-scoped, but save_warned() writes one shared file
+                fire = not _warned.get(wk)
+                if fire:
+                    _warned[wk] = (1, 1)
+                    save_warned()
+            if fire:
                 send(cfg, topic, f"🙈 no context figure for {sess}\n"
                      "it comes from Claude Code's status line, so !ctx, autocompact "
                      f"({cfg['autocompact']}%) and the idle hint do not run here\n"
                      "!agents shows which of this topic's agents do report",
                      mode="plain")
         return
-        
+
     wk = f"ctx_blind_{sess}"
-    if wk in _warned:
-        _warned.pop(wk)
-        save_warned()
-        
+    with _warned_lock:
+        if wk in _warned:
+            _warned.pop(wk)
+            save_warned()
+
     trip = ctx_trip(cfg)
     if pct < trip:
         st.pop("ctx_warned", None)   # compacted or cleared: arm again
@@ -2234,6 +2251,28 @@ def watched(cfg):
     return out
 
 
+def watch_one(cfg, state, lock, topic, sess, alive):
+    """One session's slice of a tick — everything watcher() used to run inline.
+
+    Pulled out so a pool worker can run it. Safe to run for many sessions at
+    once because every write in this chain lands in state[sess], and `bound`
+    never claims the same session for two topics — one task, one dict, no
+    other task touches it. The two things below this that are NOT session-
+    scoped (the account-wide usage warnings in _warned, and the chat-wide
+    progress-message throttle in _prog_at) already take their own lock where
+    they touch it, for exactly this reason.
+    """
+    if watchdog(cfg, state, topic, sess, sess in alive):
+        track_cwd(cfg, lock, topic, sess)
+        flush_new(cfg, state, topic, sess, alive.get(sess))
+        nudge(cfg, state, topic, sess)
+        due(cfg, state, topic, sess)
+        drain(cfg, state, topic, sess)
+        autoyes(cfg, state, topic, sess)
+        autocompact(cfg, state, topic, sess)
+        idle_hint(cfg, state, topic, sess)
+
+
 def watcher(cfg, state, lock):
     pruned = 0.0
     bound = []
@@ -2258,19 +2297,23 @@ def watcher(cfg, state, lock):
                 # old, because age here means the agent has been quiet, not that
                 # the file is wrong.
                 pruned = prune(time.time(), pruned, set(alive.values()))
-            for topic, sess in bound:
-                try:
-                    if watchdog(cfg, state, topic, sess, sess in alive):
-                        track_cwd(cfg, lock, topic, sess)
-                        flush_new(cfg, state, topic, sess, alive.get(sess))
-                        nudge(cfg, state, topic, sess)
-                        due(cfg, state, topic, sess)
-                        drain(cfg, state, topic, sess)
-                        autoyes(cfg, state, topic, sess)
-                        autocompact(cfg, state, topic, sess)
-                        idle_hint(cfg, state, topic, sess)
-                except Exception as e:
-                    print(f"watch {sess}: {e}", file=sys.stderr)
+            if bound:
+                # Each session's slice is a handful of tmux round-trips (10s
+                # timeout apiece), not CPU work, so one slow or hung session must
+                # not stall the rest of the tick behind it. Capped at 8 rather
+                # than one worker per session: a bench of 30 would otherwise open
+                # 30 tmux client processes against the single tmux server at
+                # once, trading one kind of stall for another.
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(len(bound), 8)) as pool:
+                    futures = {pool.submit(watch_one, cfg, state, lock,
+                                            topic, sess, alive): sess
+                               for topic, sess in bound}
+                    for fut in concurrent.futures.as_completed(futures):
+                        try:
+                            fut.result()
+                        except Exception as e:
+                            print(f"watch {futures[fut]}: {e}", file=sys.stderr)
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
@@ -6039,6 +6082,31 @@ def selfcheck():
                 api=lambda c, m, **kw: {"ok": False, "description": "bad token"},
                 wired=lambda: [], run=lambda *a, **kw: "inactive", shutil=_FakeShutil()):
         assert doctor() is False               # one ✗ (token rejected) fails the whole thing
+
+    # watcher()'s per-session tick runs through a pool now (see watch_one) so
+    # that one laggy tmux round-trip cannot stall every other session's update
+    # behind it. Prove the overlap directly: stub watchdog() to sleep for one
+    # session and return at once for the other, submit the slow one FIRST — a
+    # regressed-to-serial loop would finish it, and only then start the fast
+    # one — and check the fast one still lands almost immediately.
+    order, marks = [], {}
+
+    def _slow_watchdog(cfg, state, topic, sess, alive):
+        if sess == "slow":
+            time.sleep(0.3)
+        marks[sess] = time.time()
+        order.append(sess)
+        return False   # skip watch_one's body; only the overlap matters here
+
+    with stubbed(watchdog=_slow_watchdog):
+        conc_state, conc_lock, t0 = {}, threading.Lock(), time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(watch_one, {}, conc_state, conc_lock, "1", s, {})
+                    for s in ("slow", "fast")]   # slow submitted first, on purpose
+            for fut in concurrent.futures.as_completed(futs):
+                fut.result()
+    assert order == ["fast", "slow"], order          # fast finished first despite going in second
+    assert marks["fast"] - t0 < 0.15, marks           # not stuck queued behind slow's 0.3s
 
     for n_ in os.listdir(STATE_DIR):
         os.remove(os.path.join(STATE_DIR, n_))

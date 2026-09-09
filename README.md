@@ -332,9 +332,11 @@ as `unknown` and treated like a busy pane: a prompt sent to it queues instead of
 typing into a state nobody has confirmed is safe, with `!raw` to type it anyway.
 
 One watcher thread polls every bound session; each topic gets its own worker
-thread, so a slow command in one topic never blocks another. The polling offset
-is only persisted past updates that have actually finished, so a crash replays
-work rather than dropping it.
+thread, so a slow command in one topic never blocks another. Within a tick, each
+bound session's own tmux round-trips run in a small pool (up to 8 at once) so
+one slow or hung session cannot stall every other session's update behind it.
+The polling offset is only persisted past updates that have actually finished,
+so a crash replays work rather than dropping it.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) has the rest: threads, what survives a
 restart, how output is chosen, and the decisions that were rejected.
