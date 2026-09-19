@@ -6,6 +6,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+### Added
+
+- `!plan <big task>` asks the topic's agent to break it into steps, then runs
+  them one at a time on idle — the same queue `!shift` drains, just filled by
+  the agent instead of typed in by hand. `!shift` still reports progress or
+  stops it early; `!plan cancel` drops a request still waiting on an answer.
+
 ### Fixed
 
 - `pane_state()` read anything that didn't match a known busy pattern as idle —

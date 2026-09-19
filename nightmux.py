@@ -1982,7 +1982,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                    lines, prompt_key(lines)):
             return
     elif body:
-        if not consult_capture(topic, sess, body):
+        if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
     else:
         return
@@ -2817,6 +2817,82 @@ def use_prompt(cfg, state, topic, arg):
     return reply or "▶️ running %s's prompt in %s" % (key, sess)
 
 
+# ---------- plan: one big task -> the agent's own breakdown, run like !shift ----------
+
+PLAN_PROMPT = """[nightmux plan]
+Break the following task into a sequential list of concrete, self-contained
+steps. Each step must be a complete instruction someone could act on with no
+other context — no "then continue as before".
+
+TASK
+{task}
+
+Output ONLY a numbered list, one step per line. No preamble, no explanation,
+no fenced code block, nothing after the list."""
+
+PLAN_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+(\S.*)$")
+
+# topic -> {"sess": the session asked, "task": what was asked, "at": when}. Not
+# on disk, same as _consult: a plan request in flight is a conversation, and
+# half of one restored after a restart is worse than asking again.
+_plan = {}
+
+
+def parse_plan(body):
+    """Numbered- or bulleted-list lines in `body`, in order, markers stripped.
+
+    A chatty model's "Sure, here's the plan:" line above the list, or a closing
+    remark below it, does not match and is dropped rather than becoming step 1.
+    """
+    return [m.group(1).strip() for m in map(PLAN_LINE.match, body.splitlines()) if m]
+
+
+def plan_start(cfg, state, topic, task):
+    """!plan <big task>: ask this topic's agent to break it down, then run the
+    breakdown one step at a time — the same queue !shift drains, just filled by
+    the agent instead of typed in by hand."""
+    if task.strip() in ("cancel", "off", "stop"):
+        return "plan cancelled" if _plan.pop(str(topic), None) else "no plan in flight"
+    if not task.strip():
+        return ("usage: !plan <big task>\n"
+                "asks this topic's agent to break it into steps, then runs them "
+                "one at a time on idle, like !shift\n"
+                "!shift to check progress or stop early · !plan cancel drops a "
+                "request still waiting on an answer")
+    sess = cfg["topics"].get(topic)
+    if not sess or not has_session(sess):
+        return "this topic has no live session to plan in"
+    if str(topic) in _plan:
+        return "a plan request is already out — !plan cancel to drop it"
+    _plan[str(topic)] = {"sess": sess, "task": task.strip(), "at": time.time()}
+    reply = send_prompt(cfg, state, topic, sess, PLAN_PROMPT.format(task=task.strip()))
+    return reply or "🗺️ asking %s to break this down..." % sess
+
+
+def plan_capture(cfg, state, topic, sess, body):
+    """True when this finished turn is a plan breakdown, not an answer to you.
+
+    Mirrors consult_capture: the caller does not post the raw breakdown, this
+    turns it straight into a running !shift instead.
+    """
+    p = _plan.get(str(topic))
+    if not p or p["sess"] != sess:
+        return False
+    del _plan[str(topic)]
+    steps = parse_plan(body)
+    if not steps:
+        send(cfg, topic, f"🗺️ asked {sess} to plan '{p['task'][:60]}', got no "
+             f"numbered list back:\n\n{body}", mode="mono")
+        return True
+    st = state.setdefault(sess, {})
+    st["shift"], st["shift_total"] = steps, len(steps)
+    save_queue(state)
+    send(cfg, topic, f"🗺️ plan set: {len(steps)} step(s), one at a time on idle\n"
+         + "\n".join(f"{i + 1}. {s.splitlines()[0][:70]}" for i, s in enumerate(steps)),
+         mode="plain", buttons=kb([[("stop", "!shift clear")]]))
+    return True
+
+
 def consult_tick(cfg, state):
     """Advance any running consultation. One call per watch tick, not per session."""
     for topic in list(_consult):
@@ -3193,7 +3269,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -3243,6 +3319,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "other, get one prompt back\n"
                 "!use [agent] = run the prompt a consult settled on, in this "
                 "topic's agent\n"
+                "!plan <big task> = agent breaks it into steps, runs them one "
+                "at a time like !shift\n"
                 "!autoyes <agent|off> = answer that agent's own permission menus "
                 "for it\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
@@ -3332,6 +3410,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return consult_start(cfg, state, topic, arg)
     if cmd == "!use":
         return use_prompt(cfg, state, topic, arg)
+    if cmd == "!plan":
+        return plan_start(cfg, state, topic, arg)
     if cmd == "!autoyes":
         cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
         if arg in ("off", "none"):
@@ -5928,7 +6008,34 @@ def selfcheck():
         _consult["9"]["at"] = time.time() - CONSULT_TIMEOUT - 1
         consult_tick(cfg2, {})
         assert "9" not in _consult and any("nobody answered" in x for x in csent)
-    _consult.clear()
+
+        # plan: one big task -> the agent's own breakdown, run like !shift.
+        # Still inside topic 9's "box" window above, before it is put back below.
+        assert parse_plan("1. first step\n2. second step\n") == ["first step", "second step"]
+        assert parse_plan("Sure, here:\n- do a\n* do b\nthanks") == ["do a", "do b"]
+        assert parse_plan("no list here") == []
+        _plan.clear()
+        pstate, pprompts = {}, []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: csent.append(x),
+                 send_prompt=lambda c, st, t, se, tx, mid=None: pprompts.append((se, tx))):
+        assert "no live session" in plan_start(cfg2, pstate, "404", "do the thing")
+        out = plan_start(cfg2, pstate, "9", "ship the feature")
+        assert "asking" in out, out
+        assert pprompts[-1][0] == "box" and "ship the feature" in pprompts[-1][1]
+        assert "already out" in plan_start(cfg2, pstate, "9", "again")
+        assert plan_capture(cfg2, pstate, "9", "somebody-else", "1. x") is False
+        assert plan_capture(cfg2, pstate, "9", "box",
+                             "Sure:\n1. write the tests\n2. wire it up\n") is True
+        assert "9" not in _plan
+        assert pstate["box"]["shift"] == ["write the tests", "wire it up"]
+        assert pstate["box"]["shift_total"] == 2
+        assert any("plan set: 2 step" in x for x in csent), csent
+        # a reply with no numbered list is reported, not silently dropped
+        plan_start(cfg2, pstate, "9", "another one")
+        csent.clear()
+        assert plan_capture(cfg2, pstate, "9", "box", "sure, working on it") is True
+        assert any("no numbered list" in x for x in csent), csent
+    _plan.clear(), _consult.clear()
     cfg2["topics"]["9"], cfg2["started"]["9"], cfg2["bench"]["9"] = was9
 
     # The watcher has to read every agent a topic can be written to, or a
