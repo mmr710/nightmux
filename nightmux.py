@@ -3319,6 +3319,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     "of your own" % (name, other))
         with lock:
             cfg["topics"][topic] = name
+            cfg.setdefault("dirs", {})[topic] = sess_cwd(name)  # bare !<agent> needs it to switch
             save_cfg(cfg)
         state.pop(name, None)
         return f"topic bound to '{name}'"
