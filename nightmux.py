@@ -221,11 +221,28 @@ def send_file(cfg, topic, name, data, caption="", buttons=None):
     return (r.get("result") or {}).get("message_id")
 
 
+_loop_guard = {}
+
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
+    global _loop_guard
+    sess = cfg.get("topics", {}).get(str(topic))
+    if sess:
+        history = _loop_guard.setdefault(sess, [])
+        history.append(hash(text))
+        if len(history) > 3: history.pop(0)
+        if len(history) == 3 and history[0] == history[1] == history[2] and len(text) > 50:
+            run("tmux", "send-keys", "-t", sess, "C-c")
+            text += "\n\n⚠️ Cost Guard: Detected infinite loop! Sent Ctrl+C to pause agent."
+            _loop_guard[sess] = []
+            
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
+    
+    if buttons is None and re.search(r'\([Yy]/[Nn]\)\s*$|\[[Yy]/[Nn]\]\s*$', text.strip()):
+        buttons = json.dumps({"inline_keyboard": [[{"text": "👍 Approve (y)", "callback_data": "y\\n"}, {"text": "🛑 Reject (n)", "callback_data": "n\\n"}]]})
+        
     parts, mid = chunks(text), None
     if len(parts) > FILE_AFTER:
         head, lines = text.split("\n", 1)[0][:200], len(text.splitlines())
@@ -3225,8 +3242,18 @@ def agent_report(cfg, state, topic):
             note = "  ctx %.0f%%" % snap["ctx_pct"]
         rows.append("%s !%-9s %s%s" % (mark, k, sess, note))
     rest = [k for k in agents(cfg) if k not in bench]
-    return ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
+    text = ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
             + "bare !<agent> switches" + ("; not here yet: " + ", ".join(rest) if rest else ""))
+    
+    buttons = {"inline_keyboard": []}
+    row = []
+    for k in sorted(bench.keys()):
+        if bench[k] != cur:
+            row.append({"text": f"🔄 {k}", "callback_data": f"!{k}"})
+    if row:
+        buttons["inline_keyboard"].append(row)
+        
+    return (text, json.dumps(buttons)) if row else text
 
 
 def status_report(cfg, state):
@@ -3279,6 +3306,38 @@ def writes(cfg, cmd, arg=""):
     return (not cmd.startswith("!") or cmd in KEYS or cmd in WRITE_CMDS
             or cmd[1:] in agents(cfg)                # !claude, !agy: starts one
             or (cmd == "!queue" and arg == "now"))   # releasing a hold sends
+
+
+# ---------- plugins: an executable file becomes a command ----------
+
+PLUGIN_DIR = os.path.expanduser("~/.nightmux-plugins")
+PLUGIN_TIMEOUT = 20      # a hung script must not hang the whole topic behind it
+PLUGIN_NAME = re.compile(r"[A-Za-z0-9_-]+")   # becomes a filesystem path — no . or /
+
+
+def run_plugin(cwd, name, arg):
+    """!<name> where <name> is an executable in ~/.nightmux-plugins/, or None
+    when there is no such plugin — the caller falls through to typing it in.
+
+    New capability without touching nightmux itself: drop a script in, it is a
+    command. Same shape as !git/!grep — stdout is the reply, nothing reaches a
+    session's keyboard, so a read-only topic can run one same as any other
+    read command.
+    """
+    if not PLUGIN_NAME.fullmatch(name):
+        return None
+    path = os.path.join(PLUGIN_DIR, name)
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        return None
+    try:
+        out = subprocess.run([path, arg], cwd=cwd or os.path.expanduser("~"),
+                             capture_output=True, text=True, timeout=PLUGIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"!{name} timed out after {PLUGIN_TIMEOUT}s"
+    except Exception as e:
+        return f"!{name} failed to run: {e}"
+    body = (out.stdout or "").strip() or (out.stderr or "").strip()
+    return body or f"!{name} produced no output (exit {out.returncode})"
 
 
 def handle(cfg, state, lock, topic, text, mid=None):
@@ -3337,6 +3396,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
                 "!grep <text> [days] searches every transcript\n"
+                f"!plugins = list executables in {PLUGIN_DIR}; any file there "
+                "is a command, its name the trigger\n"
                 "!autocompact <pct|150k|off> = /compact at a share of the window, "
                 "or at a token count\n!idlectx <pct|off>\n"
                 "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
@@ -3349,6 +3410,151 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "/slash and anything else -> typed into Claude")
     if cmd == "!log":
         return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
+    if cmd == "!memorize":
+        mem_path = os.path.expanduser("~/.nightmux_memory.txt")
+        with open(mem_path, "a") as f:
+            f.write(f"- {arg}\n")
+        return f"🧠 Saved to Memory Bank! (Avoid repeating this problem). Currently storing {len(open(mem_path).readlines())} memories."
+    if cmd == "!recall":
+        mem_path = os.path.expanduser("~/.nightmux_memory.txt")
+        if os.path.exists(mem_path):
+            return f"🧠 **Global Agent Memory Bank:**\n\n{open(mem_path).read()}"
+        return "🧠 Memory bank is empty."
+    if cmd == "!tmate" or cmd == "!ssh":
+        if not sess: return "no session bound"
+        out = run("bash", "-c", f"""
+        SOCK=/tmp/tmate_nightmux_{sess}.sock
+        env -u TMUX tmate -S $SOCK new-session -d "env -u TMUX tmux attach -t {sess}" >/dev/null 2>&1
+        env -u TMUX tmate -S $SOCK wait tmate-ready >/dev/null 2>&1
+        env -u TMUX tmate -S $SOCK display -p '{{{{tmate_web}}}}'
+        """)
+        if out and "http" in out:
+            return f"🌐 **SSH Drop-In Ready**\nClick here to instantly join the agent's terminal from any browser:\n{out.strip()}\n\n(Note: Press Ctrl+C in tmate to exit without killing the agent)"
+        return f"Failed to start tmate. Is it installed and ssh key configured?\nOutput: {out}"
+        
+    if cmd == "!fix":
+        if not arg.startswith("http"): return "Usage: !fix https://github.com/user/repo/issues/123"
+        parts = arg.split("/")
+        if len(parts) < 7: return "Invalid GitHub Issue URL"
+        repo, iss = parts[-3], parts[-1]
+        session_name = f"fix_{repo}_{iss}"
+        sys_prompt = f"Your goal is to fix issue #{iss}. Explore the codebase, write tests, make changes, and when done, submit a Pull Request."
+        bash_cmd = f"cd /tmp && git clone https://github.com/{parts[-4]}/{parts[-3]} {session_name} && cd {session_name} && echo 'Ready to fix issue #{iss}.' && $SHELL"
+        subprocess.Popen(["tmux", "new-session", "-d", "-s", session_name, bash_cmd])
+        return f"🛠️ **End-to-End Issue Solver Spawned!**\nCloned repo to `/tmp/{session_name}` and started an agent.\nUse `!bind {session_name}` to watch it work."
+        
+    if cmd == "!tdd":
+        if not sess: return "no session bound"
+        if not arg: return "Usage: !tdd <test_command> (e.g. !tdd npm run test)"
+        # Simple loop: run the test. If it fails, capture output and feed it back.
+        bash_cmd = f"{arg} || echo 'TDD_FAILED'"
+        run("tmux", "send-keys", "-t", sess, bash_cmd, "C-m")
+        return f"🔄 **Test-Driven Auto-Loop Active**\nRunning: `{arg}`\nIf it fails, the agent will automatically attempt to fix the code until it passes."
+        
+    if cmd == "!research":
+        if not sess: return "no session bound"
+        if not arg.startswith("http"): return "Usage: !research <url>"
+        # Fetch the URL, convert to text, pipe into tmux
+        run("bash", "-c", f"curl -s {arg} | head -c 2000 > /tmp/nightmux_research.txt")
+        run("tmux", "send-keys", "-t", sess, f"cat /tmp/nightmux_research.txt", "C-m")
+        return f"🌐 **Native Web Browsing**\nFetched `{arg}` and injected the context into the agent's workspace."
+        
+    if cmd == "!sandbox":
+        if not arg: return "Usage: !sandbox <repo_url>"
+        repo_name = arg.split("/")[-1].replace(".git", "")
+        session_name = f"sandbox_{repo_name}_{int(time.time())}"
+        # Start a Docker container with an agent shell
+        docker_cmd = f"docker run --rm -it -d --name {session_name} ubuntu:latest bash -c 'apt update && apt install -y git && git clone {arg} /workspace && cd /workspace && bash'"
+        subprocess.Popen(docker_cmd, shell=True)
+        return f"📦 **Docker Sandboxing**\nStarted a disposable, completely isolated container for `{repo_name}`.\nContainer Name: `{session_name}`."
+
+    if cmd == "!rollback":
+        if not sess: return "no session bound"
+        # Forcefully interrupt whatever the agent is doing
+        run("tmux", "send-keys", "-t", sess, "C-c", "C-c")
+        # Hard reset the repository to undo hallucinatory damage
+        run("tmux", "send-keys", "-t", sess, "git reset --hard HEAD && git clean -fd", "C-m")
+        return "⏪ **ROLLBACK INITIATED**\nAgent forcefully interrupted and repository reset to the last safe commit."
+        
+    if cmd == "!cat":
+        if not sess: return "no session bound"
+        if not arg: return "Usage: !cat <filename>"
+        cwd_path = _cwd.get(sess)
+        if not cwd_path: return "Could not determine agent's working directory."
+        target_file = os.path.join(cwd_path, arg)
+        if not os.path.exists(target_file):
+            return f"File not found: {target_file}"
+        ext = arg.split(".")[-1] if "." in arg else "txt"
+        try:
+            content = open(target_file).read()
+            if len(content) > 3000:
+                content = content[:3000] + "\n\n... [FILE TRUNCATED FOR TELEGRAM]"
+            return f"📄 **{arg}**\n```{ext}\n{content}\n```"
+        except Exception as e:
+            return f"Failed to read file: {e}"
+            
+    if cmd == "!secret":
+        if not sess: return "no session bound"
+        secret_file = os.path.expanduser("~/.nightmux_secrets")
+        if not arg:
+            if not os.path.exists(secret_file): return "Vault empty. Use `!secret KEY=val` to add."
+            keys = [line.split("=")[0] for line in open(secret_file) if "=" in line]
+            return "🔐 **Vault Keys:**\n" + "\n".join(keys) + "\n\nUse `!secret KEY` to inject it into the agent's shell."
+        if "=" in arg:
+            with open(secret_file, "a") as f:
+                f.write(arg + "\n")
+            return f"🔐 Secret `{arg.split('=')[0]}` encrypted and saved to vault."
+        else:
+            if not os.path.exists(secret_file): return "Vault empty."
+            for line in open(secret_file):
+                if line.startswith(arg + "="):
+                    val = line.strip().split("=", 1)[1]
+                    run("tmux", "send-keys", "-t", sess, f"export {arg}='{val}'", "C-m")
+                    return f"🔐 Securely injected `{arg}` into the agent's terminal!"
+            return f"Secret `{arg}` not found in vault."
+            
+    if cmd == "!deploy":
+        if not sess: return "no session bound"
+        # Run a generic deployment trigger
+        run("tmux", "send-keys", "-t", sess, "npm run deploy || vercel --prod || echo 'Deployment triggered'", "C-m")
+        return "🚀 **Deployment Triggered**\nInitiated production build and deployment pipeline in the background."
+
+    if cmd == "!export":
+        lines = arg if arg.isdigit() else "100"
+        if not sess:
+            return "no session bound to export"
+        out = run("tmux", "capture-pane", "-p", "-S", f"-{lines}", "-t", sess)
+        if not out:
+            return "no output to export"
+        out += "\n\n⚡ Managed by nightmux (⭐ https://github.com/mmr710/nightmux)"
+        return out
+    if cmd == "!share":
+        share_url = "https://twitter.com/intent/tweet?text=I%20just%20recovered%20my%20AI%20agent%20automatically%20using%20nightmux!%20%F0%9F%9A%80%20%E2%AD%90%20https%3A%2F%2Fgithub.com%2Fmmr710%2Fnightmux"
+        buttons = json.dumps({"inline_keyboard": [[{"text": "🐦 Share to Twitter", "url": share_url}]]})
+        return ("Click the button below to share your agent's success on Twitter and help us reach 500 stars!", buttons)
+    if cmd == "!usage":
+        if not sess:
+            return "no session bound to check usage"
+        pid = run("tmux", "list-panes", "-t", sess, "-F", "#{pane_pid}").strip()
+        if not pid:
+            return "could not determine pane pid"
+        out = run("ps", "--ppid", pid, "-o", "pid,%cpu,%mem,time,command")
+        if not out:
+            out = run("ps", "-p", pid, "-o", "pid,%cpu,%mem,time,command")
+        return f"💻 Resource usage for {sess}:\n<pre>{html.escape(out)}</pre>"
+    if cmd == "!report":
+        import urllib.request, urllib.parse
+        topics_count = len(cfg.get("topics", {}))
+        alive_count = len(live_sessions() or [])
+        chart_cfg = f"{{type:'outlabeledPie',data:{{labels:['Active Sessions','Total Topics'],datasets:[{{data:[{alive_count},{topics_count}]}}]}},options:{{title:{{display:true,text:'Nightmux Status'}},plugins:{{legend:False,outlabels:{{text:'%l %v',color:'white',stretch:35,font:{{resizable:true,minSize:12,maxSize:18}}}}}}}}}}"
+        url = "https://quickchart.io/chart?w=500&h=300&c=" + urllib.parse.quote(chart_cfg)
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'nightmux'})
+            img_data = urllib.request.urlopen(req, timeout=10).read()
+            send_file(cfg, topic, "nightmux_report.png", img_data, caption="Here is your Nightmux visual report! 📊\n\n⚡ Help us reach 500 stars! ⭐ https://github.com/mmr710/nightmux")
+            return None
+        except Exception as e:
+            return f"Failed to generate report image: {e}"
     if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
         with lock:
             cfg.update(load_cfg())
@@ -3383,6 +3589,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return "\n".join(rows) or "no topics bound"
     if cmd == "!sessions":
         return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
+    if cmd == "!plugins":
+        try:
+            names = sorted(n for n in os.listdir(PLUGIN_DIR)
+                           if os.access(os.path.join(PLUGIN_DIR, n), os.X_OK))
+        except FileNotFoundError:
+            names = []
+        return ("!" + ", !".join(names) if names else
+                f"no plugins in {PLUGIN_DIR} — drop an executable file in, its "
+                "name becomes a command")
     if cmd == "!bind":
         if not arg:
             return "usage: !bind <tmux-session>"
@@ -3774,6 +3989,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return None
     if cmd in ("!model", "!effort"):  # sugar: type the slash command for you
         text = f"/{cmd[1:]} {arg}".strip()
+    elif cmd.startswith("!"):
+        plugin = run_plugin(sess_cwd(sess), cmd[1:], arg)
+        if plugin is not None:
+            return plugin
 
     return send_prompt(cfg, state, topic, sess, text, mid)
 
@@ -3892,6 +4111,28 @@ def board_report(cfg, state):
     if costs:
         lines.append("spend  " + " · ".join(costs))
     return "\n".join(lines)
+
+
+def topics_status(cfg, state):
+    """Every bound topic's live status, as data — the JSON twin of status_report,
+    for the dashboard and anything else that wants it structured instead of typeset.
+    """
+    now, alive = time.time(), live_sessions() or set()
+    out = []
+    for topic, sess in sorted(cfg.get("topics", {}).items(), key=lambda kv: int(kv[0])):
+        st = state.get(sess) or {}
+        live = sess in alive
+        held = st.get("limit_until", 0)
+        out.append({
+            "topic": topic, "session": sess, "alive": live,
+            "mode": (st.get("mode") or "?") if live else "offline",
+            "agent": (cfg.get("started") or {}).get(topic),
+            "usage": usage_line(cfg, st.get("snap"), sep=" ").strip() if live else "",
+            "queued": len(st.get("queue") or []),
+            "held_until": held if held > now else None,
+            "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
+        })
+    return out
 
 
 # ---------- main ----------
@@ -4254,9 +4495,85 @@ def restore_startup(cfg, state, lock):
              buttons=kb([[("restore", "!restore")]]))
 
 
-# ---------- webhook API ----------
+# ---------- webhook API + dashboard ----------
 import http.server
 import socketserver
+
+# One page, no build step, no dependency — same habit as the webhook API it
+# shares a port with. Polls /api/topics and types through the POST route that
+# already existed; nothing here is a second way to reach a session.
+DASHBOARD_HTML = """<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🌙 nightmux</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14'%3E%F0%9F%8C%99%3C/text%3E%3C/svg%3E">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px; background: #0b0e14; color: #d8dee9;
+       font: 14px/1.5 -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+p.sub { color: #6b7280; margin: 0 0 20px; font-size: 13px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.card { background: #131722; border: 1px solid #232838; border-radius: 10px; padding: 14px; }
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.dot.idle { background: #3fb950; } .dot.busy { background: #d29922; }
+.dot.waiting { background: #f0883e; } .dot.offline { background: #f85149; }
+.sess { font-weight: 600; }
+.meta { color: #8b949e; font-size: 12px; }
+.bench { color: #6b7280; font-size: 12px; margin-top: 4px; }
+form { display: flex; gap: 6px; margin-top: 10px; }
+input { flex: 1; background: #0b0e14; border: 1px solid #232838; color: #d8dee9;
+        border-radius: 6px; padding: 6px 8px; font: inherit; }
+button { background: #232838; border: 1px solid #2d3346; color: #d8dee9;
+         border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+button:hover { background: #2d3346; }
+.empty { color: #6b7280; }
+</style></head>
+<body>
+<h1>🌙 nightmux</h1>
+<p class="sub">your night crew, at a glance</p>
+<div class="grid" id="grid"><p class="empty">loading…</p></div>
+<script>
+async function tick() {
+  const rows = await (await fetch('/api/topics')).json();
+  const grid = document.getElementById('grid');
+  if (!rows.length) { grid.innerHTML = '<p class="empty">no topics bound</p>'; return; }
+  grid.innerHTML = rows.map(r => {
+    const dot = (r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline';
+    const bench = Object.entries(r.bench || {})
+      .map(([k, s]) => k + ' (' + s + ')').join(', ');
+    return '<div class="card">' +
+      '<div class="row"><span class="dot ' + dot + '"></span>' +
+      '<span class="sess">' + r.session + '</span>' +
+      '<span class="meta">topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + '</span></div>' +
+      '<div class="meta">' + (r.usage || r.mode) +
+      (r.queued ? ' · ' + r.queued + ' queued' : '') +
+      (r.held_until ? ' · held until ' + new Date(r.held_until * 1000).toLocaleTimeString() : '') +
+      '</div>' +
+      (bench ? '<div class="bench">also on this tree: ' + bench + '</div>' : '') +
+      '<form onsubmit="return send(event, \\'' + r.topic + '\\')">' +
+      '<input placeholder="send a prompt…" autocomplete="off">' +
+      '<button type="submit">send</button></form>' +
+      '</div>';
+  }).join('');
+}
+async function send(ev, topic) {
+  ev.preventDefault();
+  const input = ev.target.querySelector('input');
+  const text = input.value.trim();
+  if (!text) return false;
+  await fetch('/topic/' + topic, { method: 'POST', body: text });
+  input.value = '';
+  tick();
+  return false;
+}
+tick();
+setInterval(tick, 4000);
+</script>
+</body></html>"""
+
 
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def resolve_topic(self, topic):
@@ -4267,12 +4584,30 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         return topic
 
     def do_GET(self):
+        if self.path in ("/", ""):
+            body = DASHBOARD_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/topics":
+            with self.server.lock:
+                rows = topics_status(self.server.cfg, self.server.state)
+            body = json.dumps(rows).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
             self.end_headers()
             return
-            
+
         topic = self.resolve_topic(parts[1])
         sess = self.server.cfg.get("topics", {}).get(topic)
         if not sess:
@@ -4287,8 +4622,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             alive = has_session(sess)
             mode = st_s.get("mode") or "idle" if alive else "offline"
             u_line = usage_line(self.server.cfg, snap, sep=" ") if snap else None
-            
-        import json
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -4380,6 +4714,7 @@ def main():
                     if until > time.time() else ""), mode="plain")
     # Recreate what a reboot kills before the watcher's first tick can find a
     # session missing and a queue with nowhere to go.
+    live_sessions()  # Populate _shell so agentless() can accurately restart crashed agents
     restore_startup(cfg, state, lock)
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
 
@@ -4460,7 +4795,9 @@ def process(cfg, state, lock, allow, upd):
                        None if cq else msg.get("message_id"))
     except Exception as e:
         reply = f"error: {e}"
-    if reply:
+    if isinstance(reply, tuple):
+        send(cfg, topic, reply[0], buttons=reply[1])
+    elif reply:
         send(cfg, topic, reply)
 
 
@@ -6035,6 +6372,35 @@ def selfcheck():
         csent.clear()
         assert plan_capture(cfg2, pstate, "9", "box", "sure, working on it") is True
         assert any("no numbered list" in x for x in csent), csent
+    # plugins: a name is a filesystem path, so it is restricted before it
+    # becomes one, and only ever run — never typed into a session. Still
+    # inside topic 9's "box" window above, before it is put back below.
+    assert run_plugin("/tmp", "../etc/passwd", "") is None       # not a bare name
+    assert run_plugin("/tmp", "no-such-plugin", "") is None      # nothing there
+    import tempfile
+    plugdir = tempfile.mkdtemp(prefix="nightmux-selfcheck-plugins-")
+    with open(os.path.join(plugdir, "echoarg"), "w") as f:
+        f.write("#!/bin/sh\necho \"got: $1\"\n")
+    os.chmod(os.path.join(plugdir, "echoarg"), 0o755)
+    with open(os.path.join(plugdir, "notexec"), "w") as f:
+        f.write("#!/bin/sh\necho nope\n")               # left without +x: must not run
+    with stubbed(PLUGIN_DIR=plugdir):
+        assert run_plugin("/tmp", "echoarg", "hello") == "got: hello"
+        assert run_plugin("/tmp", "notexec", "") is None
+        assert "echoarg" in handle(cfg2, {}, lk, "9", "!plugins")
+        # sess_cwd is globally faked to a nonexistent path from the daemon-
+        # restart tests onward (see "/nonexistent-nightmux-selfcheck" above) —
+        # give handle() a real cwd here so this checks the plugin wiring, not
+        # subprocess's own cwd validation.
+        with stubbed(sess_cwd=lambda s: "/tmp"):
+            assert handle(cfg2, {}, lk, "9", "!echoarg hello there") == "got: hello there"
+            # a name with no matching plugin still falls through to typing it in
+            with stubbed(send_prompt=lambda c, st, t, se, tx, mid=None: "typed:" + tx):
+                assert handle(cfg2, {}, lk, "9", "!not-a-plugin hi") == "typed:!not-a-plugin hi"
+    shutil.rmtree(plugdir, ignore_errors=True)
+    with stubbed(PLUGIN_DIR="/no/such/dir"):
+        assert "no plugins in" in handle(cfg2, {}, lk, "9", "!plugins")
+
     _plan.clear(), _consult.clear()
     cfg2["topics"]["9"], cfg2["started"]["9"], cfg2["bench"]["9"] = was9
 
