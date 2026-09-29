@@ -6247,7 +6247,8 @@ def selfcheck():
     assert len(spawned) == n, "switching back respawned instead of reusing"
     assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
     assert "already on codex" in handle(cfg2, {}, lk, "9", "!codex")
-    assert "\u25cf !codex" in handle(cfg2, {}, lk, "9", "!agents")
+    res = handle(cfg2, {}, lk, "9", "!agents")
+    assert "\u25cf !codex" in (res[0] if isinstance(res, tuple) else res)
     handle(cfg2, {}, lk, "9", "!agy named /tmp")   # with args: still start-by-name
     assert spawned[-1][0] == "named" and cfg2["bench"]["9"]["agy"] == "box-agy"
 

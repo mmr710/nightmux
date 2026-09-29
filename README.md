@@ -299,7 +299,7 @@ Prompts you type live get no snapshot — there is nothing unattended about them
 restore`/`git diff` commands to look at or roll back to one. It never runs them
 — a phone is a small thing to fat-finger a hard reset from.
 
-## Zero-Dependency Webhook API
+## Zero-Dependency Webhook API + Dashboard
 
 nightmux runs a local HTTP server (`127.0.0.1:9090`) to accept commands from outside Telegram. You can configure `"webhook_port": 9090` in your `~/.nightmux.json` to enable it.
 
@@ -309,7 +309,21 @@ This turns nightmux into the central nervous system for your local agents. You c
 curl -X POST http://127.0.0.1:9090/topic/api -d "review the staged changes"
 ```
 
+The same port also serves a page — open `http://127.0.0.1:9090/` for every
+bound topic at a glance (mode, usage, who else is on the bench) with a box
+to send a prompt, no phone required. `/api/topics` is the JSON it polls, if
+you want to build your own view instead.
+
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
+
+## Plugins
+
+Drop an executable file in `~/.nightmux-plugins/`; its filename becomes a
+command. `!weather` runs `~/.nightmux-plugins/weather`, its argument as
+`$1`, and whatever it prints to stdout is the reply — the same shape as the
+built-in `!git`/`!grep`. It never reaches a session's keyboard, so it works
+in a read-only topic same as any other read command. `!plugins` lists
+what's there.
 
 ## How it works
 

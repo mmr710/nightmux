@@ -12,6 +12,15 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   them one at a time on idle — the same queue `!shift` drains, just filled by
   the agent instead of typed in by hand. `!shift` still reports progress or
   stops it early; `!plan cancel` drops a request still waiting on an answer.
+- A page at the webhook port's `/` (enabled the same way, `"webhook_port"` in
+  the config): every bound topic at a glance, polling `/api/topics`, with a
+  box to send a prompt through the same POST route the webhook API already
+  had. No new port, no new dependency, no new way to reach a session.
+- Plugins: any executable file dropped in `~/.nightmux-plugins/` becomes a
+  command — its filename is the trigger, stdout is the reply, same shape as
+  `!git`/`!grep`. Never reaches a session's keyboard, so it runs in a
+  read-only topic same as any other read command. `!plugins` lists what's
+  there.
 
 ### Fixed
 
