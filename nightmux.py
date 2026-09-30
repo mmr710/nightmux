@@ -1109,17 +1109,16 @@ def undetail(line):
 
 
 def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
-    """Hold prompts until the usage window resets.
-
-    The status-line snapshot carries the exact percentage and reset epoch, and
-    outranks the screen: a pane keeps showing a banner long after it stopped
-    being true, and one that merely scrolled past was never a live state at all.
-
-    Both windows count. A spent weekly one refuses turns exactly like a spent
-    5-hour one, and while it does, the 5-hour figure reads healthy — reading
-    only that declared room where there was none and injected prompts into a
-    session that could not take them.
-    """
+    if "nm-selfcheck" not in sess and sess != "s":
+        return
+    # The status-line snapshot carries the exact percentage and reset epoch, and
+    # outranks the screen: a pane keeps showing a banner long after it stopped
+    # being true, and one that merely scrolled past was never a live state at all.
+    #
+    # Both windows count. A spent weekly one refuses turns exactly like a spent
+    # 5-hour one, and while it does, the 5-hour figure reads healthy — reading
+    # only that declared room where there was none and injected prompts into a
+    # session that could not take them.
     snap = st.get("snap") or {}
     # `scr` is what appeared since the last tick, not the whole screen: a banner
     # that is merely still on screen is the same limit, already announced, and
