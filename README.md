@@ -314,6 +314,8 @@ bound topic at a glance (mode, usage, who else is on the bench) with a box
 to send a prompt, no phone required. `/api/topics` is the JSON it polls, if
 you want to build your own view instead.
 
+![nightmux dashboard — every bound topic at a glance, with a box to send a prompt](docs/dashboard.png)
+
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
 ## Plugins
