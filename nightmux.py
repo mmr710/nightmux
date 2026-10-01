@@ -221,23 +221,11 @@ def send_file(cfg, topic, name, data, caption="", buttons=None):
     return (r.get("result") or {}).get("message_id")
 
 
-_loop_guard = {}
 
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
-    global _loop_guard
-    sess = cfg.get("topics", {}).get(str(topic))
-    if sess:
-        history = _loop_guard.setdefault(sess, [])
-        history.append(hash(text))
-        if len(history) > 3: history.pop(0)
-        if len(history) == 3 and history[0] == history[1] == history[2] and len(text) > 50:
-            run("tmux", "send-keys", "-t", sess, "C-c")
-            text += "\n\n⚠️ Cost Guard: Detected infinite loop! Sent Ctrl+C to pause agent."
-            _loop_guard[sess] = []
-            
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
     
     if buttons is None and re.search(r'\([Yy]/[Nn]\)\s*$|\[[Yy]/[Nn]\]\s*$', text.strip()):
