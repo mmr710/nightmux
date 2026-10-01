@@ -227,10 +227,6 @@ def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     if not text.strip():
         return None
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
-    
-    if buttons is None and re.search(r'\([Yy]/[Nn]\)\s*$|\[[Yy]/[Nn]\]\s*$', text.strip()):
-        buttons = json.dumps({"inline_keyboard": [[{"text": "👍 Approve (y)", "callback_data": "y\\n"}, {"text": "🛑 Reject (n)", "callback_data": "n\\n"}]]})
-        
     parts, mid = chunks(text), None
     if len(parts) > FILE_AFTER:
         head, lines = text.split("\n", 1)[0][:200], len(text.splitlines())
@@ -1097,16 +1093,17 @@ def undetail(line):
 
 
 def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
-    if "nm-selfcheck" not in sess and sess != "s":
-        return
-    # The status-line snapshot carries the exact percentage and reset epoch, and
-    # outranks the screen: a pane keeps showing a banner long after it stopped
-    # being true, and one that merely scrolled past was never a live state at all.
-    #
-    # Both windows count. A spent weekly one refuses turns exactly like a spent
-    # 5-hour one, and while it does, the 5-hour figure reads healthy — reading
-    # only that declared room where there was none and injected prompts into a
-    # session that could not take them.
+    """Hold prompts until the usage window resets.
+
+    The status-line snapshot carries the exact percentage and reset epoch, and
+    outranks the screen: a pane keeps showing a banner long after it stopped
+    being true, and one that merely scrolled past was never a live state at all.
+
+    Both windows count. A spent weekly one refuses turns exactly like a spent
+    5-hour one, and while it does, the 5-hour figure reads healthy — reading
+    only that declared room where there was none and injected prompts into a
+    session that could not take them.
+    """
     snap = st.get("snap") or {}
     # `scr` is what appeared since the last tick, not the whole screen: a banner
     # that is merely still on screen is the same limit, already announced, and
@@ -3229,18 +3226,8 @@ def agent_report(cfg, state, topic):
             note = "  ctx %.0f%%" % snap["ctx_pct"]
         rows.append("%s !%-9s %s%s" % (mark, k, sess, note))
     rest = [k for k in agents(cfg) if k not in bench]
-    text = ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
+    return ("\n".join(rows) + "\n\ndir: %s\n" % ((cfg.get("dirs") or {}).get(topic) or "?")
             + "bare !<agent> switches" + ("; not here yet: " + ", ".join(rest) if rest else ""))
-    
-    buttons = {"inline_keyboard": []}
-    row = []
-    for k in sorted(bench.keys()):
-        if bench[k] != cur:
-            row.append({"text": f"🔄 {k}", "callback_data": f"!{k}"})
-    if row:
-        buttons["inline_keyboard"].append(row)
-        
-    return (text, json.dumps(buttons)) if row else text
 
 
 def status_report(cfg, state):
@@ -3397,151 +3384,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "/slash and anything else -> typed into Claude")
     if cmd == "!log":
         return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
-    if cmd == "!memorize":
-        mem_path = os.path.expanduser("~/.nightmux_memory.txt")
-        with open(mem_path, "a") as f:
-            f.write(f"- {arg}\n")
-        return f"🧠 Saved to Memory Bank! (Avoid repeating this problem). Currently storing {len(open(mem_path).readlines())} memories."
-    if cmd == "!recall":
-        mem_path = os.path.expanduser("~/.nightmux_memory.txt")
-        if os.path.exists(mem_path):
-            return f"🧠 **Global Agent Memory Bank:**\n\n{open(mem_path).read()}"
-        return "🧠 Memory bank is empty."
-    if cmd == "!tmate" or cmd == "!ssh":
-        if not sess: return "no session bound"
-        out = run("bash", "-c", f"""
-        SOCK=/tmp/tmate_nightmux_{sess}.sock
-        env -u TMUX tmate -S $SOCK new-session -d "env -u TMUX tmux attach -t {sess}" >/dev/null 2>&1
-        env -u TMUX tmate -S $SOCK wait tmate-ready >/dev/null 2>&1
-        env -u TMUX tmate -S $SOCK display -p '{{{{tmate_web}}}}'
-        """)
-        if out and "http" in out:
-            return f"🌐 **SSH Drop-In Ready**\nClick here to instantly join the agent's terminal from any browser:\n{out.strip()}\n\n(Note: Press Ctrl+C in tmate to exit without killing the agent)"
-        return f"Failed to start tmate. Is it installed and ssh key configured?\nOutput: {out}"
-        
-    if cmd == "!fix":
-        if not arg.startswith("http"): return "Usage: !fix https://github.com/user/repo/issues/123"
-        parts = arg.split("/")
-        if len(parts) < 7: return "Invalid GitHub Issue URL"
-        repo, iss = parts[-3], parts[-1]
-        session_name = f"fix_{repo}_{iss}"
-        sys_prompt = f"Your goal is to fix issue #{iss}. Explore the codebase, write tests, make changes, and when done, submit a Pull Request."
-        bash_cmd = f"cd /tmp && git clone https://github.com/{parts[-4]}/{parts[-3]} {session_name} && cd {session_name} && echo 'Ready to fix issue #{iss}.' && $SHELL"
-        subprocess.Popen(["tmux", "new-session", "-d", "-s", session_name, bash_cmd])
-        return f"🛠️ **End-to-End Issue Solver Spawned!**\nCloned repo to `/tmp/{session_name}` and started an agent.\nUse `!bind {session_name}` to watch it work."
-        
-    if cmd == "!tdd":
-        if not sess: return "no session bound"
-        if not arg: return "Usage: !tdd <test_command> (e.g. !tdd npm run test)"
-        # Simple loop: run the test. If it fails, capture output and feed it back.
-        bash_cmd = f"{arg} || echo 'TDD_FAILED'"
-        run("tmux", "send-keys", "-t", sess, bash_cmd, "C-m")
-        return f"🔄 **Test-Driven Auto-Loop Active**\nRunning: `{arg}`\nIf it fails, the agent will automatically attempt to fix the code until it passes."
-        
-    if cmd == "!research":
-        if not sess: return "no session bound"
-        if not arg.startswith("http"): return "Usage: !research <url>"
-        # Fetch the URL, convert to text, pipe into tmux
-        run("bash", "-c", f"curl -s {arg} | head -c 2000 > /tmp/nightmux_research.txt")
-        run("tmux", "send-keys", "-t", sess, f"cat /tmp/nightmux_research.txt", "C-m")
-        return f"🌐 **Native Web Browsing**\nFetched `{arg}` and injected the context into the agent's workspace."
-        
-    if cmd == "!sandbox":
-        if not arg: return "Usage: !sandbox <repo_url>"
-        repo_name = arg.split("/")[-1].replace(".git", "")
-        session_name = f"sandbox_{repo_name}_{int(time.time())}"
-        # Start a Docker container with an agent shell
-        docker_cmd = f"docker run --rm -it -d --name {session_name} ubuntu:latest bash -c 'apt update && apt install -y git && git clone {arg} /workspace && cd /workspace && bash'"
-        subprocess.Popen(docker_cmd, shell=True)
-        return f"📦 **Docker Sandboxing**\nStarted a disposable, completely isolated container for `{repo_name}`.\nContainer Name: `{session_name}`."
-
-    if cmd == "!rollback":
-        if not sess: return "no session bound"
-        # Forcefully interrupt whatever the agent is doing
-        run("tmux", "send-keys", "-t", sess, "C-c", "C-c")
-        # Hard reset the repository to undo hallucinatory damage
-        run("tmux", "send-keys", "-t", sess, "git reset --hard HEAD && git clean -fd", "C-m")
-        return "⏪ **ROLLBACK INITIATED**\nAgent forcefully interrupted and repository reset to the last safe commit."
-        
-    if cmd == "!cat":
-        if not sess: return "no session bound"
-        if not arg: return "Usage: !cat <filename>"
-        cwd_path = _cwd.get(sess)
-        if not cwd_path: return "Could not determine agent's working directory."
-        target_file = os.path.join(cwd_path, arg)
-        if not os.path.exists(target_file):
-            return f"File not found: {target_file}"
-        ext = arg.split(".")[-1] if "." in arg else "txt"
-        try:
-            content = open(target_file).read()
-            if len(content) > 3000:
-                content = content[:3000] + "\n\n... [FILE TRUNCATED FOR TELEGRAM]"
-            return f"📄 **{arg}**\n```{ext}\n{content}\n```"
-        except Exception as e:
-            return f"Failed to read file: {e}"
-            
-    if cmd == "!secret":
-        if not sess: return "no session bound"
-        secret_file = os.path.expanduser("~/.nightmux_secrets")
-        if not arg:
-            if not os.path.exists(secret_file): return "Vault empty. Use `!secret KEY=val` to add."
-            keys = [line.split("=")[0] for line in open(secret_file) if "=" in line]
-            return "🔐 **Vault Keys:**\n" + "\n".join(keys) + "\n\nUse `!secret KEY` to inject it into the agent's shell."
-        if "=" in arg:
-            with open(secret_file, "a") as f:
-                f.write(arg + "\n")
-            return f"🔐 Secret `{arg.split('=')[0]}` encrypted and saved to vault."
-        else:
-            if not os.path.exists(secret_file): return "Vault empty."
-            for line in open(secret_file):
-                if line.startswith(arg + "="):
-                    val = line.strip().split("=", 1)[1]
-                    run("tmux", "send-keys", "-t", sess, f"export {arg}='{val}'", "C-m")
-                    return f"🔐 Securely injected `{arg}` into the agent's terminal!"
-            return f"Secret `{arg}` not found in vault."
-            
-    if cmd == "!deploy":
-        if not sess: return "no session bound"
-        # Run a generic deployment trigger
-        run("tmux", "send-keys", "-t", sess, "npm run deploy || vercel --prod || echo 'Deployment triggered'", "C-m")
-        return "🚀 **Deployment Triggered**\nInitiated production build and deployment pipeline in the background."
-
-    if cmd == "!export":
-        lines = arg if arg.isdigit() else "100"
-        if not sess:
-            return "no session bound to export"
-        out = run("tmux", "capture-pane", "-p", "-S", f"-{lines}", "-t", sess)
-        if not out:
-            return "no output to export"
-        out += "\n\n⚡ Managed by nightmux (⭐ https://github.com/mmr710/nightmux)"
-        return out
-    if cmd == "!share":
-        share_url = "https://twitter.com/intent/tweet?text=I%20just%20recovered%20my%20AI%20agent%20automatically%20using%20nightmux!%20%F0%9F%9A%80%20%E2%AD%90%20https%3A%2F%2Fgithub.com%2Fmmr710%2Fnightmux"
-        buttons = json.dumps({"inline_keyboard": [[{"text": "🐦 Share to Twitter", "url": share_url}]]})
-        return ("Click the button below to share your agent's success on Twitter and help us reach 500 stars!", buttons)
-    if cmd == "!usage":
-        if not sess:
-            return "no session bound to check usage"
-        pid = run("tmux", "list-panes", "-t", sess, "-F", "#{pane_pid}").strip()
-        if not pid:
-            return "could not determine pane pid"
-        out = run("ps", "--ppid", pid, "-o", "pid,%cpu,%mem,time,command")
-        if not out:
-            out = run("ps", "-p", pid, "-o", "pid,%cpu,%mem,time,command")
-        return f"💻 Resource usage for {sess}:\n<pre>{html.escape(out)}</pre>"
-    if cmd == "!report":
-        import urllib.request, urllib.parse
-        topics_count = len(cfg.get("topics", {}))
-        alive_count = len(live_sessions() or [])
-        chart_cfg = f"{{type:'outlabeledPie',data:{{labels:['Active Sessions','Total Topics'],datasets:[{{data:[{alive_count},{topics_count}]}}]}},options:{{title:{{display:true,text:'Nightmux Status'}},plugins:{{legend:False,outlabels:{{text:'%l %v',color:'white',stretch:35,font:{{resizable:true,minSize:12,maxSize:18}}}}}}}}}}"
-        url = "https://quickchart.io/chart?w=500&h=300&c=" + urllib.parse.quote(chart_cfg)
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'nightmux'})
-            img_data = urllib.request.urlopen(req, timeout=10).read()
-            send_file(cfg, topic, "nightmux_report.png", img_data, caption="Here is your Nightmux visual report! 📊\n\n⚡ Help us reach 500 stars! ⭐ https://github.com/mmr710/nightmux")
-            return None
-        except Exception as e:
-            return f"Failed to generate report image: {e}"
     if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
         with lock:
             cfg.update(load_cfg())
@@ -6234,8 +6076,7 @@ def selfcheck():
     assert len(spawned) == n, "switching back respawned instead of reusing"
     assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
     assert "already on codex" in handle(cfg2, {}, lk, "9", "!codex")
-    res = handle(cfg2, {}, lk, "9", "!agents")
-    assert "\u25cf !codex" in (res[0] if isinstance(res, tuple) else res)
+    assert "\u25cf !codex" in handle(cfg2, {}, lk, "9", "!agents")
     handle(cfg2, {}, lk, "9", "!agy named /tmp")   # with args: still start-by-name
     assert spawned[-1][0] == "named" and cfg2["bench"]["9"]["agy"] == "box-agy"
 
