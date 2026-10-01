@@ -316,6 +316,9 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+![Agent Chat UI](docs/agent_chat_ui.jpg)
+![Architecture Diagram](docs/architecture_diagram.jpg)
+
 ## Plugins
 
 Drop an executable file in `~/.nightmux-plugins/`; its filename becomes a
