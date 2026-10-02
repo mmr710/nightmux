@@ -626,7 +626,8 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r"|Requesting permission"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
-                     r"|\(y/n\)|Navigate ·|enter Confirm", re.M)
+                     r"|\(y/n\)|Navigate ·|enter Confirm"
+                     r"|Enter to select ·", re.M)   # Claude Code's select menu
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
 # Perusing… — so matching the word list caught almost nothing and read a working
@@ -1738,12 +1739,18 @@ def drain(cfg, state, topic, sess):
         elif not st.get("queue"):
             send(cfg, topic, f"▶️ {sess} usage window reset · resuming shift",
                  mode="plain")
-        elif st.get("mode") not in ("idle", "unknown"):
+        elif st.get("mode") != "idle":
             # The window is open and the queue still cannot move, which from the
             # topic looks exactly like a hold that never lifted. Say which it is.
+            # "unknown" belongs here too: the drain below only types into a pane
+            # it can read as idle, so treating unknown as idle in this branch
+            # cleared the hold, said nothing, and left the queue sitting.
+            mode = st.get("mode", "busy")
             send(cfg, topic, f"▶️ {sess} usage window reset · {len(st['queue'])} "
-                 f"queued, but the pane is {st.get('mode', 'busy')} — sending "
-                 "as soon as it is free", mode="plain")
+                 f"queued, but the pane is {mode} — sending as soon as it is free"
+                 + ("\nnightmux can't read that screen as idle · !pane to look, "
+                    "!raw <text> to type anyway" if mode == "unknown" else ""),
+                 mode="plain")
             st["resumed"] = True
         else:
             st["resumed"] = True     # the send below says "resumed", not "sending"
@@ -1863,6 +1870,11 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         st.setdefault("tbuf", []).extend(gained)
         st["last_gain"] = time.time()
     scr = visible(sess)
+    if scr and scr[0].startswith("[tmux timed out"):
+        # tmux did not answer: no reading this tick, not an unrecognised screen.
+        # Classifying the banner read every session as unknown under load —
+        # which holds prompts — and the transcript gain above stays in tbuf.
+        return
     if not fresh and not gained and scr == st.get("scr") and st["prev"] == st["sent"]:
         return  # nothing moved anywhere and nothing is pending: skip the big capture
     prev_scr = st.get("scr") or []   # what check_limit must not read as news
@@ -5558,6 +5570,25 @@ def selfcheck():
     st["limit_until"] = time.time() + 60
     assert queue_blob({"s": st})["s"]["limit_until"] > time.time()
     st.pop("limit_until")
+
+    # A reset with a queue and a pane read as "unknown" must hold AND say so.
+    # The silent version cleared the hold, told nobody, and typed nothing —
+    # which from the topic is "auto-resume after a limit does not work".
+    st["queue"], st["limit_until"], st["mode"] = ["after unknown"], time.time() - 1, "unknown"
+    n, typed[:] = len(sent), []
+    drain(cfg, state, "1", "s")
+    assert typed == [], typed                        # never types into an unread screen
+    assert len(sent) == n + 1 and "pane is unknown" in sent[-1], sent[n:]
+    assert "!raw" in sent[-1] and "limit_until" not in st
+    st["queue"], st["mode"] = [], "idle"
+    st.pop("resumed", None)
+
+    # tmux not answering is no reading: the last mode stands, not "unknown".
+    saved_screen, st["mode"] = screen[:], "busy"
+    screen[:] = ["[tmux timed out after 10s]"]
+    flush_new(cfg, state, "1", "s")
+    assert st["mode"] == "busy", st["mode"]
+    screen[:], st["mode"] = saved_screen, "idle"
 
     # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
     # and a busy pane exactly as a typed one does.
