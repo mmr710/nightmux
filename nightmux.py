@@ -4651,12 +4651,11 @@ def restore_held(cfg, state):
         topic = owners.get(sess)
         if topic is None:
             # No topic watches it, so nothing can ever release these or say so —
-            # they were "restored" on every restart, forever. The journal keeps
-            # what they were.
+            # they were "restored" on every restart, forever. A count, never the
+            # text: people paste tokens into prompts, and this goes to the journal.
             state.pop(sess, None)
             print(f"dropped held work for {sess} (no topic watches it): "
-                  f"{[p.splitlines()[0][:60] for p in held.get('queue') or []]}",
-                  flush=True)
+                  f"{len(held.get('queue') or [])} prompt(s)", flush=True)
             continue
         until, q, jobs, plan = held.get("limit_until", 0), held.get("queue") or [], \
             held.get("sched") or [], held.get("shift") or []
