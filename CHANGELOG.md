@@ -21,6 +21,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   `!git`/`!grep`. Never reaches a session's keyboard, so it runs in a
   read-only topic same as any other read command. `!plugins` lists what's
   there.
+- `!handoff <agent>` asks the current agent to summarise where it left off,
+  switches the topic to `<agent>`, and hands it that summary as its opening
+  prompt — the continuity bare `!<agent>` does not give you.
+- `!cron every <interval> <command>` — sugar for `!every` under a more
+  familiar name; `!sched` lists or clears what it schedules, same as
+  anything scheduled with `!at`/`!every`. `parse_every` (and so `!every`
+  too) now accepts seconds (`30s`) alongside `m`/`h`/`d`.
+- AI-generated UI mockups, architecture diagram, and a promo video in the
+  README (`docs/agent_chat_ui.jpg`, `docs/architecture_diagram.jpg`,
+  `docs/promo_video.mp4`).
 
 ### Fixed
 
