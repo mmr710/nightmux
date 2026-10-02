@@ -22,6 +22,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2336,6 +2337,7 @@ def watcher(cfg, state, lock):
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
             consult_tick(cfg, state)
+            auto_update_tick(cfg)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -2564,6 +2566,104 @@ def agents(cfg):
     out = dict(AGENTS)
     out.update(cfg.get("agents") or {})
     return out
+
+
+# ---------- keeping the agents themselves current ----------
+
+# How each built-in agent updates itself in place -- every one of these CLIs
+# ships its own updater now, so nightmux runs that rather than guessing at
+# package managers. cfg["update_cmds"] overrides or extends it per agent; an
+# empty string turns one off.
+UPDATES = {
+    "claude": "claude update",
+    "codex": "codex update",
+    "agy": "agy update",
+    "opencode": "opencode upgrade",
+    "gemini": "npm install -g @google/gemini-cli@latest",
+    "aider": "python3 -m pip install -U aider-chat",
+}
+UPDATE_TIMEOUT = 600
+UPDATE_STAMP = os.path.join(STATE_DIR, "last_update")
+_updating = threading.Lock()   # one run at a time: two installs into one prefix collide
+
+
+def agent_version(binary):
+    """First line of `<binary> --version`, or '?' when it says nothing."""
+    out = run(binary, "--version", timeout=20).strip()
+    return out.splitlines()[0][:60] if out else "?"
+
+
+def update_agents(cfg, only=None):
+    """Run each installed agent's own updater: [(key, before, after, error)].
+
+    Only agents whose binary is on PATH. A running session keeps the version
+    it started with until it is relaunched -- this never touches a session.
+    """
+    cmds = dict(UPDATES)
+    cmds.update(cfg.get("update_cmds") or {})
+    out = []
+    with _updating:
+        for key, spec in agents(cfg).items():
+            binary, cmd = spec[0], cmds.get(key)
+            if not cmd or (only and key not in only) or not shutil.which(binary):
+                continue
+            before = agent_version(binary)
+            try:
+                p = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=UPDATE_TIMEOUT)
+                err = None if p.returncode == 0 else (
+                    (p.stderr or p.stdout).strip().splitlines()
+                    or ["exit %d" % p.returncode])[-1][:160]
+            except (subprocess.TimeoutExpired, OSError) as e:
+                err = str(e)[:160]
+            out.append((key, before, agent_version(binary), err))
+    return out
+
+
+def update_report(results):
+    if not results:
+        return "no installed agent to update"
+    rows = [f"✗ {k}: {e}" if e else f"⬆️ {k}: {b} → {a}" if a != b else f"✓ {k}: {a}"
+            for k, b, a, e in results]
+    if any(a != b and not e for _, b, a, e in results):
+        rows.append("running sessions keep their old version until relaunched — "
+                    "!kill yes then !restore in a topic picks the conversation back up")
+    return "\n".join(rows)
+
+
+def update_every(cfg):
+    """Seconds between scheduled agent updates; 0 when auto_update is off.
+
+    Off unless the config says so: this runs installers unattended, which is
+    a call for whoever owns the box, not a default.
+    """
+    v = cfg.get("auto_update")
+    return 86400 if v is True else parse_every(v) if isinstance(v, str) else 0
+
+
+def auto_update_tick(cfg):
+    """Every watcher tick: start a background update run when one is due."""
+    every = update_every(cfg)
+    if not every or _updating.locked():
+        return
+    try:
+        with open(UPDATE_STAMP) as f:
+            last = float(f.read())
+    except (OSError, ValueError):
+        last = 0
+    if time.time() - last < every:
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(UPDATE_STAMP, "w") as f:   # before the run: a broken updater must
+        f.write(str(time.time()))        # not be retried every two seconds
+    threading.Thread(target=_auto_update, args=(cfg,), daemon=True).start()
+
+
+def _auto_update(cfg):
+    news = [r for r in update_agents(cfg) if r[3] or r[1] != r[2]]
+    if news:   # nothing changed and nothing failed is not worth a message
+        send(cfg, str(cfg.get("center_topic") or "0"),
+             "🔄 agent auto-update\n" + update_report(news), mode="plain")
 
 
 def agent(cfg, key):
@@ -3289,7 +3389,8 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!shift", "!center", "!all")
+              "!at", "!every", "!spendcap", "!shift", "!center", "!all",
+              "!update")   # runs installers on the host: no business in a read-only topic
 
 
 def writes(cfg, cmd, arg=""):
@@ -3358,6 +3459,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
+    if cmd == "!update":
+        if _updating.locked():
+            return "an agent update is already running"
+        send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
+        return update_report(update_agents(cfg, only=arg.split() or None))
     if cmd == "!help":
         return ("!bind <session> | !unbind | !sessions\n"
                 f"!new <name> [dir] [flags] [@branch], or !<agent>: "
@@ -3386,6 +3492,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!board = every topic at a glance (works anywhere)\n"
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
+                "!update [agent] = run each installed agent's own updater "
+                "(claude, codex, agy, opencode…); \"auto_update\": true in the "
+                "config does it daily\n"
                 "!grep <text> [days] searches every transcript\n"
                 f"!plugins = list executables in {PLUGIN_DIR}; any file there "
                 "is a command, its name the trigger\n"
@@ -5613,6 +5722,36 @@ def selfcheck():
     # and a busy pane exactly as a typed one does.
     assert parse_every("4h") == 14400 and parse_every("1d 6h") == 108000
     assert parse_every("no duration here") == 0
+
+    # !update: each installed agent's own updater, versions before and after.
+    # A fake agent whose updater bumps its version -- never a real installer.
+    import tempfile
+    ud = tempfile.mkdtemp(prefix="nightmux-selfcheck-update-")
+    ver, fake, bump = (os.path.join(ud, n) for n in ("ver", "fakeagent", "bump"))
+    with open(ver, "w") as f:
+        f.write("1.0\n")
+    with open(fake, "w") as f:
+        f.write(f"#!/bin/sh\ncat {ver}\n")
+    with open(bump, "w") as f:
+        f.write(f"#!/bin/sh\necho 1.1 > {ver}\n")
+    os.chmod(fake, 0o755), os.chmod(bump, 0o755)
+    ucfg = {"agents": {"fakeagent": [fake, ""]}, "update_cmds": {"fakeagent": bump}}
+    r = update_agents(ucfg, only=["fakeagent"])
+    assert r == [("fakeagent", "1.0", "1.1", None)], r
+    assert "⬆️ fakeagent: 1.0 → 1.1" in update_report(r) and "!restore" in update_report(r)
+    r = update_agents(ucfg, only=["fakeagent"])            # already current
+    assert r == [("fakeagent", "1.1", "1.1", None)], r
+    assert update_report(r) == "✓ fakeagent: 1.1"          # no relaunch nag
+    ucfg["update_cmds"]["fakeagent"] = "false"             # failing updater:
+    (k, b, a, e), = update_agents(ucfg, only=["fakeagent"])  # reported, not raised
+    assert e == "exit 1" and update_report([(k, b, a, e)]) == "✗ fakeagent: exit 1"
+    ucfg["update_cmds"]["fakeagent"] = ""                  # "" turns one off
+    assert update_agents(ucfg, only=["fakeagent"]) == []
+    assert update_report([]) == "no installed agent to update"
+    assert update_every({}) == 0 and update_every({"auto_update": False}) == 0
+    assert update_every({"auto_update": True}) == 86400
+    assert update_every({"auto_update": "12h"}) == 43200
+    shutil.rmtree(ud, ignore_errors=True)
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)
