@@ -1778,12 +1778,12 @@ def drain(cfg, state, topic, sess):
             send(cfg, topic, f"🌙 {sess} shift done", mode="plain")
 
 
-DUR = re.compile(r"(\d+)\s*([dhm])")
+DUR = re.compile(r"(\d+)\s*([dhms])")
 
 
 def parse_every(text):
-    """'4h', '90m', '1d 6h' -> seconds. Zero for anything that says no duration."""
-    return sum(int(n) * {"d": 86400, "h": 3600, "m": 60}[u]
+    """'4h', '90m', '1d 6h', '30s' -> seconds. Zero for anything with no duration."""
+    return sum(int(n) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u]
                for n, u in DUR.findall(text.lower()))
 
 
@@ -1983,7 +1983,9 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                    lines, prompt_key(lines)):
             return
     elif body:
-        if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body):
+        if (not consult_capture(topic, sess, body)
+                and not plan_capture(cfg, state, topic, sess, body)
+                and not handoff_capture(topic, sess, body)):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
     else:
         return
@@ -2319,6 +2321,7 @@ def watcher(cfg, state, lock):
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
             consult_tick(cfg, state)
+            handoff_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -2894,6 +2897,74 @@ def plan_capture(cfg, state, topic, sess, body):
     return True
 
 
+# topic -> {"sess": the session handing off, "key": the agent taking over}.
+# Transient like _plan/_consult: a handoff in flight is a conversation, and
+# one restored into a different session after a restart is worse than asking
+# again.
+_handoff = {}
+
+
+def handoff_agent(cfg, state, lock, topic, arg):
+    """!handoff <agent>: ask the current agent to summarise where it left off,
+    then switch to <agent> with that summary as its opening prompt.
+
+    Bare !<agent> switches the topic but starts the new agent cold -- it never
+    saw what the one before it was doing. This is the version with continuity:
+    the outgoing agent's own account of the work becomes the incoming one's
+    first prompt.
+    """
+    key = arg.strip().split()[0].lower() if arg.strip() else ""
+    if not key or key not in agents(cfg):
+        return ("usage: !handoff <agent> — e.g. !handoff codex\n"
+                "known: " + ", ".join(agents(cfg)))
+    cur_sess = cfg.get("topics", {}).get(topic)
+    if not cur_sess or not has_session(cur_sess):
+        return "no live session here to hand off from"
+    if bench_of(cfg, topic).get(key) == cur_sess:
+        return f"already on {key}"
+    if str(topic) in _handoff:
+        return "a handoff is already in flight here"
+    _handoff[str(topic)] = {"sess": cur_sess, "key": key}
+    reply = send_prompt(cfg, state, topic, cur_sess,
+                        "Summarise, in a few sentences, exactly what you were "
+                        "doing and what is left -- this is going to another "
+                        "agent to continue the work.")
+    if reply:          # held, queued, or refused: say so, nothing to wait on
+        del _handoff[str(topic)]
+        return reply
+    return f"🔄 asking {cur_sess} to summarise before handing off to {key}..."
+
+
+def handoff_capture(topic, sess, body):
+    """True when this finished turn is a handoff summary, not an answer to you.
+
+    Mirrors consult_capture's shape exactly -- no cfg/lock here on purpose.
+    switch_agent needs the config lock, which a capture running mid-flush_new
+    does not have; this only stashes the summary, and handoff_tick (which runs
+    where the lock already is, right beside consult_tick) does the switch.
+    """
+    h = _handoff.get(str(topic))
+    if not h or h["sess"] != sess or "summary" in h:
+        return False
+    h["summary"] = body
+    return True
+
+
+def handoff_tick(cfg, state, lock):
+    """Finish any handoff whose summary has landed: switch, then hand the
+    summary to the agent taking over as its opening prompt."""
+    for topic, h in list(_handoff.items()):
+        if "summary" not in h:
+            continue
+        del _handoff[topic]
+        out = switch_agent(cfg, state, lock, topic, h["key"])
+        new_sess = cfg.get("topics", {}).get(topic)
+        if new_sess and new_sess != h["sess"] and has_session(new_sess):
+            send_prompt(cfg, state, topic, new_sess,
+                        f"Picking up from {h['sess']}:\n\n{h['summary']}")
+        send(cfg, topic, f"🔄 handed off {h['sess']} → {h['key']}\n{out}", mode="plain")
+
+
 def consult_tick(cfg, state):
     """Advance any running consultation. One call per watch tick, not per session."""
     for topic in list(_consult):
@@ -3270,7 +3341,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes", "!handoff", "!cron",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -3314,6 +3385,34 @@ def run_plugin(cwd, name, arg):
     return body or f"!{name} produced no output (exit {out.returncode})"
 
 
+
+def cron_command(cfg, state, topic, arg):
+    """!cron every <interval> <command>: sugar for !every, under the more
+    familiar unix name. The jobs it creates ARE !every's jobs -- held through
+    a limit, surviving a restart, firing through the one scheduler nightmux
+    already has, tested, rather than a second one next to it. !sched lists or
+    clears anything scheduled with !at/!every/!cron alike.
+    """
+    arg = arg.strip()
+    if arg in ("", "list", "clear"):
+        return "!cron only schedules — !sched lists what's running, !sched clear drops it"
+    sess = cfg.get("topics", {}).get(topic)
+    if not sess:
+        return "topic not bound. !bind <session> or !new <name> [dir]"
+    parts = arg.split(" ", 2)
+    if len(parts) < 3 or parts[0] != "every":
+        return "usage: !cron every <interval> <command> — e.g. !cron every 5m check the build"
+    secs = parse_every(parts[1])
+    if not secs:
+        return f"'{parts[1]}' isn't a duration — try 30s, 5m, 4h, 1d"
+    st = state.setdefault(sess, {})
+    st.setdefault("sched", []).append(
+        {"at": time.time() + secs, "every": secs, "text": parts[2]})
+    save_queue(state)
+    return (f"⏰ every {parts[1]} (first in {left(secs)})\n{parts[2].splitlines()[0][:70]}\n"
+            "!sched to list, !sched clear to drop")
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -3354,6 +3453,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "topic's agent\n"
                 "!plan <big task> = agent breaks it into steps, runs them one "
                 "at a time like !shift\n"
+                "!handoff <agent> = current agent summarises, then switches, "
+                "summary becomes the new agent's first prompt\n"
+                "!cron every <interval> <command> = sugar for !every; !sched "
+                "lists or clears it\n"
                 "!autoyes <agent|off> = answer that agent's own permission menus "
                 "for it\n"
                 "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
@@ -3456,6 +3559,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return use_prompt(cfg, state, topic, arg)
     if cmd == "!plan":
         return plan_start(cfg, state, topic, arg)
+    if cmd == "!handoff":
+        return handoff_agent(cfg, state, lock, topic, arg)
+    if cmd == "!cron":
+        return cron_command(cfg, state, topic, arg)
     if cmd == "!autoyes":
         cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
         if arg in ("off", "none"):
@@ -4578,6 +4685,7 @@ def main():
             dispatch(cfg, state, lock, allow, upd, acks)
 
 
+
 def process(cfg, state, lock, allow, upd):
     cq = upd.get("callback_query")
     msg = cq["message"] if cq else (upd.get("message") or {})
@@ -5562,6 +5670,7 @@ def selfcheck():
     # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
     # and a busy pane exactly as a typed one does.
     assert parse_every("4h") == 14400 and parse_every("1d 6h") == 108000
+    assert parse_every("30s") == 30 and parse_every("90m") == 5400
     assert parse_every("no duration here") == 0
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
@@ -6230,7 +6339,40 @@ def selfcheck():
     with stubbed(PLUGIN_DIR="/no/such/dir"):
         assert "no plugins in" in handle(cfg2, {}, lk, "9", "!plugins")
 
-    _plan.clear(), _consult.clear()
+    # !cron: sugar for !every -- same scheduler, same !sched listing, not a
+    # second one next to it that silently never fires.
+    cstate = {}
+    assert "isn't a duration" in handle(cfg2, cstate, lk, "9", "!cron every xyz ping")
+    assert "usage: !cron every" in handle(cfg2, cstate, lk, "9", "!cron do a thing")
+    out = handle(cfg2, cstate, lk, "9", "!cron every 30s check the build")
+    assert out.startswith("⏰ every 30s"), out
+    assert "check the build" in handle(cfg2, cstate, lk, "9", "!sched")
+    assert "lists what's running" in handle(cfg2, cstate, lk, "9", "!cron list")
+    assert "dropped 1 scheduled" in handle(cfg2, cstate, lk, "9", "!sched clear")
+
+    # !handoff: the outgoing agent summarises, then the topic switches and the
+    # incoming agent gets that summary as its opening prompt.
+    hstate, hsent, hprompts = {}, [], []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: hsent.append(x),
+                 send_prompt=lambda c, st, t, se, tx, mid=None: hprompts.append((se, tx))):
+        assert "usage: !handoff" in handoff_agent(cfg2, hstate, lk, "9", "")
+        assert "usage: !handoff" in handoff_agent(cfg2, hstate, lk, "9", "nosuchagent")
+        out = handoff_agent(cfg2, hstate, lk, "9", "agy")
+        assert out.startswith("🔄 asking box"), out
+        assert hprompts[-1][0] == "box" and "Summarise" in hprompts[-1][1]
+        assert "already in flight" in handoff_agent(cfg2, hstate, lk, "9", "agy")
+        assert handoff_capture("9", "somebody-else", "x") is False
+        assert handoff_capture("9", "box", "Was refactoring the parser.") is True
+        assert handoff_capture("9", "box", "second try") is False   # one summary only
+        n = len(hprompts)
+        handoff_tick(cfg2, hstate, lk)
+        assert cfg2["topics"]["9"] == "box-agy", cfg2["topics"]["9"]
+        assert any("Picking up from box" in tx and "refactoring the parser" in tx
+                  for se, tx in hprompts[n:]), hprompts[n:]
+        assert any("handed off box → agy" in x for x in hsent), hsent
+    cfg2["topics"]["9"], cfg2["started"]["9"] = "box", "codex"   # put it back
+
+    _plan.clear(), _consult.clear(), _handoff.clear()
     cfg2["topics"]["9"], cfg2["started"]["9"], cfg2["bench"]["9"] = was9
 
     # The watcher has to read every agent a topic can be written to, or a
