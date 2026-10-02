@@ -387,6 +387,7 @@ the classifier is held to it from then on.
   "auto_continue": "continue",
   "modes": {"115": "readonly"},
   "auto_update": "1d",
+  "failover": "codex",
   "poll": 2
 }
 ```
@@ -401,6 +402,12 @@ reboot killed, nightmux checks each bound topic against tmux at startup: with
 on its own — `!restore` does the same relaunch on demand. `projects_root` makes
 a new topic named after a directory start that project on its first message.
 `!reload` picks up hand edits without a restart.
+
+`failover` names the agent a topic hands its held work to the moment its
+agent hits a usage limit — the working tree and the cut-off instruction go to
+`codex` (or whoever) instead of waiting hours for the reset. Without it, the
+limit message offers the same thing as one-tap buttons; `!failover <agent>`
+does it by hand.
 
 `auto_update` (`true` = daily, or an interval like `"12h"`; off by default)
 runs each installed agent's own updater on that schedule — `claude update`,
