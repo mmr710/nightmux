@@ -3270,7 +3270,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes", "!handoff", "!cron", "!cost",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all")
 
@@ -3314,6 +3314,38 @@ def run_plugin(cwd, name, arg):
     return body or f"!{name} produced no output (exit {out.returncode})"
 
 
+
+import threading, time as time_mod
+_cron_jobs = []
+
+def cron_command(cfg, state, topic, arg):
+    arg = arg.strip()
+    if not arg or arg == "list":
+        return "Cron jobs:\n" + "\n".join(f"{i}: {j['interval']} -> {j['cmd']}" for i,j in enumerate(_cron_jobs))
+    if arg == "clear":
+        _cron_jobs.clear()
+        return "Cron cleared."
+    
+    parts = arg.split(" ", 2)
+    if len(parts) < 3 or parts[0] != "every":
+        return "usage: !cron every <seconds> <command>"
+    
+    try:
+        sec = int(parts[1])
+    except:
+        return "invalid seconds"
+    
+    _cron_jobs.append({"interval": sec, "cmd": parts[2], "last": time_mod.time(), "topic": topic})
+    return f"Cron added: runs every {sec}s"
+
+def run_cron_jobs(cfg, state, lock):
+    now = time_mod.time()
+    for job in _cron_jobs:
+        if now - job["last"] >= job["interval"]:
+            job["last"] = now
+            with lock:
+                # Add to queue like a typed message
+                state.setdefault("queue", []).append((job["topic"], job["cmd"], None))
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -3456,6 +3488,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return use_prompt(cfg, state, topic, arg)
     if cmd == "!plan":
         return plan_start(cfg, state, topic, arg)
+    if cmd == "!handoff":
+        return handoff_agent(cfg, state, lock, topic, arg)
+    if cmd == "!cron":
+        return cron_command(cfg, state, topic, arg)
     if cmd == "!autoyes":
         cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
         if arg in ("off", "none"):
@@ -4578,6 +4614,11 @@ def main():
             dispatch(cfg, state, lock, allow, upd, acks)
 
 
+
+def transcribe_audio(path):
+    # Dummy whisper implementation for now
+    return f"[Transcribed Voice Note: {{path}}]"
+
 def process(cfg, state, lock, allow, upd):
     cq = upd.get("callback_query")
     msg = cq["message"] if cq else (upd.get("message") or {})
@@ -4617,7 +4658,11 @@ def process(cfg, state, lock, allow, upd):
         if not path:
             send(cfg, topic, "download failed")
             return
-        text = f"{text}\n{path}".strip()
+        if voice:
+            transcription = transcribe_audio(path)
+            text = f"{text}\n{transcription}".strip()
+        else:
+            text = f"{text}\n{path}".strip()
     try:
         # cq: the tap already has its own feedback, so no reaction on the button
         reply = handle(cfg, state, lock, topic, text,
