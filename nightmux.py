@@ -2162,7 +2162,11 @@ def watchdog(cfg, state, topic, sess, alive):
     st = state.setdefault(sess, {})
     if not alive and not st.get("dead"):
         st["dead"] = True
-        send(cfg, topic, f"💀 tmux session '{sess}' is gone", mode="plain")
+        # Only a death this run actually saw. A benched agent that was already
+        # gone when the daemon started is not news, and announcing every one of
+        # them at once is what tripped Telegram's 429 on every restart.
+        if st.get("seen"):
+            send(cfg, topic, f"💀 tmux session '{sess}' is gone", mode="plain")
     elif alive and st.get("dead"):
         # Rebuilt session: rebaseline instead of dumping its whole scrollback —
         # but a hold and the prompts under it are what the user is owed, not a
@@ -2173,6 +2177,7 @@ def watchdog(cfg, state, topic, sess, alive):
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     if alive:
         st = state.setdefault(sess, {})          # the branch above rebinds it
+        st["seen"] = True
         if agentless(sess):
             # ponytail: two ticks, not one. A session is a bare shell for the
             # moment between `tmux new-session` and the agent starting under it,
@@ -4528,6 +4533,33 @@ def run_webhook_server(cfg, state, lock, allow, port):
     server.serve_forever()
 
 
+def restore_held(cfg, state):
+    """Bring back held work from disk, told to the topic that owns it."""
+    owners = {}
+    for t, s in watched(cfg):      # benched agents too, not just cfg["topics"]
+        owners.setdefault(s, t)
+    for sess, held in load_queue(state).items():
+        topic = owners.get(sess)
+        if topic is None:
+            # No topic watches it, so nothing can ever release these or say so —
+            # they were "restored" on every restart, forever. The journal keeps
+            # what they were.
+            state.pop(sess, None)
+            print(f"dropped held work for {sess} (no topic watches it): "
+                  f"{[p.splitlines()[0][:60] for p in held.get('queue') or []]}",
+                  flush=True)
+            continue
+        until, q, jobs, plan = held.get("limit_until", 0), held.get("queue") or [], \
+            held.get("sched") or [], held.get("shift") or []
+        kept = ", ".join(([f"{len(q)} queued prompt(s)"] if q else [])
+                         + ([f"{len(jobs)} scheduled"] if jobs else [])
+                         + ([f"{len(plan)} shift step(s)"] if plan else []))
+        print(f"restored {kept} for {sess}", flush=True)
+        send(cfg, topic, f"↩️ nightmux restarted · {kept} kept"
+             + (f", still holding until {clock(cfg, until)}"
+                if until > time.time() else ""), mode="plain")
+
+
 def main():
     migrate()
     cfg = load_cfg()
@@ -4541,18 +4573,7 @@ def main():
     # Before the watcher runs, or its first save would overwrite the file with
     # the empty state it starts from.
     _warned.update(load_warned())   # a restart is not news for a window mid-flight
-    for sess, held in load_queue(state).items():
-        topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
-        until, q, jobs, plan = held.get("limit_until", 0), held.get("queue") or [], \
-            held.get("sched") or [], held.get("shift") or []
-        kept = ", ".join(([f"{len(q)} queued prompt(s)"] if q else [])
-                         + ([f"{len(jobs)} scheduled"] if jobs else [])
-                         + ([f"{len(plan)} shift step(s)"] if plan else []))
-        print(f"restored {kept} for {sess}", flush=True)
-        if topic:
-            send(cfg, topic, f"↩️ nightmux restarted · {kept} kept"
-                 + (f", still holding until {clock(cfg, until)}"
-                    if until > time.time() else ""), mode="plain")
+    restore_held(cfg, state)
     # Recreate what a reboot kills before the watcher's first tick can find a
     # session missing and a queue with nowhere to go.
     live_sessions()  # Populate _shell so agentless() can accurately restart crashed agents
@@ -4636,9 +4657,7 @@ def process(cfg, state, lock, allow, upd):
                        None if cq else msg.get("message_id"))
     except Exception as e:
         reply = f"error: {e}"
-    if isinstance(reply, tuple):
-        send(cfg, topic, reply[0], buttons=reply[1])
-    elif reply:
+    if reply:
         send(cfg, topic, reply)
 
 
@@ -5953,10 +5972,29 @@ def selfcheck():
 
     cfg["topics"] = {"1": "s"}                    # status + watchdog
     assert "✅ s" in status_report(cfg, state) and "topic 1" in status_report(cfg, state)
+    n = len(sent)                                 # gone before this run ever saw it:
+    assert watchdog(cfg, state, "1", "ghost", False) is False and len(sent) == n
+    assert state.pop("ghost")["dead"]             # marked, not announced
+    state["s"]["seen"] = True                     # "s" was alive earlier this run
     assert watchdog(cfg, state, "1", "s", False) is False and "💀" in sent[-1]
     n = len(sent)
     watchdog(cfg, state, "1", "s", False)         # dead stays quiet after the first
     assert len(sent) == n
+
+    # Held work for a session no topic watches is dropped, not "restored" on
+    # every restart forever; a benched agent's is its topic's, and kept.
+    rcfg = {"topics": {"1": "s"}, "started": {"1": "claude"},
+            "bench": {"1": {"claude": "s", "agy": "s-agy"}}}
+    rstate = {}
+
+    def fake_load(st):
+        held = {"orphan": {"queue": ["lost"]}, "s-agy": {"queue": ["kept"]}}
+        st.update({k: dict(v) for k, v in held.items()})
+        return held
+    with stubbed(load_queue=fake_load):
+        restore_held(rcfg, rstate)
+    assert "orphan" not in rstate and rstate["s-agy"]["queue"] == ["kept"], rstate
+    assert len(sent) == n + 1 and "1 queued prompt(s) kept" in sent[-1], sent[n:]
     state["s"].update(queue=["held"], limit_until=time.time() + 60, scr=["junk"])
     watchdog(cfg, state, "1", "s", True)
     assert "↩️" in sent[-1] and "scr" not in state["s"]   # rebaselined, no dump
