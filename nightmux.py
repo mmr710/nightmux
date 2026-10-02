@@ -2491,6 +2491,26 @@ PASSTHRU = [
     ("review", "review the pending changes"), ("rewind", "undo to a checkpoint"),
     ("permissions", "edit tool permissions"), ("mcp", "MCP server status"),
     ("doctor", "diagnose the install"), ("export", "export the conversation"),
+    # Everything below passes straight to Claude Code same as the rest of
+    # PASSTHRU. Deliberately NOT listed: /exit and /stop, which end the
+    # session with no confirmation -- !kill asks first and this list should
+    # not make it one autocomplete tap to lose a session; and the desktop/
+    # billing/skill-trigger commands (theme, login, artifact-*, loop,
+    # remote-control, teleport, …) that don't mean anything run headless
+    # over Telegram or duplicate a feature nightmux already has its own,
+    # better-fitted version of (!at/!every hold through a limit; /loop does not).
+    ("init", "write CLAUDE.md for this project"),
+    ("plan", "enter plan mode"),
+    ("security-review", "check the pending changes for security issues"),
+    ("verify", "verify the last change actually works"),
+    ("status", "Claude Code's own settings and account status"),
+    ("sandbox", "toggle sandboxed execution"),
+    ("hooks", "view configured hooks"),
+    ("recap", "summarize this session"),
+    ("goal", "set the goal Claude is working toward"),
+    ("add-dir", "grant file access to another directory"),
+    ("config", "Claude Code's own settings UI"),
+    ("insights", "session analysis"),
 ]
 
 
@@ -2645,8 +2665,9 @@ def bound_to(cfg, name, topic):
 # front gets agreement rather than a second opinion, and agreement between two
 # models that read each other is worth much less than two independent reads.
 CONSULT_R1 = """[nightmux consult - round 1 of 2]
-You and another AI coding agent have been given this same question, separately.
-Answer for yourself. In the next round you will be shown what the other said.
+You and {n_others} other AI coding agent(s) have been given this same question,
+separately. Answer for yourself. In the next round you will be shown what the
+others said.
 
 QUESTION
 {q}
@@ -2660,17 +2681,15 @@ Do not ask me anything. Where something is unspecified, state your assumption
 and carry on."""
 
 CONSULT_R2 = """[nightmux consult - round 2 of 2]
-This is how {other} answered the same question.
+Here is how the other agent(s) answered the same question.
 
---- {other} said ---
-{body}
---- end of {other} ---
+{others}
 
 First, one or two lines: where are they right and you were not, or where do you
 still disagree, and why.
 
 Then write THE PROMPT - one self-contained prompt that could be handed to a
-coding agent to get this done properly, folding in whatever of their answer
+coding agent to get this done properly, folding in whatever of their answer(s)
 beats yours. Put it in a single fenced block, last, with nothing after it."""
 
 CONSULT_TIMEOUT = 900   # a round nobody finished in this long is given up on
@@ -2736,14 +2755,15 @@ def consult_start(cfg, state, topic, question):
     _consult[str(topic)] = c = {"q": question.strip(), "round": 1, "want": live,
                                 "got": {}, "at": time.time(), "r1": {}}
     for sess in live:
-        send_prompt(cfg, state, topic, sess, CONSULT_R1.format(q=c["q"]))
+        send_prompt(cfg, state, topic, sess,
+                    CONSULT_R1.format(q=c["q"], n_others=len(live) - 1))
     return ("🤝 consult round 1 - asking %s, separately\n"
             "they read each other in round 2; I will come back with the prompt"
             % ", ".join(sorted(live.values())))
 
 
 def consult_advance(cfg, state, topic, c):
-    """Round 1 is in. Give each agent the others' answers and ask for one prompt.
+    """Round 1 is in. Give each agent everyone else's answer and ask for one prompt.
 
     True when the consultation is already finished and the caller should drop it:
     one answer is not a consultation, and there is nothing to cross-read.
@@ -2752,14 +2772,14 @@ def consult_advance(cfg, state, topic, c):
     if len(c["r1"]) < 2:
         consult_report(cfg, topic, c)
         return True
-    send(cfg, topic, "🤝 consult round 2 - each now reads the other", mode="plain")
+    send(cfg, topic, "🤝 consult round 2 - each now reads the rest", mode="plain")
     answered, c["round"], c["at"] = dict(c["got"]), 2, time.time()
     c["want"] = {s: k for s, k in c["want"].items() if s in answered}
     c["got"] = {}
     for sess, key in c["want"].items():
-        other = next((k for k in c["r1"] if k != key), None)
-        send_prompt(cfg, state, topic, sess,
-                    CONSULT_R2.format(other=other, body=c["r1"][other]))
+        others = "\n\n".join(f"--- {k} said ---\n{b}\n--- end of {k} ---"
+                             for k, b in c["r1"].items() if k != key)
+        send_prompt(cfg, state, topic, sess, CONSULT_R2.format(others=others))
     return False
 
 
@@ -2780,18 +2800,27 @@ def consult_report(cfg, topic, c):
     _verdict[str(topic)] = dict(with_prompt)
     # The whole point is the prompt, and a prompt you have to retype on a phone
     # is a prompt that does not get run. One tap sends it to the agent this
-    # topic is on.
-    run = ([("run it", "!use")] if agreed else
-           [("run %s's" % k, "!use " + k) for k, _ in with_prompt][:3])
+    # topic is on. Rows of 3 rather than a hard cap, so a consult with more
+    # than 3 agents still gets a button for every one of them.
+    if agreed:
+        rows = [[("run it", "!use")]]
+    else:
+        buttons = [("run %s's" % k, "!use " + k) for k, _ in with_prompt]
+        rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     send(cfg, topic, "🤝 consult done - %s\nQ: %s\n%s" % (
         named, c["q"][:200],
         "they landed on the same prompt" if agreed else
-        "they differ; both are below, yours to pick"), mode="plain",
-        buttons=kb([run]))
-    for k, prompt in with_prompt:
-        send(cfg, topic, "%s's prompt\n\n%s" % (k, prompt))
-        if agreed:
-            break
+        "they differ (%d prompts); pick below, or read each" % len(with_prompt)),
+        mode="plain", buttons=kb(rows))
+    if agreed:
+        send(cfg, topic, "%s's prompt\n\n%s" % (with_prompt[0][0], with_prompt[0][1]))
+    elif len(with_prompt) <= 2:
+        for k, prompt in with_prompt:
+            send(cfg, topic, "%s's prompt\n\n%s" % (k, prompt))
+    else:
+        # More than 2 disagree: one message with every prompt in it instead of
+        # flooding the topic with a full message per agent.
+        send(cfg, topic, "\n\n".join(f"— {k} —\n{p}" for k, p in with_prompt))
     return None
 
 
@@ -3081,9 +3110,17 @@ def start_session(cfg, state, lock, topic, arg, key):
     prog, _ = agent(cfg, key)
     name, _, rest = arg.partition(" ")
     rest = rest.strip()
-    if not name:
-        return f"usage: !{key} <name> [dir] [flags] [@branch]"
+    auto_named = not name
+    if auto_named:
+        # Bare !<agent>, nothing to go on: one obvious way to start is to just
+        # type the agent's name, so give it a name and a home instead of a
+        # usage string. A name or dir after it still overrides this.
+        base = os.path.basename(((cfg.get("dirs") or {}).get(topic) or "").rstrip("/")) \
+            or ("topic%s" % topic)
+        name = base if base.endswith("-" + key) else "%s-%s" % (base, key)
     if has_session(name):
+        return (f"'{name}' exists; use !bind {name}" if not auto_named else
+                f"'{name}' exists; use !{key} <name> [dir] to start a differently-named one")
         return f"'{name}' exists; use !bind {name}"
     if rest.startswith(("~", "/", ".")):        # dir first, anything after is flags
         cwd, _, flags = rest.partition(" ")
@@ -3120,8 +3157,9 @@ def start_session(cfg, state, lock, topic, arg, key):
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
-    return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
-            "topic bound").replace("  ", " ")
+    return (f"started {prog} {flags} '{name}' in {cwd}{note}, topic bound"
+            + (f"\n(auto-named and in ~ — !{key} <name> <dir> to choose both)" if auto_named else "")
+            ).replace("  ", " ")
 
 
 def autostart(cfg):
@@ -6213,6 +6251,35 @@ def selfcheck():
             consult_tick(cfg2, {})
         assert any("box-agy is gone" in x for x in csent), csent
         assert "9" not in _consult, "a lone survivor should report, not wait"
+        # three agents: round 1 says "2 other", round 2 shows each the other
+        # two (never its own round-1 answer), and a three-way disagreement is
+        # one consolidated message instead of three separate ones.
+        _consult.clear(), csent.clear(), cprompts.clear()
+        cfg2["bench"]["9"]["opencode"] = "box-oc"
+        try:
+            out = consult_start(cfg2, {}, "9", "three-way?")
+            assert "round 1" in out and len(cprompts) == 3, out
+            assert all("2 other" in tx for _, tx in cprompts), cprompts
+            consult_capture("9", "box", "codex says A")
+            consult_capture("9", "box-agy", "agy says B")
+            consult_capture("9", "box-oc", "opencode says C")
+            n = len(cprompts)
+            consult_tick(cfg2, {})
+            assert len(cprompts) == n + 3, "round 2 did not reach all three"
+            codex_r2 = next(tx for se, tx in cprompts[-3:] if se == "box")
+            assert ("agy says B" in codex_r2 and "opencode says C" in codex_r2
+                    and "codex says A" not in codex_r2), codex_r2
+            consult_capture("9", "box", "```\nPLAN A\n```")
+            consult_capture("9", "box-agy", "```\nPLAN B\n```")
+            consult_capture("9", "box-oc", "```\nPLAN C\n```")
+            consult_tick(cfg2, {})
+            assert "9" not in _consult
+            assert any("3 prompts" in x for x in csent), csent[-3:]
+            assert sum("PLAN A" in x for x in csent) == 1, "flooded instead of consolidating"
+            combo = next(x for x in csent if "PLAN A" in x)
+            assert "PLAN B" in combo and "PLAN C" in combo, combo
+        finally:
+            del cfg2["bench"]["9"]["opencode"]
         # a round nobody answers is given up on, not left hanging
         _consult.clear(), csent.clear()
         consult_start(cfg2, {}, "9", "silence?")

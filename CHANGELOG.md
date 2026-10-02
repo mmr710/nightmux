@@ -21,8 +21,26 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   `!git`/`!grep`. Never reaches a session's keyboard, so it runs in a
   read-only topic same as any other read command. `!plugins` lists what's
   there.
+- The Telegram `/` picker now registers 12 more Claude Code native commands
+  (`/init`, `/plan`, `/security-review`, `/verify`, `/status`, `/sandbox`,
+  `/hooks`, `/recap`, `/goal`, `/add-dir`, `/config`, `/insights`) alongside
+  the ones already there. They pass straight through to the agent, same as
+  before — this only makes them autocomplete. `/exit` and `/stop` are
+  deliberately left out: they end a session with no confirmation, unlike
+  `!kill`, and a command picker shouldn't make that one tap.
+- `!consult` is no longer capped at exactly two agents — every live agent on
+  a topic's bench joins a round, each reads everyone else's answer (not just
+  one) going into round two, and more than two landing on different prompts
+  now get one consolidated message instead of a full message per agent.
 
 ### Fixed
+
+- Bare `!<agent>` on a topic with no known directory used to return a bare
+  `usage: !agy <name> [dir] [flags] [@branch]` and stop there — the single
+  biggest first-use friction point in agent routing. It now starts a
+  sensibly-named session in `~` instead, same as `!new` with no name; an
+  explicit name or directory still overrides it. Switching an already-bound
+  topic to another agent is unchanged.
 
 - `pane_state()` read anything that didn't match a known busy pattern as idle —
   including a screen it had never seen before, which is exactly the case a
