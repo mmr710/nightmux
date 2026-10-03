@@ -1175,7 +1175,76 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
          f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
          + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
-            else "anything you send is queued"), mode="plain")
+            else "anything you send is queued"), mode="plain",
+         buttons=failover_buttons(cfg, topic, sess))
+
+
+def installed_agents(cfg):
+    """Agent keys whose command is on PATH."""
+    return [k for k, v in agents(cfg).items() if shutil.which(v[0])]
+
+
+def failover_buttons(cfg, topic, sess):
+    """One tap to hand a held topic to another installed agent, up to three."""
+    if cfg.get("topics", {}).get(topic) != sess:   # a benched agent: not the topic's
+        return None
+    was = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+    alts = [k for k in installed_agents(cfg) if k != was][:3]
+    return kb([[("⏭ hand to " + k, "!failover " + k) for k in alts]]) if alts else None
+
+
+def failover(cfg, state, lock, topic, key):
+    """!failover <agent>: hand a limit-held topic's work to another agent now,
+    instead of waiting hours for the window to reset.
+
+    !handoff's summary step is no use here — the agent that hit its limit can't
+    answer anything. What the next agent gets instead is the working tree, which
+    is where the work actually is, and the instruction that was cut off.
+    """
+    cur = cfg.get("topics", {}).get(topic)
+    st = state.get(cur) or {}
+    if not cur or st.get("limit_until", 0) <= time.time():
+        return "nothing is held on a usage limit here"
+    was = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+    if key == was:
+        return f"{key} is the one that hit the limit"
+    if key not in installed_agents(cfg):
+        return (f"no {key or 'agent'} installed to hand to — installed: "
+                + ", ".join(k for k in installed_agents(cfg) if k != was))
+    held, last = st.pop("queue", None) or [], st.get("last")
+    out = switch_agent(cfg, state, lock, topic, key)
+    new = cfg.get("topics", {}).get(topic)
+    if new == cur or not has_session(new):
+        st["queue"] = held          # the switch did not happen: nothing moves
+        save_queue(state)
+        return out
+    # The "continue" check_limit queued means nothing to an agent that never saw
+    # the turn; the brief replaces it. A refused prompt was queued as itself and
+    # rides along as real work.
+    rest = [p for p in held if p != cfg.get("auto_continue", "continue")]
+    brief = (f"{was} was working in this directory and hit its usage limit "
+             "mid-task. Look at the working tree (git status, git diff) to see "
+             "how far it got, then carry on."
+             + (f"\n\nIts last instruction was:\n{last}" if last and last not in rest else ""))
+    state.setdefault(new, {}).setdefault("queue", []).extend([brief] + rest)
+    save_queue(state)
+    return (f"{out}\n⏭ {was} is on hold until {clock(cfg, st['limit_until'])} — "
+            f"{key} picks up from the working tree"
+            + (f" with {len(rest)} queued prompt(s)" if rest else ""))
+
+
+def failover_tick(cfg, state, lock):
+    """With "failover": "<agent>" set, hand limit-held work over unasked."""
+    key = cfg.get("failover")
+    if not key:
+        return
+    for topic, sess in list(cfg.get("topics", {}).items()):
+        st = state.get(sess) or {}
+        if (st.get("limit_until", 0) > time.time() and st.get("queue")
+                and not st.get("failed_over")):
+            st["failed_over"] = True     # once per hold, whatever the outcome
+            send(cfg, topic, "⏭ auto-failover\n" + failover(cfg, state, lock, topic, key),
+                 mode="plain")
 
 
 WARN_AT = (80, 90)   # say something before the wall, not at it
@@ -1731,6 +1800,7 @@ def drain(cfg, state, topic, sess):
         # flagged as limited for good, and leave the topic with no word at the
         # time nightmux promised one — which reads as a hold that never lifted.
         st.pop("limit_until", None)
+        st.pop("failed_over", None)   # the next hold may fail over again
         # The banner that set this hold described the window that just ended, so
         # it stops being the reason to suppress the next one.
         st.pop("limit_line", None)
@@ -2338,6 +2408,7 @@ def watcher(cfg, state, lock):
             # inline too, so a prompt is durable before its reply is sent.
             consult_tick(cfg, state)
             auto_update_tick(cfg)
+            failover_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3390,7 +3461,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all",
-              "!update")   # runs installers on the host: no business in a read-only topic
+              "!update",   # runs installers on the host: no business in a read-only topic
+              "!failover")
 
 
 def writes(cfg, cmd, arg=""):
@@ -3464,6 +3536,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "an agent update is already running"
         send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
         return update_report(update_agents(cfg, only=arg.split() or None))
+    if cmd == "!failover":
+        if not arg:
+            return ("usage: !failover <agent> — hand a limit-held topic to another "
+                    "agent now · installed: " + ", ".join(installed_agents(cfg)))
+        return failover(cfg, state, lock, topic, arg.split()[0].lower())
     if cmd == "!help":
         return ("!bind <session> | !unbind | !sessions\n"
                 f"!new <name> [dir] [flags] [@branch], or !<agent>: "
@@ -3492,6 +3569,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!board = every topic at a glance (works anywhere)\n"
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
+                "!failover <agent> = hit a usage limit? hand the held work to "
+                "another agent now; \"failover\": \"codex\" in the config does it "
+                "unasked\n"
                 "!update [agent] = run each installed agent's own updater "
                 "(claude, codex, agy, opencode…); \"auto_update\": true in the "
                 "config does it daily\n"
@@ -4719,6 +4799,32 @@ def main():
             dispatch(cfg, state, lock, allow, upd, acks)
 
 
+# Credentials people paste into a chat by reflex. A match is never typed into an
+# agent, queued to disk, or logged: the one copy that already exists is
+# Telegram's, and nightmux deletes that too when the bot is allowed to.
+SECRETS = [(name, re.compile(rx)) for name, rx in (
+    ("Telegram bot token", r"\b\d{8,10}:AA[\w-]{30,}"),
+    ("Anthropic API key", r"\bsk-ant-[\w-]{20,}"),       # before OpenAI: also sk-
+    ("OpenAI API key", r"\bsk-(?:proj-)?[\w-]{20,}"),
+    ("GitHub token", r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_\w{20,})"),
+    ("AWS access key", r"\bAKIA[0-9A-Z]{16}\b"),
+    ("Google API key", r"\bAIza[\w-]{35}"),
+    ("Slack token", r"\bxox[abprs]-[\w-]{10,}"),
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+)]
+
+
+def find_secret(text):
+    """What kind of credential text carries, or None."""
+    return next((name for name, rx in SECRETS if rx.search(text or "")), None)
+
+
+def redact(text):
+    for _, rx in SECRETS:
+        text = rx.sub("[redacted]", text)
+    return text
+
+
 def process(cfg, state, lock, allow, upd):
     cq = upd.get("callback_query")
     msg = cq["message"] if cq else (upd.get("message") or {})
@@ -4734,7 +4840,7 @@ def process(cfg, state, lock, allow, upd):
     voice = (msg.get("voice") or msg.get("audio") or msg.get("video_note") or {}) \
         if not cq else {}
     named = (msg.get("forum_topic_created") or {}).get("name")
-    print(f"upd chat={chat} user={user} topic={topic} text={text[:40]!r}"
+    print(f"upd chat={chat} user={user} topic={topic} text={redact(text)[:40]!r}"
           f"{' [cb]' if cq else ''}{' [file]' if att or doc or voice else ''}"
           f"{' [topic ' + named + ']' if named else ''}", flush=True)
     if cq:
@@ -4751,6 +4857,20 @@ def process(cfg, state, lock, allow, upd):
         return
     if user not in allow:
         print(f"  drop: user {user} not in allow_users", flush=True)
+        return
+    kind = None if cq or text.startswith("!raw ") else find_secret(text)
+    if kind:
+        # Typed into an agent it would land in its transcript; queued, on disk;
+        # logged, in the journal. None of that — and take it out of the chat.
+        mid = msg.get("message_id")
+        gone = mid and api(cfg, "deleteMessage", chat_id=chat, message_id=mid).get("ok")
+        send(cfg, topic, f"🔐 that looked like a {kind} — not typed into the agent, "
+             "not queued, not logged"
+             + (", and deleted from the chat" if gone else
+                "; couldn't delete it from the chat (the bot needs admin rights "
+                "to delete messages) — delete it yourself" if mid else "")
+             + "\nIt reached Telegram either way: rotate it if it was real. "
+             "!raw <text> sends it to the agent anyway.", mode="plain")
         return
     if att or doc or voice:  # hand Claude the path; it reads images and files itself
         path = fetch_file(cfg, doc.get("file_id") or voice.get("file_id") or att,
@@ -5751,6 +5871,86 @@ def selfcheck():
     assert update_every({"auto_update": True}) == 86400
     assert update_every({"auto_update": "12h"}) == 43200
     shutil.rmtree(ud, ignore_errors=True)
+
+    # Secrets: never typed into an agent, queued or logged; deleted from the
+    # chat when the bot may. !raw is the deliberate override.
+    tok = "123456789:AA" + "x" * 33
+    assert find_secret(f"here is the bot token {tok}") == "Telegram bot token"
+    assert find_secret("sk-ant-" + "a" * 30) == "Anthropic API key"
+    assert find_secret("ghp_" + "b" * 36) == "GitHub token"
+    assert find_secret("a normal prompt about tokens and keys") is None
+    assert tok not in redact(f"x {tok} y") and "[redacted]" in redact(tok)
+    gsent, ghandled, gapi = [], [], []
+    gcfg = {"chat_id": -5, "topics": {}}
+
+    def gupd(text):
+        return {"message": {"message_id": 42, "message_thread_id": 3, "text": text,
+                            "chat": {"id": -5}, "from": {"id": 9}}}
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: gsent.append(x),
+                 handle=lambda c, s, l, t, x, mid=None: ghandled.append(x),
+                 api=lambda c, m, **k: gapi.append((m, k)) or {"ok": True}):
+        import io
+        logged = io.StringIO()
+        with contextlib.redirect_stdout(logged):
+            process(gcfg, {}, threading.Lock(), {9}, gupd(f"use {tok} please"))
+        assert tok[:20] not in logged.getvalue(), logged.getvalue()   # not in the journal
+        assert "[redacted]" in logged.getvalue()
+        assert ghandled == [], ghandled                          # never reached the agent
+        assert ("deleteMessage", {"chat_id": -5, "message_id": 42}) in gapi, gapi
+        assert "Telegram bot token" in gsent[-1] and "deleted from the chat" in gsent[-1]
+        assert tok not in gsent[-1]
+        process(gcfg, {}, threading.Lock(), {9}, gupd(f"!raw export T={tok}"))
+        assert ghandled == [f"!raw export T={tok}"], ghandled    # explicit override
+        process(gcfg, {}, threading.Lock(), {9}, gupd("fix the parser"))
+        assert ghandled[-1] == "fix the parser"
+
+    # Failover: a limit-held topic hands its work to another installed agent —
+    # the working tree and the cut-off instruction, not a summary the limited
+    # agent can't write.
+    lk_ = threading.Lock()
+    fcfg = {"topics": {"7": "p"}, "started": {"7": "claude"}, "dirs": {"7": "/tmp"},
+            "agents": {"claude": ["/bin/sh", ""], "codex": ["/bin/sh", ""]}}
+    fstate = {"p": {"queue": ["continue", "also this"], "last": "build the parser",
+                    "limit_until": time.time() + 3600}}
+
+    def fake_switch(c, s, l, t, k):
+        c["topics"][t] = "p-" + k
+        c.setdefault("started", {})[t] = k
+        return f"→ {k} ('p-{k}')"
+    fsent = []
+    with stubbed(switch_agent=fake_switch, has_session=lambda s: True,
+                 save_queue=lambda s: None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: fsent.append(x)):
+        assert "nothing is held" in failover(fcfg, {"p": {}}, lk_, "7", "codex")
+        assert "the one that hit" in failover(fcfg, fstate, lk_, "7", "claude")
+        assert failover(fcfg, fstate, lk_, "7", "nosuch").startswith("no nosuch installed")
+        assert "!failover codex" in json.dumps(failover_buttons(fcfg, "7", "p"))
+        assert failover_buttons(fcfg, "7", "a-benched-one") is None
+        out = failover(fcfg, fstate, lk_, "7", "codex")
+        q = fstate["p-codex"]["queue"]
+        assert "hit its usage limit" in q[0] and "build the parser" in q[0], q
+        assert q[1:] == ["also this"] and "queue" not in fstate["p"], fstate
+        assert "picks up from the working tree with 1 queued prompt(s)" in out, out
+        # A refused prompt was queued as itself: carried as work, not repeated.
+        fcfg["topics"]["7"], fcfg["started"]["7"] = "p", "claude"
+        fstate = {"p": {"queue": ["build the parser"], "last": "build the parser",
+                        "limit_until": time.time() + 3600}}
+        failover(fcfg, fstate, lk_, "7", "codex")
+        q = fstate["p-codex"]["queue"]
+        assert q[1:] == ["build the parser"] and "last instruction" not in q[0], q
+        # "failover" in the config: unasked, once per hold, whatever the outcome.
+        fcfg.update(failover="codex")
+        fcfg["topics"]["7"], fcfg["started"]["7"] = "p", "claude"
+        fstate = {"p": {"queue": ["continue"], "limit_until": time.time() + 3600}}
+        failover_tick(fcfg, fstate, lk_)
+        assert fcfg["topics"]["7"] == "p-codex" and "auto-failover" in fsent[-1], fsent
+        fcfg.update(failover="nosuch")
+        fcfg["topics"]["7"], fcfg["started"]["7"] = "p", "claude"
+        fstate = {"p": {"queue": ["x"], "limit_until": time.time() + 3600}}
+        failover_tick(fcfg, fstate, lk_)
+        n = len(fsent)
+        failover_tick(fcfg, fstate, lk_)                         # refused once,
+        assert len(fsent) == n and fstate["p"]["queue"] == ["x"]  # not every tick
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)

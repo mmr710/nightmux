@@ -8,6 +8,15 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!failover <agent>`: a topic held on a usage limit hands its work to another
+  installed agent now instead of waiting hours for the reset. The limit message
+  carries one-tap buttons for it. The next agent gets the working tree and the
+  instruction that was cut off, not a summary — the limited agent can't write
+  one. `"failover": "codex"` in the config does it unasked, once per hold.
+- Secrets pasted into the chat (Telegram bot tokens, Anthropic/OpenAI/GitHub/
+  AWS/Google/Slack keys, private keys) are never typed into the agent, queued
+  or logged, and are deleted from the chat when the bot has the rights. The
+  message log line is redacted. `!raw` is the deliberate override.
 - `!update [agent]` runs each installed agent's own updater (`claude update`,
   `codex update`, `agy update`, `opencode upgrade`, npm for gemini, pip for
   aider) and reports versions before and after. `"auto_update": true` (daily)
