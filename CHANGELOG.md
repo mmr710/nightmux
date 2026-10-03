@@ -8,6 +8,15 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- The office, redrawn: a night city through the window (moon, shooting
+  stars, lit windows) that turns to dawn, a lamp over the live agent, monitor
+  glow on faces, a look per agent (claude's hood, codex's cap, agy's headset,
+  opencode's beanie), real screen content per state, and a 3×5 bitmap font
+  for the clock and name labels. A finished turn sparkles and a hand-off flies
+  a folder between desks — live, from state changes. `/office?demo` plays a
+  scripted night shift deterministically; `docs/office-demo.gif` is made
+  from it.
+
 - The office: `/office` on the webhook port is a pixel-art page with a room
   per topic and a desk per agent on its bench. Every animation is a real state:
   typing (busy, with what it is doing), hand up (asking — the menu's real
