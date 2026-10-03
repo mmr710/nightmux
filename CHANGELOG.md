@@ -8,6 +8,15 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- The office: `/office` on the webhook port is a pixel-art page with a room
+  per topic and a desk per agent on its bench. Every animation is a real state:
+  typing (busy, with what it is doing), hand up (asking — the menu's real
+  options as buttons), asleep with a countdown (usage limit, with hand-off
+  buttons), puzzled (unread screen), empty chair (gone), sticky notes (queued).
+  Tap an agent for its screen, answers, a prompt box, esc/failover/restore.
+  Screen text is redacted before it leaves; it reads the watcher's own capture,
+  no tmux call per viewer. `!office` posts the link; `office_url` is where your
+  phone reaches it (`tailscale serve --bg <port>` keeps it on your tailnet).
 - `!failover <agent>`: a topic held on a usage limit hands its work to another
   installed agent now instead of waiting hours for the reset. The limit message
   carries one-tap buttons for it. The next agent gets the working tree and the
