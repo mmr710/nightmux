@@ -4684,11 +4684,11 @@ h1{font-size:14px;margin:0;letter-spacing:1px}
 .bar{display:inline-block;width:64px;height:8px;background:#1b2133}
 .bar i{display:block;height:100%;width:0;background:#7aa2f7}
 .bar.hot i{background:#f7768e}
-main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
 .room{background:#0d1120;border:2px solid #1b2133}
 .room h2{font-size:12px;margin:0;padding:6px 10px;background:#141a2e;display:flex;justify-content:space-between;gap:8px}
 .room h2 .tid{color:#565f89}
-canvas{display:block;width:100%;image-rendering:pixelated;cursor:pointer}
+canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer}
 .chips{display:flex;flex-wrap:wrap;gap:4px;padding:6px}
 button{font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer}
 button.go{border-color:#9ece6a}
@@ -4705,21 +4705,340 @@ input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2p
 .x{float:right}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
+body.demo{display:flex;align-items:center;justify-content:center;min-height:100vh}
+body.demo header,body.demo main,body.demo #sheet{display:none}
+#stage{display:none}
+body.demo #stage{display:block}
 </style></head><body>
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
 <span class="meter" id="clock"></span></header>
 <main id="rooms"><p class="empty">loading…</p></main>
+<canvas id="stage"></canvas>
 <div id="sheet"></div><div id="toast"></div>
 <script>
-const H = 84;
-const COLORS = {claude:'#d97757', codex:'#10a37f', agy:'#4285f4', opencode:'#a0a7b4',
-                gemini:'#8e75ff', aider:'#e0af68'};
-const color = k => COLORS[k] || '#c0caf5';
+// ---------- pixel kit ----------
+const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-let data = {rooms: [], installed: [], usage: {}}, frame = 0, open = null, lastSig = '';
+function mix(c1, c2, t) {
+  const a = parseInt(c1.slice(1), 16), b = parseInt(c2.slice(1), 16), m = (x, y) => Math.round(x + (y - x) * t);
+  return '#' + ((1 << 24) | (m(a >> 16, b >> 16) << 16) | (m(a >> 8 & 255, b >> 8 & 255) << 8)
+    | m(a & 255, b & 255)).toString(16).slice(1);
+}
+function rng(seed) { let s = seed >>> 0 || 7; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+// 3x5 bitmap font: the clock, labels and captions are part of the pixel art.
+const FONT = {A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',
+  E:'111100110100111',F:'111100110100100',G:'011100101101011',H:'101101111101101',I:'111010010010111',
+  J:'001001001101010',K:'101101110101101',L:'100100100100111',M:'1000111011101011000110001',N:'10011101101110011001',
+  O:'010101101101010',P:'110101110100100',Q:'010101101110011',R:'110101110101101',S:'011100010001110',
+  T:'111010010010010',U:'101101101101111',V:'101101101101010',W:'1000110001101011010101010',X:'101101010101101',
+  Y:'101101010010010',Z:'111001010100111','0':'111101101101111','1':'010110010010111','2':'110001010100111',
+  '3':'110001010001110','4':'101101111001001','5':'111100110001110','6':'011100111101111','7':'111001010010010',
+  '8':'111101111101111','9':'111101111001110',':':'000010000010000','.':'000000000000010',',':'000000000010100',
+  '!':'010010010000010','?':'110001010000010','-':'000000111000000','>':'100010001010100','_':'000000000000111',
+  '/':'001001010100100',' ':'000000000000000','·':'000000010000000','✓':'000001101010000','+':'000010111010000',
+  "'":'010010000000000','(':'010100100100010',')':'010001001001010','#':'101111101111101','@':'010101111100011'};
+const glyph = ch => FONT[ch] || FONT['?'];
+const tw = s => [...String(s).toUpperCase()].reduce((a, ch) => a + glyph(ch).length / 5 + 1, 0);
+function text(R, s, x, y, c) {
+  for (const ch of String(s).toUpperCase()) {
+    const gl = glyph(ch), w = gl.length / 5;
+    for (let i = 0; i < gl.length; i++) if (gl[i] === '1') R(c, x + i % w, y + (i / w | 0), 1, 1);
+    x += w + 1;
+  }
+}
+function spr(R, rows, x, y, pal) {
+  rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) { const c = pal[row[i]]; if (c) R(c, x + i, y + j, 1, 1); } });
+}
+const LOOK = {
+  claude:   {shirt: '#d97757', shade: '#a3502f', hair: '#4a2f22', skin: '#f2c79b', hat: 'hood'},
+  codex:    {shirt: '#10a37f', shade: '#0a7259', hair: '#2b2f45', skin: '#e8b48a', hat: 'cap'},
+  agy:      {shirt: '#4285f4', shade: '#2c5fb8', hair: '#151515', skin: '#c98b5e', hat: 'headset'},
+  opencode: {shirt: '#a0a7b4', shade: '#6f7684', hair: '#6b4f3a', skin: '#f5d0a9', hat: 'beanie'},
+  gemini:   {shirt: '#8e75ff', shade: '#6250c4', hair: '#c9a227', skin: '#f2c79b', hat: 'none'},
+  aider:    {shirt: '#e0af68', shade: '#ad8040', hair: '#2b2f45', skin: '#e8b48a', hat: 'none'},
+};
+const look = k => LOOK[k] || {shirt: '#c0caf5', shade: '#8189b0', hair: '#3b4261', skin: '#f2c79b', hat: 'none'};
+const color = k => look(k).shirt;
+const HEAD = ['.ooooo.', 'ohhhhho', 'ohhhsso', 'ohhssEo', 'ohsssso', 'ohsssSo', '.oSsso.', '..oso..'];
+const TORSO = ['..cccc..', '.cccccc.', 'cccccccc', 'Ccccccc.', 'Ccccccc.', 'Ccccccc.', 'Ccccccc.', 'Ccccccc.',
+               'pppppppp', 'pppppppp'];
 
+// ---------- the room ----------
+const SKY = new Map();
+function skyline(w) {
+  if (SKY.has(w)) return SKY.get(w);
+  const r = rng(w * 31), stars = [], blds = [];
+  for (let i = 0; i < w / 5; i++) stars.push([4 + r() * (w - 8), 10 + r() * 26, r() * 9 | 0]);
+  for (let x = 8; x < w - 8;) {
+    const bw = 6 + (r() * 12 | 0), bh = 6 + (r() * 20 | 0), lit = [];
+    for (let wy = 52 - bh + 2; wy < 50; wy += 3) for (let wx = x + 1; wx < x + bw - 1; wx += 2)
+      if (r() < .35) lit.push([wx, wy, r() * 60 | 0]);
+    blds.push([x, bw, bh, lit]); x += bw + (r() * 3 | 0);
+  }
+  const v = {stars, blds}; SKY.set(w, v); return v;
+}
+
+function backdrop(R, g, w, f, o) {
+  const dawn = o.dawn || 0, sk = skyline(w);
+  R('#141a2e', 0, 0, w, 70);
+  for (let y = 8; y < 52; y++) {                                   // sky through the window
+    const t = (y - 8) / 44;
+    R(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn), 8, y, w - 16, 1);
+  }
+  for (const [x, y, p] of sk.stars) if (dawn < .7 && (f + p) % 11 > 1)
+    R(mix('#e0e6ff', mix('#3d5aa8', '#ffb86b', (y - 8) / 44), dawn * 1.4 > 1 ? 1 : dawn * 1.4), x, y, 1, 1);
+  if (f % 97 < 8 && dawn < .3) {                                   // shooting star
+    const t = f % 97, sx = w * .2 + t * 6, sy = 12 + t * 2;
+    for (let k = 0; k < 5; k++) R(k ? 'rgba(224,230,255,' + (.6 - k * .12) + ')' : '#ffffff', sx - k * 2, sy - k, 2, 1);
+  }
+  const mx = w - 46, my = 13, moon = mix('#f5e6b8', '#ffe9c7', dawn);
+  if (dawn < .85) {
+    g.globalAlpha = 1 - dawn;
+    const halo = g.createRadialGradient(mx, my, 2, mx, my, 16);
+    halo.addColorStop(0, 'rgba(245,230,184,.22)'); halo.addColorStop(1, 'rgba(245,230,184,0)');
+    g.fillStyle = halo; g.fillRect(mx - 16, my - 16, 32, 32);
+    for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++)
+      if (dx * dx + dy * dy <= 25 && (dx - 2.5) ** 2 + (dy + 1.5) ** 2 > 16) R(moon, mx + dx, my + dy, 1, 1);
+    g.globalAlpha = 1;
+  }
+  if (dawn > 0) {                                                 // the sun comes up with the reset
+    const sx = 52, sy = 58 - dawn * 30;
+    const glow = g.createRadialGradient(sx, sy, 2, sx, sy, 30);
+    glow.addColorStop(0, 'rgba(255,207,112,' + .5 * dawn + ')'); glow.addColorStop(1, 'rgba(255,207,112,0)');
+    g.fillStyle = glow; g.fillRect(8, 8, w - 16, 44);
+    for (let dy = -6; dy <= 6; dy++) for (let dx = -6; dx <= 6; dx++)
+      if (dx * dx + dy * dy <= 36 && sy + dy < 52) R('#ffcf70', sx + dx, sy + dy, 1, 1);
+  }
+  for (const [x, bw, bh, lit] of sk.blds) {
+    R(mix('#0b0e1f', '#3a2c4a', dawn), x, 52 - bh, bw, bh);
+    R(mix('#141833', '#4d3b5e', dawn), x, 52 - bh, bw, 1);
+    for (const [wx, wy, p] of lit) if ((f / 8 + p | 0) % 13 && dawn < .9) R(mix('#f2c46d', '#7a6a7a', dawn), wx, wy, 1, 1);
+  }
+  R('#2b3452', 6, 6, w - 12, 2); R('#2b3452', 6, 52, w - 12, 3); R('#3a4466', 4, 55, w - 8, 2);  // frame + sill
+  R('#2b3452', 6, 6, 2, 48); R('#2b3452', w - 8, 6, 2, 48);
+  for (let x = SW; x < w - 8; x += SW) R('#2b3452', x, 8, 2, 44);
+  R('#11162a', 0, 57, w, 13); R('#1f2742', 0, 60, w, 1);           // wainscot
+  R('#0a0d1a', 0, 70, w, 2);                                       // baseboard
+  for (let y = 72, row = 0; y < RH; y += 5, row++) {               // floor planks
+    R(row % 2 ? '#2a2132' : '#261e2e', 0, y, w, 5); R('#1c1622', 0, y + 4, w, 1);
+    for (let x = (row * 17) % 23; x < w; x += 23) R('#1c1622', x, y, 1, 4);
+  }
+  text(R, 'NIGHTMUX', 8, 62, '#e0af68');                          // sign + clock on the wainscot
+  R('#e0af68', 4, 63, 2, 3);
+  if (o.clock) { R('#05070d', w - 30, 61, 26, 8); R('#1b2133', w - 30, 61, 26, 1); text(R, o.clock, w - 28, 63, '#9ece6a'); }
+  for (const px of (o.pad >= 9 ? [1, w - 9] : [1])) {               // plants, where there is floor
+    R('#8a4b2c', px + 1, 112, 7, 8); R('#a35c37', px + 1, 112, 7, 1);
+    for (const [lx, ly, lc] of [[3, 101, 0], [1, 104, 1], [5, 103, 1], [2, 108, 0], [6, 107, 0], [4, 98, 1]])
+      R(lc ? '#4f9d5b' : '#3b7a46', px + lx + (f % 40 < 20 && ly < 102 ? 1 : 0), ly, 2, 5);
+  }
+}
+
+function screen(R, x, y, d, f) {        // 16x11 screen content; returns the glow colour or null
+  const col = color(d.agent), st = d.state;
+  if (st === 'gone') { R('#05070d', x, y, 16, 11); R('#151826', x + 10, y + 1, 3, 1); R('#151826', x + 11, y + 2, 3, 1); return null; }
+  if (st === 'shell') { R('#050b07', x, y, 16, 11); text(R, '>', x + 1, y + 2, '#9ece6a'); if (f % 4 < 2) R('#9ece6a', x + 5, y + 6, 3, 1); return '#9ece6a'; }
+  if (st === 'limit') {
+    R('#2a0f17', x, y, 16, 11); text(R, 'ZZ', x + 4, y + 1, '#f7768e');
+    R('#4a1a26', x + 1, y + 8, 14, 2); R('#f7768e', x + 1, y + 8, Math.max(1, 14 * (d.prog || 0) | 0), 2); return '#f7768e';
+  }
+  if (st === 'waiting') {
+    R('#101528', x, y, 16, 11); R('#e0af68', x + 1, y + 1, 14, 2); R('#1c2238', x + 1, y + 3, 14, 7);
+    R('#9ece6a', x + 3, y + 6, 4, 2); R('#f7768e', x + 9, y + 6, 4, 2); return '#e0af68';
+  }
+  if (st === 'unknown') { for (let i = 0; i < 16; i++) for (let j = 0; j < 11; j++)
+    R((i * 7 + j * 13 + f * 5) % 9 < 4 ? '#3b4261' : '#1a1e2e', x + i, y + j, 1, 1); return '#3b4261'; }
+  if (st === 'busy') {
+    R('#0f1424', x, y, 16, 11);
+    const C = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7', '#7dcfff', col];
+    for (let r = 0; r < 5; r++) {
+      const k = r + (f >> 1), ind = k % 3, w1 = 2 + k * 7 % 5, w2 = Math.min(1 + k * 5 % 6, 14 - ind - w1);
+      R(C[k % 6], x + 1 + ind, y + 1 + r * 2, w1, 1); if (w2 > 0) R(C[(k + 2) % 6], x + 2 + ind + w1, y + 1 + r * 2, w2, 1);
+    }
+    return col;
+  }
+  R('#151a2e', x, y, 16, 11);                                      // idle: lock screen, a crescent
+  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++)
+    if (dx * dx + dy * dy <= 9 && (dx - 1.6) ** 2 + (dy + .8) ** 2 > 5) R('#e0af68', x + 8 + dx, y + 5 + dy, 1, 1);
+  return '#2a3352';
+}
+
+function bubble(R, x, y, glyph, fg, bob) {
+  y += bob;
+  R('#0b0d14', x - 1, y - 1, 11, 10); R('#f2f4f8', x, y, 9, 8); R('#0b0d14', x + 2, y + 8, 3, 2);
+  R('#f2f4f8', x + 3, y + 8, 1, 1); text(R, glyph, x + 3, y + 2, fg);
+}
+
+function station(R, g, x0, d, f, o) {
+  const L = look(d.agent), st = d.state, here = st !== 'gone' && st !== 'shell';
+  const pal = {o: '#0b0d14', h: L.hair, s: L.skin, S: mix(L.skin, '#5a3a2a', .35), E: '#0b0d14',
+               c: L.shirt, C: L.shade, p: '#2a2f45'};
+  if (d.live) {                                                    // hanging lamp + its light
+    R('#2b3452', x0 + 33, 0, 1, 5); R('#3b4261', x0 + 29, 5, 9, 3); R('#ffe7a8', x0 + 31, 8, 5, 1);
+    g.globalCompositeOperation = 'lighter';
+    const cone = g.createRadialGradient(x0 + 33, 100, 4, x0 + 33, 100, 44);
+    cone.addColorStop(0, 'rgba(255,214,150,.16)'); cone.addColorStop(1, 'rgba(255,214,150,0)');
+    g.fillStyle = cone; g.fillRect(x0 - 12, 56, 90, 72);
+    g.globalCompositeOperation = 'source-over';
+  }
+  R('rgba(0,0,0,.35)', x0 + 8, 117, 56, 3);                        // floor shadow
+  const cx = x0 + 10, tilt = here ? 0 : -1;                        // chair
+  R('#262b40', cx + 1 + tilt, 76, 5, 24); R('#343b57', cx + 2 + tilt, 77, 1, 22);
+  R('#262b40', cx + 1, 98, 15, 3); R('#343b57', cx + 2, 98, 13, 1);
+  R('#1b1f30', cx + 7, 101, 2, 9); R('#1b1f30', cx + 1, 110, 15, 2);
+  for (const wx of [1, 7, 14]) R('#0b0d14', cx + wx, 112, 2, 2);
+  const sleep = st === 'limit', lean = st === 'idle' ? -1 : 0;
+  const tx = x0 + 15 + (sleep ? 2 : lean), ty = 81 + (sleep ? 2 : 0);
+  if (here) { spr(R, TORSO, tx, ty, pal); R('#2a2f45', tx + 4, ty + 9, 9, 2); }
+  R('#a07c5c', x0 + 22, 92, 40, 1); R('#8a6a4f', x0 + 22, 93, 40, 1);  // desk
+  R('#6b4f3a', x0 + 23, 94, 38, 22); R('#5a4130', x0 + 23, 94, 38, 1);
+  R('#5a4130', x0 + 46, 98, 13, 7); R('#c9a46a', x0 + 51, 101, 3, 1);
+  R('#5a4130', x0 + 46, 107, 13, 7); R('#c9a46a', x0 + 51, 110, 3, 1);
+  R('#3d2c20', x0 + 23, 115, 38, 1);
+  const mx = x0 + 40, my = 70;                                     // monitor
+  R('#0b0d14', mx - 1, my - 1, 22, 18); R('#1f2335', mx, my, 20, 16);
+  R('#1f2335', mx + 9, my + 16, 3, 5); R('#1f2335', mx + 5, my + 21, 11, 1);
+  const glow = screen(R, mx + 2, my + 2, d, f);
+  R('#3a4060', x0 + 27, 90, 12, 2); for (let k = 0; k < 5; k++) R('#c9cfdc', x0 + 28 + k * 2, 90, 1, 1);  // keyboard
+  for (let q = 0; q < Math.min(d.queued || 0, 5); q++) R(['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], mx + 1 + q * 4, my - 4, 3, 3);
+  const sip = st === 'idle' && f % 48 < 12;
+  if (!sip && here) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
+    if (st === 'idle' && f % 6 < 3) R('rgba(230,233,242,.5)', x0 + 24, 83 + f % 3, 1, 2); }
+  if (here) {
+    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72;
+    const sx = tx + 6, sy = ty + 2, sk = L.skin;
+    if (sleep) { R(L.shirt, x0 + 21, 88, 12, 3); R(L.shade, x0 + 21, 90, 12, 1); }
+    spr(R, sleep ? HEAD.map(r => r.replace('E', 'S')) : HEAD, hx, hy, pal);
+    if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
+    if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
+    if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
+    if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
+    if (st === 'busy') { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 6, 2); R(sk, sx + 7, sy + 5 - f % 2, 2, 2); R(L.shade, sx + 3, sy + 6, 4, 1); R(sk, sx + 10, sy + 6 - (f + 1) % 2, 2, 1); }
+    else if (st === 'waiting') { R(L.shirt, sx, sy - 14, 2, 16); R(sk, sx + (f % 6 < 3 ? 0 : 1), sy - 16, 2, 2); }
+    else if (st === 'unknown') { R(L.shirt, sx - 1, sy - 6, 2, 8); R(sk, hx + 1 + f % 2, hy + 1, 2, 2); }
+    else if (sip) { R(L.shirt, sx, sy - 2, 2, 4); R(L.shirt, sx + 1, sy - 4, 2, 3); R('#e6e9f2', hx + 6, hy + 3, 3, 4); R('#c3c8d6', hx + 9, hy + 4, 1, 2); }
+    else if (!sleep) { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 4, 2); R(sk, sx + 5, sy + 5, 2, 2); }
+    if (st === 'waiting') bubble(R, hx + 4, hy - 13, '!', '#d4891c', f % 6 < 3 ? 0 : -1);
+    if (st === 'unknown') bubble(R, hx + 4, hy - 13, '?', '#565f89', 0);
+    if (sleep) for (let i = 0; i < 3; i++) {
+      const ph = (f * .6 + i * 8) % 24;
+      text(R, 'Z', hx + 7 + ph / 3, hy - 6 - ph, 'rgba(122,162,247,' + (1 - ph / 24).toFixed(2) + ')');
+    }
+  }
+  if (glow) {                                                      // the monitor lights the face
+    g.globalCompositeOperation = 'lighter';
+    const gl = g.createRadialGradient(mx + 10, my + 8, 2, mx + 10, my + 8, 26);
+    gl.addColorStop(0, glow + '40'); gl.addColorStop(1, glow + '00');
+    g.fillStyle = gl; g.fillRect(mx - 26, my - 18, 72, 52);
+    g.globalCompositeOperation = 'source-over';
+  }
+  const nm = d.agent.slice(0, 13), nx = x0 + 33 - (tw(nm) >> 1);
+  text(R, nm, nx, 121, d.live ? '#e0af68' : '#8b93a7');
+  if (d.live) R('#e0af68', nx - 3, 123, 1, 1);
+  if (!d.live && !o.nodim) R('rgba(4,6,12,.42)', x0, 57, SW, RH - 57);
+}
+
+function deskX(room, session, pad) {
+  const i = room.desks.findIndex(d => d.session === session);
+  return i < 0 ? null : pad + i * SW;
+}
+
+function effects(R, room, pad, f, fx) {
+  for (const e of fx || []) {
+    const age = f - e.start;
+    if (e.type === 'folder' && age >= 0 && age < 18) {
+      const a = deskX(room, e.from, pad), b = deskX(room, e.to, pad);
+      if (a == null || b == null) continue;
+      const t = age / 17, at = u => [a + 18 + (b - a) * u, 78 - Math.sin(Math.PI * u) * 16];
+      for (let k = 1; k < 5; k++) { const [tx, ty] = at(Math.max(0, t - k * .05)); R('rgba(246,211,101,' + (.5 - k * .1) + ')', tx + 2, ty + 2, 3, 2); }
+      const [x, y] = at(t);
+      R('#0b0d14', x - 1, y - 1, 9, 7); R('#e0af68', x, y, 7, 5); R('#c48a3a', x, y, 3, 1); R('#f6d365', x + 1, y + 2, 5, 1);
+    }
+    if ((e.type === 'sparkle' || e.type === 'check') && age >= 0 && age < 16) {
+      const x = deskX(room, e.on, pad); if (x == null) continue;
+      const cx = x + 20, cy = 70, r = 4 + age / 2;
+      for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0], [.7, .7], [-.7, -.7], [.7, -.7], [-.7, .7]])
+        if ((age + dx * 3 | 0) % 3) R(e.type === 'check' ? '#9ece6a' : '#f6d365', cx + dx * r, cy + dy * r, 1, 1);
+      if (e.type === 'check') bubble(R, x + 20, 56 - (age >> 2), '✓', '#2f8f3a', 0);
+    }
+  }
+}
+
+function drawRoom(cv, room, f, o) {
+  const n = room.desks.length, w = Math.max(256, n * SW), h = RH + (o.caption != null ? 16 : 0);
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const g = cv.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  const R = (c, x, y, ww, hh) => { if (ww > 0 && hh > 0) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh)); } };
+  const pad = Math.round((w - n * SW) / 2);
+  o.pad = pad;
+  backdrop(R, g, w, f, o);
+  room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
+  effects(R, room, pad, f, o.fx);
+  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
+  const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
+  g.fillStyle = vg; g.fillRect(0, 0, w, RH);
+  if (o.caption != null) {
+    R('#07090f', 0, RH, w, 16); R('#1b2133', 0, RH, w, 1);
+    const [head, rest] = o.caption.split('|');
+    text(R, head, 6, RH + 6, '#e0af68'); if (rest) text(R, rest, 10 + tw(head), RH + 6, '#cdd6f4');
+  }
+  return pad;
+}
+
+// ---------- the night shift (?demo): the README's own story, deterministic for GIF frames ----------
+const CAST = ['claude', 'codex', 'agy', 'opencode'], LOOP = 176;
+const STORY = [
+  {at: 0,   clock: '01:58', cap: '01:58|claude refactors the api, agy writes tests', live: 'claude',
+   s: {claude: 'busy', codex: 'idle', agy: 'busy', opencode: 'idle'}},
+  {at: 26,  clock: '02:14', cap: '02:14|claude hits its usage limit', live: 'claude', q: {claude: 2},
+   s: {claude: 'limit', codex: 'idle', agy: 'busy', opencode: 'idle'}},
+  {at: 46,  clock: '02:14', cap: 'NIGHTMUX|hands the work to codex, no waiting', live: 'codex',
+   fx: {type: 'folder', from: 'claude', to: 'codex'}, q: {codex: 2},
+   s: {claude: 'limit', codex: 'idle', agy: 'busy', opencode: 'idle'}},
+  {at: 64,  clock: '02:31', cap: '02:31|codex carries on from the working tree', live: 'codex', q: {codex: 1},
+   s: {claude: 'limit', codex: 'busy', agy: 'busy', opencode: 'idle'}},
+  {at: 86,  clock: '03:02', cap: '03:02|agy asks to run the migration', live: 'codex',
+   s: {claude: 'limit', codex: 'busy', agy: 'waiting', opencode: 'idle'}},
+  {at: 104, clock: '03:02', cap: 'YOU|tap yes on your phone', live: 'codex', fx: {type: 'check', on: 'agy'},
+   s: {claude: 'limit', codex: 'busy', agy: 'busy', opencode: 'busy'}},
+  {at: 120, clock: '04:11', cap: '04:11|the window resets, claude is back', live: 'claude',
+   fx: {type: 'sparkle', on: 'claude'}, s: {claude: 'busy', codex: 'busy', agy: 'busy', opencode: 'busy'}},
+  {at: 146, clock: '07:30', cap: 'NIGHTMUX|your night crew  github.com/mmr710/nightmux', live: 'claude',
+   s: {claude: 'idle', codex: 'idle', agy: 'idle', opencode: 'idle'}},
+];
+function scene(t) {
+  t = ((t % LOOP) + LOOP) % LOOP;
+  let k = 0; while (k + 1 < STORY.length && STORY[k + 1].at <= t) k++;
+  const step = STORY[k];
+  const room = {topic: 'demo', name: 'the night shift', desks: CAST.map(a => ({
+    agent: a, session: a, live: step.live === a, state: step.s[a], queued: (step.q || {})[a] || 0,
+    prog: step.s[a] === 'limit' ? (t - 26) / 94 : 0}))};
+  const fx = STORY.filter(s => s.fx && t >= s.at).map(s => Object.assign({start: s.at}, s.fx));
+  if (t >= 146) for (const a of CAST) fx.push({type: 'sparkle', on: a, start: 146 + CAST.indexOf(a) * 3});
+  return {room, o: {nodim: true, clock: step.clock, caption: step.cap, dawn: t < 120 ? 0 : Math.min(1, (t - 120) / 40), fx}};
+}
+
+// ---------- live ----------
+let data = {rooms: [], installed: [], usage: {}}, frame = 0, open = null, lastSig = '', auto = true;
+const prev = {}, prevLive = {}, fx = {};
+function track() {
+  for (const r of data.rooms) {
+    const live = (r.desks.find(d => d.live) || {}).session;
+    if (prevLive[r.topic] && live && prevLive[r.topic] !== live)
+      (fx[r.topic] = fx[r.topic] || []).push({type: 'folder', from: prevLive[r.topic], to: live, start: frame});
+    prevLive[r.topic] = live;
+    for (const d of r.desks) {
+      const k = r.topic + '|' + d.session;
+      if (prev[k] === 'busy' && d.state === 'idle') (fx[r.topic] = fx[r.topic] || []).push({type: 'sparkle', on: d.session, start: frame});
+      prev[k] = d.state;
+      if (d.state === 'limit' && d.until) d.prog = 1 - (d.until - Date.now() / 1000) / 18000;
+    }
+    fx[r.topic] = (fx[r.topic] || []).filter(e => frame - e.start < 20);
+  }
+}
 function left(until) {
   const s = Math.max(0, until - Date.now() / 1000), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
   return h ? h + 'h' + String(m).padStart(2, '0') : m + 'm';
@@ -4728,50 +5047,7 @@ function label(d) {
   return {busy: 'working', idle: 'idle', waiting: '✋ asking', limit: '💤 ' + (d.until ? left(d.until) : ''),
           unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
 }
-
-function drawDesk(R, cx, d) {
-  const col = color(d.agent), st = d.state, f = frame, dy = 58;
-  if (d.live) { R('rgba(224,175,104,.09)', cx - 19, 38, 40, 46); R('rgba(224,175,104,.2)', cx - 15, 76, 30, 3); }
-  R('#2b2f45', cx - 16, 49, 2, 16); R('#2b2f45', cx - 16, 63, 9, 2);              // chair
-  if (st !== 'gone' && st !== 'shell') {
-    const lean = st === 'idle' ? -1 : 0, hx = cx - 12 + lean, hy = st === 'limit' ? 51 : 40;
-    R(col, cx - 13 + lean, 46, 6, 10);                                            // body
-    R('#f2c79b', hx, hy, 5, 5); R(col, hx, hy, 5, 2); R('#07090f', hx + 3, hy + 2, 1, 1);
-    if (st === 'busy') R('#f2c79b', cx - 7, 54 + f % 2, 4, 1);                    // typing
-    else if (st === 'waiting') { R(col, cx - 9, 38, 2, 9); R('#f2c79b', cx - 9, 36, 2, 2); }
-    else R('#f2c79b', cx - 8 + lean, 55, 3, 1);
-  }
-  R('#6b4f3a', cx - 10, dy, 28, 3); R('#4a3628', cx - 9, dy + 3, 2, 15); R('#4a3628', cx + 15, dy + 3, 2, 15);
-  R('#2b2f45', cx + 2, 45, 14, 11); R('#2b2f45', cx + 8, 56, 2, 2);               // monitor
-  R({busy: col, idle: '#24304f', waiting: '#e0af68', limit: '#5c2230', unknown: '#3b4261',
-     shell: '#0b1a10', gone: '#05070d'}[st] || '#24304f', cx + 3, 46, 12, 9);
-  if (st === 'busy') for (let l = 0; l < 4; l++) R('rgba(7,9,15,.55)', cx + 4, 47 + l * 2, 2 + (f * 3 + l * 5) % 9, 1);
-  if (st === 'shell' && f % 2) R('#9ece6a', cx + 4, 52, 3, 1);
-  if (st === 'waiting' && f % 4 < 3) { R('#e0af68', cx - 13, 27, 7, 8); R('#07090f', cx - 10, 28, 1, 4); R('#07090f', cx - 10, 33, 1, 1); }
-  if (st === 'unknown') { R('#a9b1d6', cx - 13, 29, 6, 7); R('#07090f', cx - 11, 30, 3, 1); R('#07090f', cx - 9, 31, 1, 1); R('#07090f', cx - 10, 32, 1, 1); R('#07090f', cx - 10, 34, 1, 1); }
-  if (st === 'limit') for (let z = 0; z < 3; z++) { const zy = 44 - ((f + z * 3) % 9) * 2;
-    R('#7aa2f7', cx - 6 + z * 3, zy, 3, 1); R('#7aa2f7', cx - 5 + z * 3, zy + 1, 1, 1); R('#7aa2f7', cx - 6 + z * 3, zy + 2, 3, 1); }
-  if (st === 'idle') { R('#e0e6ff', cx - 5, dy - 3, 3, 3); if (f % 6 < 3) R('rgba(224,230,255,.45)', cx - 4, dy - 6, 1, 2); }
-  for (let q = 0; q < Math.min(d.queued, 5); q++) R('#e0af68', cx + 3 + q * 3, 42, 2, 2);  // sticky notes
-  if (!d.live) R('rgba(7,9,15,.38)', cx - 19, 24, 40, 60);                                 // benched
-}
-
-function drawRoom(cv, room) {
-  const n = room.desks.length, w = Math.max(160, n * 40);
-  if (cv.width !== w) { cv.width = w; cv.height = H; }
-  const g = cv.getContext('2d');
-  const R = (c, x, y, ww, hh) => { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), ww, hh); };
-  R('#141a2e', 0, 0, w, 36); R('#0e1426', 0, 34, w, 2);
-  for (let i = 0; i < w; i += 40) {
-    R('#2b3452', i + 8, 6, 24, 18); R('#050816', i + 9, 7, 22, 16);
-    for (let s = 0; s < 4; s++) if ((frame + s + i) % 9 > 1) R('#e0e6ff', i + 10 + (s * 7 + i) % 20, 8 + (s * 5 + i) % 13, 1, 1);
-  }
-  R('#e0af68', 25, 9, 4, 5); R('#e0af68', 24, 10, 1, 3); R('#050816', 27, 9, 2, 4);  // crescent
-  R('#1a1f33', 0, 36, w, H - 36);
-  for (let x = 0; x < w; x += 8) for (let y = 36; y < H; y += 8) if ((x + y) / 8 % 2 === 0) R('#1d2339', x, y, 8, 8);
-  const slot = w / n;
-  room.desks.forEach((d, i) => drawDesk(R, Math.round(slot * i + slot / 2), d));
-}
+const hhmm = () => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
 
 function build() {
   const main = document.getElementById('rooms');
@@ -4779,12 +5055,12 @@ function build() {
   data.rooms.forEach(r => {
     const el = document.createElement('section');
     el.className = 'room';
-    el.innerHTML = '<h2><span class="nm"></span><span class="tid"></span></h2><canvas height="84"></canvas><div class="chips"></div>';
+    el.innerHTML = '<h2><span class="nm"></span><span class="tid"></span></h2><canvas></canvas><div class="chips"></div>';
     el.querySelector('.nm').textContent = r.name;
     el.querySelector('.tid').textContent = '#' + r.topic;
     const cv = el.querySelector('canvas');
-    cv.onclick = e => { const b = cv.getBoundingClientRect();
-      pick(r.topic, Math.min(r.desks.length - 1, Math.floor((e.clientX - b.left) / b.width * r.desks.length))); };
+    cv.onclick = e => { const b = cv.getBoundingClientRect(), x = (e.clientX - b.left) / b.width * cv.width;
+      const i = Math.floor((x - (cv.pad || 0)) / SW); if (i >= 0 && i < r.desks.length) pick(r.topic, i); };
     r.desks.forEach((d, i) => { const b = document.createElement('button');
       b.className = 'chip'; b.onclick = () => pick(r.topic, i); el.querySelector('.chips').appendChild(b); });
     main.appendChild(el);
@@ -4794,6 +5070,7 @@ function build() {
 function render() {
   const sig = data.rooms.map(r => r.topic + ':' + r.desks.map(d => d.session).join(',')).join('|');
   if (sig !== lastSig) { lastSig = sig; build(); }
+  track();
   let asking = 0;
   document.querySelectorAll('.room').forEach((el, i) => {
     el.querySelectorAll('.chip').forEach((b, j) => { const d = data.rooms[i].desks[j];
@@ -4860,13 +5137,26 @@ async function send(topic, text) {
 
 async function poll() {
   try { data = await (await fetch('/api/office', {cache: 'no-store'})).json(); render(); } catch (e) {}
-  document.getElementById('clock').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  document.getElementById('clock').textContent = hhmm();
 }
 
-function draw() { frame++; document.querySelectorAll('.room canvas').forEach((cv, i) => {
-  if (data.rooms[i]) drawRoom(cv, data.rooms[i]); }); }
+function draw() {
+  if (DEMO) {
+    const {room, o} = scene(frame), cv = document.getElementById('stage');
+    drawRoom(cv, room, frame, o);
+    cv.style.width = cv.width * (+Q.get('scale') || 3) + 'px';
+    return;
+  }
+  document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
+    if (r) cv.pad = drawRoom(cv, r, frame, {clock: hhmm(), fx: fx[r.topic]}); });
+}
 
-poll(); setInterval(poll, 2000); setInterval(draw, 160);
+// GIF capture drives frames itself, one exact frame per call.
+window.__frame = n => { auto = false; frame = n; draw(); };
+if (DEMO) document.body.classList.add('demo');
+else { poll(); setInterval(poll, 2000); }
+setInterval(() => { if (auto) { frame++; draw(); } }, 110);
+draw();
 </script>
 </body></html>"""
 
