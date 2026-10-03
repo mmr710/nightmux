@@ -1,0 +1,19 @@
+● I found four things worth doing before the next run. Pick which to go ahead with.
+
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Next steps
+
+Which of these should I do?
+
+  1. [ ] Pin the dependency that broke the build
+         Restores the last known-good version and re-runs the suite.
+  2. [ ] Delete the job that fails every day
+         It has been retired; repairing it would only wake it up again.
+  3. [ ] Chase the stale data feed
+         Several sources are many sessions behind.
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

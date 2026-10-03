@@ -8,6 +8,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!update [agent]` runs each installed agent's own updater (`claude update`,
+  `codex update`, `agy update`, `opencode upgrade`, npm for gemini, pip for
+  aider) and reports versions before and after. `"auto_update": true` (daily)
+  or an interval like `"12h"` does it on a schedule in the background and posts
+  only what changed or failed. Off by default — it runs installers unattended.
+  `update_cmds` overrides or adds an agent's updater; `""` disables one.
+
 - `!plan <big task>` asks the topic's agent to break it into steps, then runs
   them one at a time on idle — the same queue `!shift` drains, just filled by
   the agent instead of typed in by hand. `!shift` still reports progress or
@@ -24,6 +31,19 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- A usage window that reset while the pane read as `unknown` cleared its hold
+  silently and never sent the queue — the drain only types into a pane it reads
+  as idle. The topic is now told what's queued and why, with `!pane`/`!raw`.
+- tmux's own `[tmux timed out after 10s]` was classified as pane content, so
+  under load every session read `unknown` and held prompts. A timed-out capture
+  is now no reading; the last mode stands.
+- Claude Code's select menu (`Enter to select · ↑/↓ to navigate`) now reads
+  as `waiting` instead of `unknown`.
+- Held work for sessions no topic watches was "restored" on every restart and
+  could never be released. It is dropped at startup, and logged.
+- Sessions already gone when the daemon started were each announced as
+  "💀 gone" in the same second — a 429 from Telegram on every restart. Only a
+  death this run actually saw is announced now.
 - `pane_state()` read anything that didn't match a known busy pattern as idle —
   including a screen it had never seen before, which is exactly the case a
   misread dialog comes from. It now checks for a recognised idle shape too

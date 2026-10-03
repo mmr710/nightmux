@@ -386,6 +386,7 @@ the classifier is held to it from then on.
   "autocompact": 70,
   "auto_continue": "continue",
   "modes": {"115": "readonly"},
+  "auto_update": "1d",
   "poll": 2
 }
 ```
@@ -400,6 +401,14 @@ reboot killed, nightmux checks each bound topic against tmux at startup: with
 on its own — `!restore` does the same relaunch on demand. `projects_root` makes
 a new topic named after a directory start that project on its first message.
 `!reload` picks up hand edits without a restart.
+
+`auto_update` (`true` = daily, or an interval like `"12h"`; off by default)
+runs each installed agent's own updater on that schedule — `claude update`,
+`codex update`, `agy update`, `opencode upgrade` — and posts what changed to
+the command-center topic, or General. `!update [agent]` does it on demand.
+`update_cmds` overrides or adds an agent's updater; `""` turns one off. It is
+off by default because it runs installers unattended. Running sessions keep
+their version until relaunched: `!kill yes`, then `!restore`.
 
 ## Requirements
 
