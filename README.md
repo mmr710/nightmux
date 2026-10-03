@@ -34,6 +34,8 @@ Python stdlib only — one file, ~5,400 lines you can read in an afternoon.
 
 ![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
 
+![The night shift in the office: claude hits its limit at 02:14 and hands the work to codex, agy asks and gets a yes from your phone, and at 04:11 the window resets and claude is back](docs/office-demo.gif)
+
 **Try it:** `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash` — five minutes, no
 dependencies, no server. [Full install →](#install)
 
@@ -325,6 +327,12 @@ the menu's real options as buttons), asleep with a countdown on a usage limit
 (with one-tap hand-off to another agent), an empty chair when its session is
 gone, sticky notes for queued prompts. Tap an agent to answer it, prompt it,
 or fail it over. Screen text is redacted before it leaves the machine.
+
+Each agent has its own look — claude's hood, codex's cap, agy's headset,
+opencode's beanie — and the monitor shows what kind of work it is: code
+scrolling, a yes/no dialog, a limit bar, static. A finished turn sparkles; a
+hand-off flies a folder from one desk to the next. `/office?demo` plays the
+night shift above on a loop, no server state needed.
 
 To open it from your phone without opening a port to the internet, put it on
 your tailnet:
