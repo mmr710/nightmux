@@ -316,6 +316,26 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## The office
+
+`/office` on the same port is your night crew as a pixel-art office: a room
+per topic, a desk per agent on its bench, every animation a real state —
+typing while it works (and what it's doing), hand up when it's asking (with
+the menu's real options as buttons), asleep with a countdown on a usage limit
+(with one-tap hand-off to another agent), an empty chair when its session is
+gone, sticky notes for queued prompts. Tap an agent to answer it, prompt it,
+or fail it over. Screen text is redacted before it leaves the machine.
+
+To open it from your phone without opening a port to the internet, put it on
+your tailnet:
+
+```bash
+tailscale serve --bg 9090          # https://<machine>.<tailnet>.ts.net
+```
+
+then `"office_url": "https://<machine>.<tailnet>.ts.net/office"` in the
+config, and `!office` posts it as a button in Telegram.
+
 ## Plugins
 
 Drop an executable file in `~/.nightmux-plugins/`; its filename becomes a

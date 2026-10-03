@@ -3536,6 +3536,18 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "an agent update is already running"
         send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
         return update_report(update_agents(cfg, only=arg.split() or None))
+    if cmd == "!office":
+        url = cfg.get("office_url")
+        if not url:
+            return ('🏢 the office needs the web server and a way in from your phone:\n'
+                    '1. "webhook_port": 9090 in the config, restart nightmux\n'
+                    '2. tailscale serve --bg 9090   (reachable from your tailnet only)\n'
+                    '3. "office_url": "https://<this machine>.<tailnet>.ts.net/office", '
+                    '!reload\nlocally it is already at http://127.0.0.1:<port>/office')
+        send(cfg, topic, "🏢 the office — every topic a room, every agent a desk",
+             mode="plain", buttons=json.dumps(
+                 {"inline_keyboard": [[{"text": "🏢 open office", "url": url}]]}))
+        return None
     if cmd == "!failover":
         if not arg:
             return ("usage: !failover <agent> — hand a limit-held topic to another "
@@ -3569,6 +3581,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!board = every topic at a glance (works anywhere)\n"
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
+                "!office = link to the live office page: a room per topic, a desk "
+                "per agent\n"
                 "!failover <agent> = hit a usage limit? hand the held work to "
                 "another agent now; \"failover\": \"codex\" in the config does it "
                 "unasked\n"
@@ -4170,6 +4184,49 @@ def topics_status(cfg, state):
     return out
 
 
+def office_snapshot(cfg, state):
+    """Every topic as a room, every agent on its bench as a desk.
+
+    Read from what the watcher already captured this tick (st["scr"], the
+    live trace in st["prog_text"]) — one tmux call per poll for liveness, never
+    a capture per viewer. Screen text is redacted before it leaves: this page
+    can be reached from a phone, and people paste keys into terminals too.
+    """
+    now, alive = time.time(), live_sessions() or {}
+    names = cfg.get("topic_names") or {}
+    rooms, snaps = [], []
+    for topic, cur in sorted(cfg.get("topics", {}).items(), key=lambda kv: int(kv[0])):
+        desks = []
+        for key, sess in sorted(bench_of(cfg, topic).items()):
+            st = state.get(sess) or {}
+            held = st.get("limit_until", 0)
+            snap = st.get("snap") or {}
+            if snap:
+                snaps.append(snap)
+            mode = ("gone" if sess not in alive else "shell" if agentless(sess)
+                    else "limit" if held > now else st.get("mode") or "unknown")
+            scr = st.get("scr") or []
+            desk = {"agent": key, "session": sess, "live": sess == cur, "state": mode,
+                    "screen": [redact(l)[:90] for l in strip_noise(scr)
+                               if l.strip()][-8:],
+                    "doing": redact(st.get("prog_text") or "")[-500:]
+                    if mode == "busy" else "",
+                    "queued": len(st.get("queue") or []),
+                    "until": held if held > now else None,
+                    "ctx": snap.get("ctx_pct")}
+            if mode == "waiting":
+                desk["options"] = [
+                    {"text": b["text"], "send": b["callback_data"]}
+                    for row in json.loads(menu_buttons(scr, sess))["inline_keyboard"]
+                    for b in row]
+            desks.append(desk)
+        rooms.append({"topic": topic, "name": names.get(topic) or cur, "desks": desks})
+    fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
+    return {"rooms": rooms, "installed": installed_agents(cfg), "now": now,
+            "usage": {k: (window(fresh, k) or {}).get("used_percentage")
+                      for k in ("five_hour", "seven_day")}}
+
+
 # ---------- main ----------
 
 class Acks:
@@ -4609,6 +4666,210 @@ setInterval(tick, 4000);
 </script>
 </body></html>"""
 
+# The office: a room per topic, a desk per agent on its bench, every animation a
+# real state from office_snapshot(). Pixel art is drawn as rectangles on a small
+# canvas the browser scales up — no image files, no dependency, same as above.
+OFFICE_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>nightmux office</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14'%3E%F0%9F%8C%99%3C/text%3E%3C/svg%3E">
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#07090f;color:#cdd6f4;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
+header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:2px solid #1b2133;position:sticky;top:0;background:#07090f;z-index:2}
+h1{font-size:14px;margin:0;letter-spacing:1px}
+.meter{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7}
+.bar{display:inline-block;width:64px;height:8px;background:#1b2133}
+.bar i{display:block;height:100%;width:0;background:#7aa2f7}
+.bar.hot i{background:#f7768e}
+main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.room{background:#0d1120;border:2px solid #1b2133}
+.room h2{font-size:12px;margin:0;padding:6px 10px;background:#141a2e;display:flex;justify-content:space-between;gap:8px}
+.room h2 .tid{color:#565f89}
+canvas{display:block;width:100%;image-rendering:pixelated;cursor:pointer}
+.chips{display:flex;flex-wrap:wrap;gap:4px;padding:6px}
+button{font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer}
+button.go{border-color:#9ece6a}
+.chip.alert{border-color:#e0af68;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{background:#3a2f17}}
+#sheet{position:fixed;left:0;right:0;bottom:0;max-height:72vh;overflow:auto;background:#0d1120;border-top:3px solid #7aa2f7;padding:12px 16px calc(14px + env(safe-area-inset-bottom));transform:translateY(105%);transition:transform .18s;z-index:3}
+#sheet.open{transform:none}
+#sheet h3{margin:0 0 4px;font-size:14px}
+.meta{color:#8b93a7;font-size:11px}
+pre{background:#05070d;border:1px solid #1b2133;padding:8px;margin:8px 0;white-space:pre-wrap;word-break:break-word;font-size:11px;max-height:26vh;overflow:auto}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+form{display:flex;gap:6px}
+input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2px solid #2b3452;padding:8px}
+.x{float:right}
+#toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
+.empty{color:#565f89;padding:24px}
+</style></head><body>
+<header><h1>🌙 nightmux office</h1>
+<span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
+<span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
+<span class="meter" id="clock"></span></header>
+<main id="rooms"><p class="empty">loading…</p></main>
+<div id="sheet"></div><div id="toast"></div>
+<script>
+const H = 84;
+const COLORS = {claude:'#d97757', codex:'#10a37f', agy:'#4285f4', opencode:'#a0a7b4',
+                gemini:'#8e75ff', aider:'#e0af68'};
+const color = k => COLORS[k] || '#c0caf5';
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+let data = {rooms: [], installed: [], usage: {}}, frame = 0, open = null, lastSig = '';
+
+function left(until) {
+  const s = Math.max(0, until - Date.now() / 1000), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? h + 'h' + String(m).padStart(2, '0') : m + 'm';
+}
+function label(d) {
+  return {busy: 'working', idle: 'idle', waiting: '✋ asking', limit: '💤 ' + (d.until ? left(d.until) : ''),
+          unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
+}
+
+function drawDesk(R, cx, d) {
+  const col = color(d.agent), st = d.state, f = frame, dy = 58;
+  if (d.live) { R('rgba(224,175,104,.09)', cx - 19, 38, 40, 46); R('rgba(224,175,104,.2)', cx - 15, 76, 30, 3); }
+  R('#2b2f45', cx - 16, 49, 2, 16); R('#2b2f45', cx - 16, 63, 9, 2);              // chair
+  if (st !== 'gone' && st !== 'shell') {
+    const lean = st === 'idle' ? -1 : 0, hx = cx - 12 + lean, hy = st === 'limit' ? 51 : 40;
+    R(col, cx - 13 + lean, 46, 6, 10);                                            // body
+    R('#f2c79b', hx, hy, 5, 5); R(col, hx, hy, 5, 2); R('#07090f', hx + 3, hy + 2, 1, 1);
+    if (st === 'busy') R('#f2c79b', cx - 7, 54 + f % 2, 4, 1);                    // typing
+    else if (st === 'waiting') { R(col, cx - 9, 38, 2, 9); R('#f2c79b', cx - 9, 36, 2, 2); }
+    else R('#f2c79b', cx - 8 + lean, 55, 3, 1);
+  }
+  R('#6b4f3a', cx - 10, dy, 28, 3); R('#4a3628', cx - 9, dy + 3, 2, 15); R('#4a3628', cx + 15, dy + 3, 2, 15);
+  R('#2b2f45', cx + 2, 45, 14, 11); R('#2b2f45', cx + 8, 56, 2, 2);               // monitor
+  R({busy: col, idle: '#24304f', waiting: '#e0af68', limit: '#5c2230', unknown: '#3b4261',
+     shell: '#0b1a10', gone: '#05070d'}[st] || '#24304f', cx + 3, 46, 12, 9);
+  if (st === 'busy') for (let l = 0; l < 4; l++) R('rgba(7,9,15,.55)', cx + 4, 47 + l * 2, 2 + (f * 3 + l * 5) % 9, 1);
+  if (st === 'shell' && f % 2) R('#9ece6a', cx + 4, 52, 3, 1);
+  if (st === 'waiting' && f % 4 < 3) { R('#e0af68', cx - 13, 27, 7, 8); R('#07090f', cx - 10, 28, 1, 4); R('#07090f', cx - 10, 33, 1, 1); }
+  if (st === 'unknown') { R('#a9b1d6', cx - 13, 29, 6, 7); R('#07090f', cx - 11, 30, 3, 1); R('#07090f', cx - 9, 31, 1, 1); R('#07090f', cx - 10, 32, 1, 1); R('#07090f', cx - 10, 34, 1, 1); }
+  if (st === 'limit') for (let z = 0; z < 3; z++) { const zy = 44 - ((f + z * 3) % 9) * 2;
+    R('#7aa2f7', cx - 6 + z * 3, zy, 3, 1); R('#7aa2f7', cx - 5 + z * 3, zy + 1, 1, 1); R('#7aa2f7', cx - 6 + z * 3, zy + 2, 3, 1); }
+  if (st === 'idle') { R('#e0e6ff', cx - 5, dy - 3, 3, 3); if (f % 6 < 3) R('rgba(224,230,255,.45)', cx - 4, dy - 6, 1, 2); }
+  for (let q = 0; q < Math.min(d.queued, 5); q++) R('#e0af68', cx + 3 + q * 3, 42, 2, 2);  // sticky notes
+  if (!d.live) R('rgba(7,9,15,.38)', cx - 19, 24, 40, 60);                                 // benched
+}
+
+function drawRoom(cv, room) {
+  const n = room.desks.length, w = Math.max(160, n * 40);
+  if (cv.width !== w) { cv.width = w; cv.height = H; }
+  const g = cv.getContext('2d');
+  const R = (c, x, y, ww, hh) => { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), ww, hh); };
+  R('#141a2e', 0, 0, w, 36); R('#0e1426', 0, 34, w, 2);
+  for (let i = 0; i < w; i += 40) {
+    R('#2b3452', i + 8, 6, 24, 18); R('#050816', i + 9, 7, 22, 16);
+    for (let s = 0; s < 4; s++) if ((frame + s + i) % 9 > 1) R('#e0e6ff', i + 10 + (s * 7 + i) % 20, 8 + (s * 5 + i) % 13, 1, 1);
+  }
+  R('#e0af68', 25, 9, 4, 5); R('#e0af68', 24, 10, 1, 3); R('#050816', 27, 9, 2, 4);  // crescent
+  R('#1a1f33', 0, 36, w, H - 36);
+  for (let x = 0; x < w; x += 8) for (let y = 36; y < H; y += 8) if ((x + y) / 8 % 2 === 0) R('#1d2339', x, y, 8, 8);
+  const slot = w / n;
+  room.desks.forEach((d, i) => drawDesk(R, Math.round(slot * i + slot / 2), d));
+}
+
+function build() {
+  const main = document.getElementById('rooms');
+  main.innerHTML = data.rooms.length ? '' : '<p class="empty">no topics bound</p>';
+  data.rooms.forEach(r => {
+    const el = document.createElement('section');
+    el.className = 'room';
+    el.innerHTML = '<h2><span class="nm"></span><span class="tid"></span></h2><canvas height="84"></canvas><div class="chips"></div>';
+    el.querySelector('.nm').textContent = r.name;
+    el.querySelector('.tid').textContent = '#' + r.topic;
+    const cv = el.querySelector('canvas');
+    cv.onclick = e => { const b = cv.getBoundingClientRect();
+      pick(r.topic, Math.min(r.desks.length - 1, Math.floor((e.clientX - b.left) / b.width * r.desks.length))); };
+    r.desks.forEach((d, i) => { const b = document.createElement('button');
+      b.className = 'chip'; b.onclick = () => pick(r.topic, i); el.querySelector('.chips').appendChild(b); });
+    main.appendChild(el);
+  });
+}
+
+function render() {
+  const sig = data.rooms.map(r => r.topic + ':' + r.desks.map(d => d.session).join(',')).join('|');
+  if (sig !== lastSig) { lastSig = sig; build(); }
+  let asking = 0;
+  document.querySelectorAll('.room').forEach((el, i) => {
+    el.querySelectorAll('.chip').forEach((b, j) => { const d = data.rooms[i].desks[j];
+      asking += d.state === 'waiting';
+      b.classList.toggle('alert', d.state === 'waiting');
+      b.innerHTML = '<b style="color:' + color(d.agent) + '">●</b> ' + esc(d.agent) + (d.live ? ' ★' : '')
+        + ' · ' + esc(label(d)) + (d.queued ? ' · 📝' + d.queued : ''); });
+  });
+  document.title = (asking ? '✋' + asking + ' ' : '') + 'nightmux office';
+  for (const [id, k] of [['u5', 'five_hour'], ['u7', 'seven_day']]) {
+    const p = data.usage[k], bar = document.getElementById(id);
+    bar.querySelector('i').style.width = (p == null ? 0 : Math.min(100, p)) + '%';
+    bar.classList.toggle('hot', p >= 80); bar.title = p == null ? 'no figure yet' : Math.round(p) + '%';
+  }
+  if (open) sheet();
+}
+
+function pick(topic, i) { const r = data.rooms.find(x => x.topic === topic);
+  open = {topic, session: r.desks[i].session}; sheet(); }
+
+function sheet() {
+  const el = document.getElementById('sheet');
+  const r = data.rooms.find(x => x.topic === open.topic), d = r && r.desks.find(x => x.session === open.session);
+  if (!d) { el.classList.remove('open'); open = null; return; }
+  const old = el.querySelector('input'), typed = old ? old.value : '', focused = old && document.activeElement === old;
+  el.innerHTML = '';
+  const add = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text;
+    if (cls) n.className = cls; el.appendChild(n); return n; };
+  const x = add('button', 'close', 'x'); x.onclick = () => { open = null; el.classList.remove('open'); };
+  add('h3', d.agent + ' · ' + d.session + (d.live ? '  ★ live' : '  (benched)'));
+  add('div', [label(d), d.ctx != null ? 'ctx ' + Math.round(d.ctx) + '%' : '', d.queued ? d.queued + ' queued' : '',
+              r.name].filter(Boolean).join(' · '), 'meta');
+  if (d.doing) add('pre', d.doing);
+  else if (d.screen.length) add('pre', d.screen.join('\n'));
+  const acts = [];
+  if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
+  if (!d.live) acts.push(['★ make live', '!' + d.agent]);
+  if (d.state === 'limit' && d.live) data.installed.filter(k => k !== d.agent)
+    .forEach(k => acts.push(['⏭ hand to ' + k, '!failover ' + k, 'go']));
+  if ((d.state === 'gone' || d.state === 'shell') && d.live) acts.push(['↻ restore', '!restore', 'go']);
+  if (d.state === 'busy') acts.push(['esc', '!esc ' + d.session]);
+  if (acts.length) { const row = add('div', null, 'btns');
+    acts.forEach(([t, cmd, cls]) => { const b = document.createElement('button'); b.textContent = t;
+      if (cls) b.className = cls; b.onclick = () => send(open.topic, cmd); row.appendChild(b); }); }
+  const form = add('form'), input = document.createElement('input'), go = document.createElement('button');
+  input.placeholder = d.live ? 'prompt…' : 'prompt ' + d.agent + ' without switching…';
+  input.autocomplete = 'off'; input.value = typed; go.textContent = 'send'; go.className = 'go';
+  form.append(input, go);
+  form.onsubmit = e => { e.preventDefault(); const t = input.value.trim(); if (!t) return;
+    send(open.topic, d.live ? t : '@' + d.agent + ' ' + t); input.value = ''; };
+  if (focused) { input.focus(); input.setSelectionRange(typed.length, typed.length); }
+  el.classList.add('open');
+}
+
+function toast(t) { const el = document.getElementById('toast'); el.textContent = t; el.style.display = 'block';
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
+
+async function send(topic, text) {
+  try { const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', body: text});
+    toast(r.ok ? 'sent ✓ — replies land in Telegram' : 'failed: ' + r.status); }
+  catch (e) { toast('failed: ' + e); }
+  setTimeout(poll, 700);
+}
+
+async function poll() {
+  try { data = await (await fetch('/api/office', {cache: 'no-store'})).json(); render(); } catch (e) {}
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+
+function draw() { frame++; document.querySelectorAll('.room canvas').forEach((cv, i) => {
+  if (data.rooms[i]) drawRoom(cv, data.rooms[i]); }); }
+
+poll(); setInterval(poll, 2000); setInterval(draw, 160);
+</script>
+</body></html>"""
+
 
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def resolve_topic(self, topic):
@@ -4618,25 +4879,25 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 return t_id
         return topic
 
+    def reply(self, body, ctype):
+        body = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path in ("/", ""):
-            body = DASHBOARD_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path == "/api/topics":
+            return self.reply(DASHBOARD_HTML, "text/html; charset=utf-8")
+        if self.path == "/office":
+            return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
+        if self.path in ("/api/topics", "/api/office"):
             with self.server.lock:
-                rows = topics_status(self.server.cfg, self.server.state)
-            body = json.dumps(rows).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+                data = (topics_status if self.path == "/api/topics"
+                        else office_snapshot)(self.server.cfg, self.server.state)
+            return self.reply(json.dumps(data), "application/json")
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
@@ -5951,6 +6212,48 @@ def selfcheck():
         n = len(fsent)
         failover_tick(fcfg, fstate, lk_)                         # refused once,
         assert len(fsent) == n and fstate["p"]["queue"] == ["x"]  # not every tick
+
+    # The office: a room per topic, a desk per agent, every state a real one —
+    # and redacted, because this page gets opened from a phone.
+    ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
+            "bench": {"5": {"claude": "o", "codex": "o-codex", "agy": "o-agy"}}}
+    menu_ = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    ostate = {"o": {"mode": "busy", "prog_text": f"● Bash(export K={tok})", "queue": ["a"]},
+              "o-codex": {"mode": "waiting", "scr": menu_},
+              "o-agy": {"mode": "idle", "limit_until": time.time() + 60}}
+    all_up = {"o": 1, "o-codex": 1, "o-agy": 1}
+    with stubbed(live_sessions=lambda: all_up, agentless=lambda s: False):
+        (room,) = office_snapshot(ocfg, ostate)["rooms"]
+        desks = {d["agent"]: d for d in room["desks"]}
+        assert room["name"] == "proj" and desks["claude"]["live"] and not desks["codex"]["live"]
+        assert desks["claude"]["state"] == "busy" and desks["claude"]["queued"] == 1
+        assert tok[:20] not in json.dumps(room) and "[redacted]" in desks["claude"]["doing"]
+        assert desks["agy"]["state"] == "limit" and desks["agy"]["until"], desks["agy"]
+        assert {"text": "1. Yes", "send": "!1 o-codex"} in desks["codex"]["options"]
+        # ...and served: the page and its JSON on the webhook port.
+        import socket
+        sock_ = socket.socket()
+        sock_.bind(("127.0.0.1", 0))
+        port_ = sock_.getsockname()[1]
+        sock_.close()
+        threading.Thread(target=run_webhook_server, daemon=True,
+                         args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
+        for _ in range(100):
+            try:
+                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                break
+            except OSError:
+                time.sleep(0.05)
+        api_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/office").read())
+        assert "nightmux office" in page and api_["rooms"][0]["topic"] == "5", api_
+    with stubbed(live_sessions=lambda: {"o": 1}, agentless=lambda s: False):
+        states = {d["agent"]: d["state"] for d in office_snapshot(ocfg, ostate)["rooms"][0]["desks"]}
+        assert states == {"claude": "busy", "codex": "gone", "agy": "gone"}, states
+    osent = []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons)):
+        assert "tailscale serve" in handle(dict(ocfg), {}, threading.Lock(), "5", "!office")
+        handle(dict(ocfg, office_url="https://box.ts.net/office"), {}, threading.Lock(), "5", "!office")
+        assert "https://box.ts.net/office" in osent[-1], osent
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)
