@@ -8,6 +8,20 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Dashboard (`/` on the webhook port): server metrics (CPU, memory, disk,
+  load, uptime, tmux sessions) and limits per agent — sessions live/busy/held
+  plus the usage windows Claude Code and Codex report themselves.
+- Chat analysis — `!stats [days]` (also `/tmstats`) and the dashboard's
+  *analyze* button read Claude Code, Codex, opencode and agy transcripts on
+  this machine and report prompts, model calls, tokens, cache hit rate,
+  context size, nudge prompts and model mix, with concrete tips on what to
+  change. Counts only; no prompt text leaves the function.
+
+### Fixed
+
+- Dashboard: the send box no longer clears and the page no longer jumps on
+  every 4-second refresh — cards are updated in place instead of rebuilt.
+
 - The office, redrawn: a night city through the window (moon, shooting
   stars, lit windows) that turns to dawn, a lamp over the live agent, monitor
   glow on faces, a look per agent (claude's hood, codex's cap, agy's headset,

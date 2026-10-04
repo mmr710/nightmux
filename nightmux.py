@@ -17,6 +17,7 @@ Config: ~/.nightmux.json
 import calendar
 import concurrent.futures
 import contextlib
+import glob
 import html
 import json
 import os
@@ -2555,7 +2556,7 @@ TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
             "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
-            "spendcap": "!spendcap"}
+            "spendcap": "!spendcap", "tmstats": "!stats"}
 TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and its state",
            "sessions": "list tmux sessions", "pane": "dump the pane [lines]",
            "git": "status + last commits", "diff": "unstaged diff",
@@ -2571,7 +2572,7 @@ TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and it
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
            "idlectx": "flag parked sessions above N% context, or off",
-           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins"}
+           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -3536,6 +3537,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "an agent update is already running"
         send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
         return update_report(update_agents(cfg, only=arg.split() or None))
+    if cmd == "!stats":
+        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
+        if days not in _analysis:
+            send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
+        return stats_report(analyze_chats(days))
     if cmd == "!office":
         url = cfg.get("office_url")
         if not url:
@@ -3581,6 +3587,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!board = every topic at a glance (works anywhere)\n"
                 "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
                 "!version = build, python, and which hooks are wired\n"
+                "!stats [days] = token, cache and prompt statistics per agent from "
+                "this machine's transcripts, with what to change\n"
                 "!office = link to the live office page: a room per topic, a desk "
                 "per agent\n"
                 "!failover <agent> = hit a usage limit? hand the held work to "
@@ -4227,6 +4235,414 @@ def office_snapshot(cfg, state):
                       for k in ("five_hour", "seven_day")}}
 
 
+# ---------- server metrics, per-agent limits, chat analysis ----------
+_cpu_prev = [None]
+
+
+def server_metrics():
+    """Host health for the dashboard, read from /proc and os — no psutil.
+
+    CPU is a delta between two calls, so the first poll reports none. On a
+    machine without /proc (macOS) load and disk still report.
+    """
+    out = {"cpus": os.cpu_count() or 1, "load": None, "cpu_pct": None,
+           "mem_pct": None, "mem_total_gb": None, "uptime_h": None, "rss_mb": None,
+           "sessions": len(live_sessions() or {})}
+    try:
+        out["load"] = [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        pass
+    try:
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        idle, total = v[3] + v[4], sum(v)
+        prev, _cpu_prev[0] = _cpu_prev[0], (idle, total)
+        if prev and total > prev[1]:
+            out["cpu_pct"] = round(100 * (1 - (idle - prev[0]) / (total - prev[1])), 1)
+        with open("/proc/meminfo") as f:
+            mi = {l.split(":")[0]: int(l.split()[1]) for l in f}
+        out["mem_total_gb"] = round(mi["MemTotal"] / 1048576, 1)
+        out["mem_pct"] = round(100 * (1 - mi["MemAvailable"] / mi["MemTotal"]), 1)
+        with open("/proc/uptime") as f:
+            out["uptime_h"] = round(float(f.read().split()[0]) / 3600, 1)
+        with open("/proc/self/status") as f:
+            out["rss_mb"] = next(round(int(l.split()[1]) / 1024, 1)
+                                 for l in f if l.startswith("VmRSS"))
+    except (OSError, ValueError, KeyError, IndexError, StopIteration):
+        pass
+    du = shutil.disk_usage(os.path.expanduser("~"))
+    out["disk_pct"] = round(100 * du.used / du.total, 1)
+    out["disk_free_gb"] = round(du.free / 2 ** 30, 1)
+    return out
+
+
+_codex_rl = {"at": 0, "val": None}
+
+
+def codex_limits(home=None):
+    """Codex writes its own rate-limit windows into every rollout; read the newest.
+
+    Only the tail of the last few files is read, and the answer is kept 30s —
+    the dashboard polls every few seconds and the figure moves per turn.
+    """
+    if home is None and time.time() - _codex_rl["at"] < 30:
+        return _codex_rl["val"]
+    root = os.path.join(home or os.path.expanduser("~"), ".codex", "sessions")
+    files, val = sorted(glob.glob(os.path.join(root, "*", "*", "*", "*.jsonl"))), None
+    for p in reversed(files[-5:]):
+        try:
+            with open(p, "rb") as f:
+                f.seek(max(0, os.path.getsize(p) - 262144))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for line in reversed(tail.splitlines()):
+            if '"rate_limits"' in line:
+                try:
+                    val = json.loads(line)["payload"]["rate_limits"]
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if val and (val.get("primary") or val.get("secondary")):
+                    break
+                val = None       # a credits-only record: keep looking
+        if val:
+            break
+    if home is None:
+        _codex_rl.update(at=time.time(), val=val)
+    return val
+
+
+def _win_label(minutes):
+    return {300: "5h", 10080: "7d"}.get(minutes) or (
+        f"{minutes // 1440}d" if minutes >= 1440 else f"{minutes // 60}h")
+
+
+def agent_limits(cfg, state, home=None):
+    """One row per agent across every bench: how many sessions, how many held
+    on a limit and until when, and the usage windows the agent itself reports
+    (Claude's status line, Codex's rollout files). Agents that report none
+    show their held state only — that is all nightmux can see of them.
+    """
+    now, alive = time.time(), live_sessions() or {}
+    rows = {}
+    for topic in cfg.get("topics", {}):
+        for key, sess in bench_of(cfg, topic).items():
+            r = rows.setdefault(key, {"agent": key, "sessions": 0, "live": 0, "busy": 0,
+                                      "held": 0, "until": None, "windows": []})
+            st = state.get(sess) or {}
+            r["sessions"] += 1
+            if sess in alive:
+                r["live"] += 1
+                r["busy"] += st.get("mode") == "busy"
+            held = st.get("limit_until", 0)
+            if held > now:
+                r["held"] += 1
+                r["until"] = min(r["until"] or held, held)
+    blank = {"sessions": 0, "live": 0, "busy": 0, "held": 0, "until": None}
+    snaps = [s["snap"] for s in state.values() if isinstance(s, dict) and s.get("snap")]
+    fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})
+    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = window(fresh, k)
+        if w:
+            rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].append(
+                {"label": label, "pct": w["used_percentage"], "resets_at": w.get("resets_at")})
+    rl = codex_limits(home) or {}
+    for k in ("primary", "secondary"):
+        w = rl.get(k)
+        if w and w.get("used_percent") is not None and (w.get("resets_at") or now + 1) > now:
+            rows.setdefault("codex", dict(blank, agent="codex", windows=[]))["windows"].append(
+                {"label": _win_label(w.get("window_minutes") or 0),
+                 "pct": w["used_percent"], "resets_at": w.get("resets_at")})
+    return sorted(rows.values(), key=lambda r: r["agent"])
+
+
+# One-word nudges: each re-sends the whole context for very little instruction.
+NUDGE = re.compile(r"^\s*(continue|go on|go ahead|go|yes|y|yep|ok|okay|proceed|do it|"
+                   r"next|fix it|try again|retry|again|keep going|\d)\W*$", re.I)
+_analysis = {}
+
+
+def _chat_bucket(stats, agent):
+    return stats.setdefault(agent, {
+        "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
+        "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
+        "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {}})
+
+
+def _chat_prompt(b, text):
+    b["prompts"] += 1
+    b["prompt_chars"] += len(text)
+    if NUDGE.match(text):
+        b["nudges"] += 1
+        t = text.strip().lower()[:20]
+        b["nudge_text"][t] = b["nudge_text"].get(t, 0) + 1
+
+
+def _chat_call(b, model, inp, cread, cwrite, out, think=0):
+    ctx = inp + cread + cwrite
+    b["requests"] += 1
+    b["input"] += inp
+    b["cache_read"] += cread
+    b["cache_write"] += cwrite
+    b["output"] += out
+    b["thinking"] += think
+    b["max_ctx"] = max(b["max_ctx"], ctx)
+    b["big_ctx"] += ctx > 150000
+    if model:
+        b["models"][model] = b["models"].get(model, 0) + ctx + out
+
+
+def _scan_claude(stats, home, since):
+    root = os.path.join(home, ".claude", "projects")
+    since_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since))
+    b = _chat_bucket(stats, "claude")
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            p = os.path.join(dirpath, n)
+            if not n.endswith(".jsonl") or os.path.getmtime(p) < since:
+                continue
+            seen, counted = set(), False
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"usage"' not in line and '"type":"user"' not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d.get("timestamp", "") < since_iso:
+                        continue
+                    m = d.get("message") or {}
+                    if d.get("type") == "user":
+                        c = m.get("content")
+                        if (isinstance(c, str) and not d.get("isMeta")
+                                and not d.get("isSidechain") and not c.startswith("<")):
+                            _chat_prompt(b, c)
+                    elif m.get("usage") and d.get("requestId") not in seen:
+                        seen.add(d.get("requestId"))
+                        u = m["usage"]
+                        if m.get("model") == "<synthetic>":
+                            b["errors"] += 1
+                            continue
+                        _chat_call(b, m.get("model"), u.get("input_tokens") or 0,
+                                   u.get("cache_read_input_tokens") or 0,
+                                   u.get("cache_creation_input_tokens") or 0,
+                                   u.get("output_tokens") or 0,
+                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)
+                    if not counted:
+                        counted, b["sessions"] = True, b["sessions"] + 1
+
+
+def _scan_codex(stats, home, since):
+    b = _chat_bucket(stats, "codex")
+    for p in glob.glob(os.path.join(home, ".codex", "sessions", "*", "*", "*", "*.jsonl")):
+        if os.path.getmtime(p) < since:
+            continue
+        b["sessions"] += 1
+        model, last = None, None
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"turn_context"' not in line and '"event_msg"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                pl = d.get("payload") or {}
+                if d.get("type") == "turn_context":
+                    model = pl.get("model") or model
+                elif pl.get("type") == "user_message":
+                    _chat_prompt(b, pl.get("message") or "")
+                elif pl.get("type") == "error":
+                    b["errors"] += 1
+                elif pl.get("type") == "token_count" and pl.get("info"):
+                    tot = pl["info"].get("total_token_usage")
+                    if tot == last:          # the same total is re-announced
+                        continue
+                    last, u = tot, pl["info"].get("last_token_usage") or {}
+                    cached = u.get("cached_input_tokens") or 0
+                    _chat_call(b, model, (u.get("input_tokens") or 0) - cached, cached, 0,
+                               u.get("output_tokens") or 0, u.get("reasoning_output_tokens") or 0)
+
+
+def _scan_opencode(stats, home, since):
+    import sqlite3
+    db = os.path.join(home, ".local", "share", "opencode", "opencode.db")
+    if not os.path.exists(db):
+        return
+    b = _chat_bucket(stats, "opencode")
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    try:
+        sess = set()
+        for sid, data in con.execute("SELECT session_id, data FROM message "
+                                     "WHERE time_created >= ?", (int(since * 1000),)):
+            sess.add(sid)
+            d = json.loads(data)
+            if d.get("role") != "assistant":
+                continue
+            if d.get("error"):
+                b["errors"] += 1
+            t = d.get("tokens") or {}
+            if t.get("input") or t.get("output"):
+                c = t.get("cache") or {}
+                _chat_call(b, d.get("modelID"), t.get("input") or 0, c.get("read") or 0,
+                           c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+        b["sessions"] += len(sess)
+        for (data,) in con.execute(
+                "SELECT p.data FROM part p JOIN message m ON m.id = p.message_id "
+                "WHERE m.time_created >= ? AND m.data LIKE '%\"role\":\"user\"%'",
+                (int(since * 1000),)):
+            d = json.loads(data)
+            if d.get("type") == "text" and not d.get("synthetic"):
+                _chat_prompt(b, d.get("text") or "")
+    finally:
+        con.close()
+
+
+def _scan_agy(stats, home, since):
+    import sqlite3
+    db = os.path.join(home, ".gemini", "antigravity-cli", "conversation_summaries.db")
+    if not os.path.exists(db):
+        return
+    b = _chat_bucket(stats, "agy")
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    try:
+        cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
+        for (steps,) in con.execute("SELECT step_count FROM conversation_summaries "
+                                    "WHERE last_modified_time >= ?", (cut,)):
+            b["sessions"] += 1
+            b["requests"] += steps or 0     # agy keeps no token counts on disk
+    finally:
+        con.close()
+
+
+def chat_tips(stats):
+    """What to change, per agent, from the numbers — each tip names its evidence."""
+    tips = []
+    for a, s in sorted(stats.items()):
+        ctx = s["input"] + s["cache_read"] + s["cache_write"]
+        if s["requests"] >= 20 and ctx:
+            hit = s["cache_read"] / ctx
+            if hit < 0.7:
+                tips.append((a, f"cache hit {hit:.0%}: every pause past the cache TTL "
+                             "or model switch mid-session re-bills the whole context. Work "
+                             "in fewer, longer sittings and keep one model per session"))
+            avg = ctx / s["requests"]
+            if avg > 80000:
+                tips.append((a, f"each call carries {avg / 1000:.0f}k tokens of context "
+                             f"({s['big_ctx']} calls over 150k): /clear between unrelated "
+                             "tasks, /compact sooner, keep CLAUDE.md/AGENTS.md lean, name the "
+                             "files instead of letting it read the tree"))
+        if s["prompts"] >= 10:
+            nud = s["nudges"] / s["prompts"]
+            if nud > 0.2:
+                tips.append((a, f"{nud:.0%} of prompts are nudges like 'continue'/'yes' — "
+                             "each one re-reads the full context to do little. Give the "
+                             "whole plan with a done-condition up front, or queue steps "
+                             "with !shift / !plan"))
+            calls = s["requests"] / s["prompts"]
+            if calls > 40:
+                tips.append((a, f"{calls:.0f} model calls per prompt: it is exploring. "
+                             "Point at the file/function, paste the error, say which test "
+                             "must pass"))
+            if s["prompt_chars"] / s["prompts"] < 60 and nud <= 0.2:
+                tips.append((a, "prompts average under 60 chars: say what done looks like "
+                             "(file, behaviour, test) and what not to touch"))
+        if s["requests"] >= 20 and s["errors"] / s["requests"] > 0.05:
+            tips.append((a, f"{s['errors']} failed calls ({s['errors'] / s['requests']:.0%}): "
+                         "check login, plan limits and the CLI version (!update)"))
+        if s["output"] >= 10000 and s["thinking"] / s["output"] > 0.7:
+            tips.append((a, f"{s['thinking'] / s['output']:.0%} of output is thinking: "
+                         "lower effort (!effort) for mechanical edits, keep high for design "
+                         "and debugging"))
+        tot = sum(s["models"].values())
+        if tot and len(s["models"]) and s["requests"] >= 50:
+            top, n = max(s["models"].items(), key=lambda kv: kv[1])
+            if n / tot > 0.85 and re.search(r"opus|pro|5\.5|xhigh", top, re.I):
+                tips.append((a, f"{n / tot:.0%} of tokens went to {top}: send routine edits, "
+                             "tests and renames to a smaller model and keep it for the hard parts"))
+    per = {a: (s["input"] + s["cache_read"] + s["cache_write"] + s["output"]) / s["prompts"]
+           for a, s in stats.items() if s["prompts"] >= 10 and s["input"] + s["output"]}
+    if len(per) > 1:
+        lo, hi = min(per, key=per.get), max(per, key=per.get)
+        if per[hi] > 3 * per[lo]:
+            tips.append(("all", f"{hi} spends {per[hi] / 1000:.0f}k tokens per prompt vs "
+                         f"{lo} {per[lo] / 1000:.0f}k: route routine work to {lo} "
+                         f"(!{lo} / !failover {lo}) and keep {hi} for what only it does well"))
+    return tips
+
+
+def analyze_chats(days=30, home=None):
+    """Read every agent's own transcripts on this machine and summarise them.
+
+    Aggregates only leave this function — counts, token sums, models — plus the
+    nudge words themselves, never a prompt. Cached ten minutes: a month of
+    Claude transcripts is hundreds of MB.
+    """
+    hit = _analysis.get(days)
+    if home is None and hit and time.time() - hit["at"] < 600:
+        return hit
+    t0, stats = time.time(), {}
+    since = t0 - days * 86400
+    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
+        try:
+            scan(stats, home or os.path.expanduser("~"), since)
+        except Exception as e:     # one unreadable store must not hide the rest
+            print(f"analysis: {scan.__name__}: {e}", file=sys.stderr)
+    tips = chat_tips(stats)
+    agents_ = {}
+    for a, s in stats.items():
+        if not s["sessions"] and not s["requests"]:
+            continue
+        ctx = s["input"] + s["cache_read"] + s["cache_write"]
+        agents_[a] = {
+            "sessions": s["sessions"], "prompts": s["prompts"], "requests": s["requests"],
+            "tokens": {k: s[k] for k in ("input", "cache_read", "cache_write", "output", "thinking")},
+            "cache_hit": round(s["cache_read"] / ctx, 3) if ctx else None,
+            "avg_ctx": round(ctx / s["requests"]) if ctx and s["requests"] else None,
+            "max_ctx": s["max_ctx"], "big_ctx": s["big_ctx"],
+            "avg_prompt": round(s["prompt_chars"] / s["prompts"]) if s["prompts"] else None,
+            "nudge_pct": round(s["nudges"] / s["prompts"], 3) if s["prompts"] else None,
+            "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
+            "errors": s["errors"],
+            "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+        }
+    out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
+           "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips]}
+    if home is None:
+        _analysis[days] = out
+    return out
+
+
+def _k(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+def stats_report(r):
+    """The analysis as a Telegram message."""
+    if not r["agents"]:
+        return f"no agent transcripts in the last {r['days']} days"
+    out = [f"📊 last {r['days']} days · read in {r['took']}s"]
+    for a, s in sorted(r["agents"].items()):
+        t = s["tokens"]
+        line = f"\n{a}: {s['sessions']} sessions · {s['prompts']} prompts · {s['requests']} calls"
+        if t["input"] + t["output"] + t["cache_read"]:
+            line += (f"\n  in {_k(t['input'] + t['cache_read'] + t['cache_write'])} "
+                     f"(cache {s['cache_hit'] or 0:.0%}) · out {_k(t['output'])}"
+                     f" · avg ctx {_k(s['avg_ctx'] or 0)}")
+        if s["prompts"]:
+            line += f"\n  avg prompt {s['avg_prompt']} chars · nudges {s['nudge_pct']:.0%}"
+        if s["models"]:
+            line += "\n  " + ", ".join(f"{m} {_k(n)}" for m, n in list(s["models"].items())[:3])
+        out.append(line)
+    if r["tips"]:
+        out.append("\n💡 what to change")
+        out += [f"• {t['agent']}: {t['tip']}" for t in r["tips"]]
+    else:
+        out.append("\n💡 nothing stands out — usage looks efficient")
+    return "\n".join(out)
+
+
 # ---------- main ----------
 
 class Acks:
@@ -4594,7 +5010,7 @@ import socketserver
 # One page, no build step, no dependency — same habit as the webhook API it
 # shares a port with. Polls /api/topics and types through the POST route that
 # already existed; nothing here is a second way to reach a session.
-DASHBOARD_HTML = """<!doctype html>
+DASHBOARD_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🌙 nightmux</title>
@@ -4602,65 +5018,194 @@ DASHBOARD_HTML = """<!doctype html>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
-body { margin: 0; padding: 24px; background: #0b0e14; color: #d8dee9;
+body { margin: 0; padding: 20px 16px 40px; background: #0b0e14; color: #d8dee9;
        font: 14px/1.5 -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
-h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
-p.sub { color: #6b7280; margin: 0 0 20px; font-size: 13px; }
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
-.card { background: #131722; border: 1px solid #232838; border-radius: 10px; padding: 14px; }
-.row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+main { max-width: 1200px; margin: 0 auto; }
+header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0; }
+h2 { font-size: 13px; font-weight: 600; color: #8b949e; text-transform: uppercase;
+     letter-spacing: .06em; margin: 26px 0 10px; display: flex; gap: 10px; align-items: center; }
+a { color: #79c0ff; }
+.sub { color: #6b7280; font-size: 13px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); }
+.tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); }
+.card, .tile { background: #131722; border: 1px solid #232838; border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.tile .k { color: #8b949e; font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: #232838; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.bar i { display: block; height: 100%; width: 0; background: #3fb950; transition: width .4s; }
+.bar i.mid { background: #d29922; } .bar i.hi { background: #f85149; }
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: #f85149; }
 .dot.idle { background: #3fb950; } .dot.busy { background: #d29922; }
-.dot.waiting { background: #f0883e; } .dot.offline { background: #f85149; }
-.sess { font-weight: 600; }
-.meta { color: #8b949e; font-size: 12px; }
+.dot.waiting { background: #f0883e; }
+.sess { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { color: #8b949e; font-size: 12px; overflow-wrap: anywhere; }
 .bench { color: #6b7280; font-size: 12px; margin-top: 4px; }
+.win { margin-top: 8px; font-size: 12px; color: #8b949e; display: flex; justify-content: space-between; }
 form { display: flex; gap: 6px; margin-top: 10px; }
-input { flex: 1; background: #0b0e14; border: 1px solid #232838; color: #d8dee9;
-        border-radius: 6px; padding: 6px 8px; font: inherit; }
-button { background: #232838; border: 1px solid #2d3346; color: #d8dee9;
+input { flex: 1; min-width: 0; background: #0b0e14; border: 1px solid #232838; color: #d8dee9;
+        border-radius: 6px; padding: 7px 8px; font: inherit; font-size: 16px; }
+button, select { background: #232838; border: 1px solid #2d3346; color: #d8dee9;
          border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
-button:hover { background: #2d3346; }
+button:hover { background: #2d3346; } button:disabled { opacity: .5; cursor: default; }
+.ok { font-size: 12px; color: #3fb950; height: 16px; margin-top: 4px; }
+.ok.err { color: #f85149; }
 .empty { color: #6b7280; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 5px 0 5px 8px; border-bottom: 1px solid #232838; overflow-wrap: anywhere; }
+th:first-child, td:first-child { text-align: left; }
+th { color: #8b949e; font-weight: 500; }
+.scroll { overflow-x: auto; background: #131722; border: 1px solid #232838; border-radius: 10px; }
+ul.tips { margin: 12px 0 0; padding-left: 18px; } ul.tips li { margin-bottom: 8px; }
+ul.tips b { color: #79c0ff; }
 </style></head>
-<body>
-<h1>🌙 nightmux</h1>
-<p class="sub">your night crew, at a glance</p>
-<div class="grid" id="grid"><p class="empty">loading…</p></div>
+<body><main>
+<header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a></span></header>
+<h2>server</h2><div class="tiles" id="server"></div>
+<h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
+<h2>topics</h2><div class="grid" id="grid"><p class="empty">loading…</p></div>
+<h2>chat analysis
+  <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
+  <button id="run">analyze</button></h2>
+<div id="analysis"><p class="empty">reads every agent's transcripts on this machine — press analyze</p></div>
+</main>
 <script>
-async function tick() {
-  const rows = await (await fetch('/api/topics')).json();
-  const grid = document.getElementById('grid');
-  if (!rows.length) { grid.innerHTML = '<p class="empty">no topics bound</p>'; return; }
-  grid.innerHTML = rows.map(r => {
-    const dot = (r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline';
-    const bench = Object.entries(r.bench || {})
-      .map(([k, s]) => k + ' (' + s + ')').join(', ');
-    return '<div class="card">' +
-      '<div class="row"><span class="dot ' + dot + '"></span>' +
-      '<span class="sess">' + r.session + '</span>' +
-      '<span class="meta">topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + '</span></div>' +
-      '<div class="meta">' + (r.usage || r.mode) +
-      (r.queued ? ' · ' + r.queued + ' queued' : '') +
-      (r.held_until ? ' · held until ' + new Date(r.held_until * 1000).toLocaleTimeString() : '') +
-      '</div>' +
-      (bench ? '<div class="bench">also on this tree: ' + bench + '</div>' : '') +
-      '<form onsubmit="return send(event, \\'' + r.topic + '\\')">' +
-      '<input placeholder="send a prompt…" autocomplete="off">' +
-      '<button type="submit">send</button></form>' +
-      '</div>';
-  }).join('');
+// Cards are built once and updated in place: the old page re-rendered every
+// card each poll, wiping whatever you were typing and jumping the scroll.
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n || 0);
+const pct = v => v == null ? '–' : Math.round(v) + '%';
+const clock = t => new Date(t * 1000).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit'});
+function bar(el, v) { el.style.width = Math.min(100, v || 0) + '%'; el.className = v >= 90 ? 'hi' : v >= 70 ? 'mid' : ''; }
+function keyed(box, items, key, build, update) {
+  const want = new Set(items.map(key));
+  box.querySelectorAll(':scope > p.empty').forEach(e => e.remove());
+  box.querySelectorAll(':scope > [data-k]').forEach(e => { if (!want.has(e.dataset.k)) e.remove(); });
+  items.forEach(it => {
+    let el = box.querySelector(':scope > [data-k="' + CSS.escape(key(it)) + '"]');
+    if (!el) { el = build(it); el.dataset.k = key(it); box.appendChild(el); }
+    update(el, it);
+  });
 }
-async function send(ev, topic) {
+function div(cls, html) { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; return d; }
+const set = (el, sel, txt) => { const e = el.querySelector(sel); if (e.textContent !== txt) e.textContent = txt; };
+
+function server(m) {
+  const t = [
+    ['cpu', m.cpu_pct, pct(m.cpu_pct), m.cpus + ' cores'],
+    ['memory', m.mem_pct, pct(m.mem_pct), m.mem_total_gb ? m.mem_total_gb + ' GB' : ''],
+    ['disk', m.disk_pct, pct(m.disk_pct), m.disk_free_gb + ' GB free'],
+    ['load', m.load ? m.load[0] / m.cpus * 100 : null, m.load ? m.load.join(' ') : '–', '1 · 5 · 15 min'],
+    ['sessions', null, String(m.sessions), 'tmux'],
+    ['uptime', null, m.uptime_h == null ? '–' : m.uptime_h < 48 ? m.uptime_h + ' h' : Math.round(m.uptime_h / 24) + ' d',
+     m.rss_mb ? 'nightmux ' + m.rss_mb + ' MB' : ''],
+  ].map(([name, v, txt, sub]) => ({name, v, txt, sub}));
+  keyed($('server'), t, x => x.name,
+    x => div('tile', '<div class="k"></div><div class="v"></div><div class="meta"></div><div class="bar"><i></i></div>'),
+    (el, x) => { set(el, '.k', x.name); set(el, '.v', x.txt); set(el, '.meta', x.sub);
+                 el.querySelector('.bar').style.visibility = x.v == null ? 'hidden' : '';
+                 bar(el.querySelector('.bar i'), x.v); });
+}
+
+function limits(rows) {
+  if (!rows.length) { $('limits').innerHTML = '<p class="empty">no agents on any bench</p>'; return; }
+  keyed($('limits'), rows, r => r.agent,
+    r => div('card', '<div class="row"><span class="dot"></span><span class="sess"></span></div><div class="meta"></div><div class="wins"></div>'),
+    (el, r) => {
+      el.querySelector('.dot').className = 'dot ' + (r.held ? 'offline' : r.busy ? 'busy' : r.live ? 'idle' : 'offline');
+      set(el, '.sess', r.agent);
+      set(el, '.meta', r.live + '/' + r.sessions + ' sessions live · ' + r.busy + ' busy' +
+          (r.held ? ' · ' + r.held + ' held until ' + clock(r.until) : ''));
+      const w = el.querySelector('.wins');
+      const sig = JSON.stringify(r.windows);
+      if (w.dataset.sig !== sig) {
+        w.dataset.sig = sig;
+        w.innerHTML = r.windows.length ? r.windows.map(x =>
+          '<div class="win"><span>' + esc(x.label) + ' window</span><span>' + pct(x.pct) +
+          (x.resets_at ? ' · resets ' + esc(clock(x.resets_at)) : '') + '</span></div><div class="bar"><i></i></div>').join('')
+          : '<div class="win"><span>no usage figure reported by this agent</span></div>';
+        w.querySelectorAll('.bar i').forEach((b, i) => bar(b, r.windows[i].pct));
+      }
+    });
+}
+
+function topics(rows) {
+  if (!rows.length) { $('grid').innerHTML = '<p class="empty">no topics bound</p>'; return; }
+  keyed($('grid'), rows, r => r.topic,
+    r => {
+      const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
+        '<span class="meta tid"></span></div><div class="meta info"></div><div class="bench"></div>' +
+        '<form><input placeholder="send a prompt…" autocomplete="off" enterkeyhint="send">' +
+        '<button type="submit">send</button></form><div class="ok"></div>');
+      c.querySelector('form').addEventListener('submit', ev => send(ev, r.topic, c));
+      return c;
+    },
+    (el, r) => {
+      el.querySelector('.dot').className = 'dot ' + ((r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline');
+      set(el, '.sess', r.session);
+      set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : ''));
+      set(el, '.info', (r.usage || r.mode) + (r.queued ? ' · ' + r.queued + ' queued' : '') +
+          (r.held_until ? ' · held until ' + clock(r.held_until) : ''));
+      const bench = Object.entries(r.bench || {}).map(([a, s]) => a + ' (' + s + ')').join(', ');
+      set(el, '.bench', bench ? 'also on this tree: ' + bench : '');
+    });
+}
+
+async function send(ev, topic, card) {
   ev.preventDefault();
-  const input = ev.target.querySelector('input');
+  const input = card.querySelector('input'), btn = card.querySelector('button'), ok = card.querySelector('.ok');
   const text = input.value.trim();
-  if (!text) return false;
-  await fetch('/topic/' + topic, { method: 'POST', body: text });
-  input.value = '';
+  if (!text) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', body: text});
+    if (!r.ok) throw new Error(r.status);
+    input.value = ''; ok.className = 'ok'; ok.textContent = '✓ sent';
+  } catch (e) { ok.className = 'ok err'; ok.textContent = 'not sent (' + e.message + ') — text kept'; }
+  btn.disabled = false; input.focus();
+  setTimeout(() => { ok.textContent = ''; }, 3000);
   tick();
-  return false;
 }
+
+async function tick() {
+  if (document.hidden) return;
+  try {
+    const [t, m] = await Promise.all([fetch('/api/topics').then(r => r.json()), fetch('/api/metrics').then(r => r.json())]);
+    topics(t); server(m.server); limits(m.limits);
+  } catch (e) { /* daemon restarting: keep what is on screen */ }
+}
+
+async function analyze() {
+  const box = $('analysis'), btn = $('run');
+  btn.disabled = true; box.innerHTML = '<p class="empty">reading transcripts…</p>';
+  try {
+    const r = await (await fetch('/api/analysis?days=' + $('days').value)).json();
+    const names = Object.keys(r.agents).sort();
+    if (!names.length) { box.innerHTML = '<p class="empty">no transcripts in that window</p>'; return; }
+    const tok = a => a.tokens.input + a.tokens.cache_read + a.tokens.cache_write;
+    const kv = (label, v) => '<tr><td>' + label + '</td><td>' + esc(v) + '</td></tr>';
+    box.innerHTML = '<div class="grid">' + names.map(n => { const a = r.agents[n]; return '<div class="card">' +
+      '<div class="row"><span class="sess">' + esc(n) + '</span><span class="meta">' + a.sessions + ' sessions</span></div><table>' +
+      kv('prompts', a.prompts) + kv(tok(a) ? 'model calls' : 'steps', a.requests) +
+      (a.prompts ? kv('calls / prompt', (a.requests / a.prompts).toFixed(1)) : '') +
+      (tok(a) ? kv('input tokens', k(tok(a))) + kv('output tokens', k(a.tokens.output)) +
+        kv('cache hit', Math.round(a.cache_hit * 100) + '%') + kv('avg context', k(a.avg_ctx)) +
+        kv('max context', k(a.max_ctx)) : '') +
+      (a.prompts ? kv('avg prompt', a.avg_prompt + ' chars') + kv('nudges', Math.round(a.nudge_pct * 100) + '%') : '') +
+      (a.nudges.length ? kv('top nudges', a.nudges.slice(0, 3).map(x => x[0] + ' ×' + x[1]).join(', ')) : '') +
+      kv('failed calls', a.errors) +
+      Object.entries(a.models).slice(0, 3).map(([m, t]) => kv(m, k(t))).join('') +
+      '</table>' + (tok(a) ? '' : '<p class="meta">this agent keeps no token counts on disk</p>') + '</div>'; }).join('') + '</div>' +
+      '<p class="sub">read in ' + r.took + 's · cached 10 min · counts only, no prompt leaves the machine</p>' +
+      (r.tips.length ? '<h2>what to change</h2><ul class="tips">' + r.tips.map(t => '<li><b>' + esc(t.agent) + '</b> ' + esc(t.tip) + '</li>').join('') + '</ul>'
+                     : '<p>nothing stands out — usage looks efficient</p>');
+  } catch (e) { box.innerHTML = '<p class="empty">analysis failed: ' + esc(e.message) + '</p>'; }
+  finally { btn.disabled = false; }
+}
+$('run').onclick = analyze;
+document.addEventListener('visibilitychange', tick);
 tick();
 setInterval(tick, 4000);
 </script>
@@ -5181,6 +5726,17 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", ""):
             return self.reply(DASHBOARD_HTML, "text/html; charset=utf-8")
+        if self.path == "/api/metrics":
+            with self.server.lock:
+                lim = agent_limits(self.server.cfg, self.server.state)
+            return self.reply(json.dumps({"server": server_metrics(), "limits": lim}),
+                              "application/json")
+        if self.path.startswith("/api/analysis"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            d = (q.get("days") or ["30"])[0]
+            days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
+            # No lock: reads transcript files, not daemon state.
+            return self.reply(json.dumps(analyze_chats(days)), "application/json")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
         if self.path in ("/api/topics", "/api/office"):
@@ -6544,6 +7100,57 @@ def selfcheck():
         assert "tailscale serve" in handle(dict(ocfg), {}, threading.Lock(), "5", "!office")
         handle(dict(ocfg, office_url="https://box.ts.net/office"), {}, threading.Lock(), "5", "!office")
         assert "https://box.ts.net/office" in osent[-1], osent
+    # Dashboard extras: host metrics, limits per agent, and the chat analysis —
+    # which must report counts and never a prompt.
+    m_ = server_metrics()
+    assert m_["cpus"] >= 1 and 0 <= m_["disk_pct"] <= 100, m_
+    import tempfile
+    with tempfile.TemporaryDirectory() as h_:
+        now_ = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        os.makedirs(os.path.join(h_, ".claude", "projects", "p"))
+        with open(os.path.join(h_, ".claude", "projects", "p", "s.jsonl"), "w") as f:
+            for i in range(30):
+                f.write(json.dumps({"type": "user", "timestamp": now_, "message": {
+                    "content": "continue" if i % 2 else f"SECRETPROMPT refactor {i}"}},
+                    separators=(",", ":")) + "\n")       # as Claude writes it
+                u_ = {"input_tokens": 5, "cache_read_input_tokens": 10000,
+                      "cache_creation_input_tokens": 90000, "output_tokens": 100}
+                for _ in range(2):            # Claude logs one line per content block
+                    f.write(json.dumps({"type": "assistant", "timestamp": now_,
+                                        "requestId": f"r{i}", "message": {
+                                            "model": "claude-x", "usage": u_}}) + "\n")
+        cdir_ = os.path.join(h_, ".codex", "sessions", "2026", "01", "02")
+        os.makedirs(cdir_)
+        tok_ = {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50}
+        with open(os.path.join(cdir_, "rollout-a.jsonl"), "w") as f:
+            for l_ in ({"type": "turn_context", "payload": {"model": "gpt-x"}},
+                       {"type": "event_msg", "payload": {"type": "user_message", "message": "fix the bug"}},
+                       {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                           "total_token_usage": tok_, "last_token_usage": tok_}}},
+                       {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                           "total_token_usage": tok_, "last_token_usage": tok_},
+                           "rate_limits": {"primary": {"used_percent": 42.0, "window_minutes": 300,
+                                                       "resets_at": time.time() + 600}}}}):
+                f.write(json.dumps(l_) + "\n")
+        r_ = analyze_chats(30, home=h_)
+        c_ = r_["agents"]["claude"]
+        assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
+        assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
+        assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
+        assert "SECRETPROMPT" not in json.dumps(r_) + stats_report(r_)
+        said_ = " ".join(t["tip"] for t in r_["tips"] if t["agent"] == "claude")
+        assert "cache hit 10%" in said_ and "nudges" in said_ and "100k tokens" in said_, said_
+        lim_cfg = {"topics": {"5": "o"}, "bench": {"5": {"claude": "o", "codex": "o-codex"}}}
+        lim_st = {"o": {"mode": "busy", "snap": {"ts": 1, "five_hour": {"used_percentage": 77}}},
+                  "o-codex": {"limit_until": time.time() + 60}}
+        with stubbed(live_sessions=lambda: {"o": 1, "o-codex": 1}):
+            lim_ = {r["agent"]: r for r in agent_limits(lim_cfg, lim_st, home=h_)}
+        assert lim_["claude"]["busy"] == 1 and lim_["claude"]["windows"][0]["pct"] == 77, lim_
+        assert lim_["codex"]["held"] == 1 and lim_["codex"]["windows"][0]["label"] == "5h", lim_
+    dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
+    assert "keyed(" in dash_ and "/api/metrics" in dash_
+    met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
+    assert {"server", "limits"} <= set(met_), met_
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)

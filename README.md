@@ -318,6 +318,15 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## The dashboard
+
+`http://127.0.0.1:<webhook_port>/` (or over `tailscale serve`) shows server
+metrics, limits per agent, every topic with a send box, and a **chat
+analysis**: per agent, how many prompts, model calls and tokens you spent,
+the cache hit rate, the average context each call carried, how often you
+nudged with "continue"/"yes" — and what to change to get better output for
+fewer tokens. The same report is `!stats [days]` in Telegram.
+
 ## The office
 
 `/office` on the same port is your night crew as a pixel-art office: a room
