@@ -375,6 +375,10 @@ _shell = {}
 # Session name -> its pane's working directory, filled by the same tick as
 # _target. Read by track_cwd; every other caller wants a live answer and spawns.
 _cwd = {}
+# session -> the built-in agent key whose binary its pane is running, when one
+# is. What the pane runs is the fact; cfg["started"] is only what nightmux was
+# last told, and a topic re-bound by hand can leave it naming another agent.
+_agent = {}
 
 
 def agentless(sess):
@@ -521,6 +525,9 @@ def live_sessions():
     # on the same single-threaded tmux server that these timeouts come from.
     _cwd.clear()
     _cwd.update({s: cwd.get(p) for s, p in at.items() if cwd.get(p)})
+    _agent.clear()
+    _agent.update({s: BIN_AGENT[cmd.get(p)] for s, p in at.items()
+                   if cmd.get(p) in BIN_AGENT})
     return at
 
 
@@ -2631,6 +2638,7 @@ AGENTS = {
 # no status line has named one. Built-ins only: an agent added through the config
 # still falls back to the active pane, exactly as everything did before.
 AGENT_BINS = set(AGENTS) | {v[0] for v in AGENTS.values()}
+BIN_AGENT = dict({v[0]: k for k, v in AGENTS.items()}, **{k: k for k in AGENTS})
 
 
 def agents(cfg):
@@ -3184,7 +3192,15 @@ def bench_of(cfg, topic):
     bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
     cur = cfg.get("topics", {}).get(topic)
     if cur:
-        bench.setdefault((cfg.get("started") or {}).get(topic) or default_agent(cfg), cur)
+        key = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+        bench.setdefault(_agent.get(cur) if key in AGENTS and _agent.get(cur) else key, cur)
+    # A session filed under an agent its pane is not running (claude's session
+    # listed as agy) sends !agy into claude. Refile it under what is running.
+    for k, sess in list(bench.items()):
+        real = _agent.get(sess)
+        if real and real != k and k in AGENTS:   # a config-defined key is left alone
+            del bench[k]
+            bench.setdefault(real, sess)
     return bench
 
 
@@ -4848,6 +4864,7 @@ def wire_claude(path=None):
         notes.append(f"hook {event} -> {script}")
     sidecar = os.path.join(HERE, "nightmux_state.py")
     line = f'printf \'%s\' "$input" | {sys.executable} {sidecar} >/dev/null 2>&1 &'
+    os.makedirs(os.path.dirname(path), exist_ok=True)   # fresh machine: no ~/.claude yet
     if not settings.get("statusLine"):
         sh = os.path.join(os.path.dirname(path), "nightmux-statusline.sh")
         with open(sh, "w") as f:
@@ -4858,7 +4875,6 @@ def wire_claude(path=None):
     elif line not in open_text(settings["statusLine"].get("command", "")):
         notes.append("status line: already yours, left alone. For live context %"
                      " and 5h/7d limits, add this line to it:\n     " + line)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w") as f:
         json.dump(settings, f, indent=2)
     os.replace(path + ".tmp", path)
@@ -7600,6 +7616,19 @@ def selfcheck():
         json.dump({"model": "opus", "hooks": {"Stop": [{"hooks": [
             {"type": "command", "command": "mine.sh"}]}]}}, f)
     assert len(wire_claude(sfile)) == 3            # Stop, Notification, status line
+    # Claude's session filed as agy (a topic re-bound while marked agy) sent !agy
+    # into claude. The pane's binary decides; a config-defined key is not second-guessed.
+    mix_ = {"topics": {"7": "tg"}, "started": {"7": "agy"},
+            "bench": {"7": {"agy": "tg", "opencode": "tg-oc", "mine": "tg-m"}}}
+    with stubbed(_agent={"tg": "claude", "tg-oc": "opencode", "tg-m": "claude"}):
+        assert bench_of(mix_, "7") == {"claude": "tg", "opencode": "tg-oc", "mine": "tg-m"}
+    with stubbed(_agent={}):                       # nothing known: trust the config
+        assert bench_of(mix_, "7")["agy"] == "tg"
+    import tempfile
+    with tempfile.TemporaryDirectory() as h_:     # new box: no ~/.claude yet
+        fresh_ = os.path.join(h_, ".claude", "settings.json")
+        assert len(wire_claude(fresh_)) == 3
+        assert os.path.exists(os.path.join(h_, ".claude", "nightmux-statusline.sh"))
     assert wire_claude(sfile) == [], "re-running setup duplicated a hook"
     with open(sfile) as f:
         got = json.load(f)

@@ -19,6 +19,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- `--setup` on a fresh machine crashed with `FileNotFoundError:
+  ~/.claude/nightmux-statusline.sh` — the status-line script was written
+  before `~/.claude` was created.
+- A topic's bench could file one agent's session under another (Claude's
+  session listed as agy), so `!agy` switched into Claude. The agent running
+  in the pane now decides; config-defined agent keys are left alone.
 - Dashboard: the send box no longer clears and the page no longer jumps on
   every 4-second refresh — cards are updated in place instead of rebuilt.
 
