@@ -318,6 +318,37 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## Two servers
+
+One bot, one group, topics spread over several machines. Telegram lets only
+one process poll a bot, so one nightmux is the **primary**: it polls and
+forwards each remote topic's messages and button taps, untouched, to the
+nightmux that runs it. That one replies to Telegram itself with the same
+token (sending is not exclusive, only polling is). Put both machines on the
+same tailnet.
+
+On the second machine, `~/.nightmux.json` is a normal config (same `token`,
+`chat_id`, `allow_users`) plus:
+
+```json
+"poll": false,
+"name": "vps2",
+"peer_listen": "100.x.y.z:9091",
+"peer_secret": "<python3 -c 'import secrets; print(secrets.token_urlsafe(32))'>"
+```
+
+On the primary:
+
+```json
+"peers": {"vps2": {"url": "http://100.x.y.z:9091", "secret": "<same secret>"}}
+```
+
+Then in any topic: `!server vps2` routes it there (`!new name dir` starts a
+session on that machine), `!server local` brings it back, bare `!server` says
+where it runs. The primary's dashboard and office show every machine's
+topics, metrics and limits, and typing into a remote topic is routed. The
+peer listener serves only `/peer/` routes, and only with the secret.
+
 ## The dashboard
 
 `http://127.0.0.1:<webhook_port>/` (or over `tailscale serve`) shows server
