@@ -17,6 +17,7 @@ Config: ~/.nightmux.json
 import calendar
 import concurrent.futures
 import contextlib
+import hmac
 import glob
 import html
 import json
@@ -3479,7 +3480,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all",
               "!update",   # runs installers on the host: no business in a read-only topic
-              "!failover")
+              "!failover",
+              "!server")   # re-routes the topic to another machine
 
 
 def writes(cfg, cmd, arg=""):
@@ -3558,6 +3560,29 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if days not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
         return stats_report(analyze_chats(days))
+    if cmd == "!server":
+        peers = cfg.get("peers") or {}
+        if not arg:
+            where = peer_of(cfg, topic)
+            return (f"🖥 this topic runs on {where or host_name(cfg) + ' (here)'}\n"
+                    + ("peers: " + ", ".join(sorted(peers))
+                       + "\n!server <peer> moves it, !server local brings it back" if peers
+                       else 'no peers yet — add "peers" to the config (README: two servers)'))
+        if arg != "local" and arg not in peers:
+            return f"no peer '{arg}' — known: {', '.join(sorted(peers)) or 'none'}"
+        if arg != "local" and cfg.get("topics", {}).get(topic):
+            return (f"this topic is bound here to '{cfg['topics'][topic]}' — !unbind it "
+                    "first, or both machines would answer it")
+        with lock:
+            remote = cfg.setdefault("remote", {})
+            if arg == "local":
+                remote.pop(topic, None)
+            else:
+                remote[topic] = arg
+            save_cfg(cfg)
+        return ("🔀 this topic runs here again" if arg == "local" else
+                f"🔀 this topic now runs on {arg}: everything typed here goes there.\n"
+                "!new <name> <dir> starts a session on it")
     if cmd == "!office":
         url = cfg.get("office_url")
         if not url:
@@ -3605,6 +3630,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!version = build, python, and which hooks are wired\n"
                 "!stats [days] = token, cache and prompt statistics per agent from "
                 "this machine's transcripts, with what to change\n"
+                "!server [peer|local] = which machine this topic runs on; move it "
+                "to another nightmux (see README: two servers)\n"
                 "!office = link to the live office page: a room per topic, a desk "
                 "per agent\n"
                 "!failover <agent> = hit a usage limit? hand the held work to "
@@ -4706,7 +4733,17 @@ def upd_topic(upd):
     return str(msg.get("message_thread_id") or 0)
 
 
-_workers = {}   # topic -> queue; only the polling thread touches this
+_workers = {}   # topic -> queue
+_workers_lock = threading.Lock()
+
+
+class NoAcks:
+    """Acks for an update that did not come from this process's own poll."""
+    def dispatch(self, uid):
+        pass
+
+    def ack(self, uid):
+        pass
 
 
 def dispatch(cfg, state, lock, allow, upd, acks):
@@ -4717,10 +4754,11 @@ def dispatch(cfg, state, lock, allow, upd, acks):
     the other topics and the poll loop behind it.
     """
     topic = upd_topic(upd)
-    q = _workers.get(topic)
-    if q is None:
-        q = _workers[topic] = queue.Queue()
-        threading.Thread(target=serve, args=(q,), daemon=True).start()
+    with _workers_lock:     # the web/peer listener dispatches from its own threads
+        q = _workers.get(topic)
+        if q is None:
+            q = _workers[topic] = queue.Queue()
+            threading.Thread(target=serve, args=(q,), daemon=True).start()
     acks.dispatch(upd["update_id"])
     q.put((cfg, state, lock, allow, upd, acks))
 
@@ -5075,10 +5113,12 @@ th { color: #8b949e; font-weight: 500; }
 .scroll { overflow-x: auto; background: #131722; border: 1px solid #232838; border-radius: 10px; }
 ul.tips { margin: 12px 0 0; padding-left: 18px; } ul.tips li { margin-bottom: 8px; }
 ul.tips b { color: #79c0ff; }
+.srv + .srv { margin-top: 14px; } .sname { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+.sname:empty { display: none; }
 </style></head>
 <body><main>
 <header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a></span></header>
-<h2>server</h2><div class="tiles" id="server"></div>
+<h2>server</h2><div id="server"></div>
 <h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
 <h2>topics</h2><div class="grid" id="grid"><p class="empty">loading…</p></div>
 <h2>chat analysis
@@ -5108,7 +5148,17 @@ function keyed(box, items, key, build, update) {
 function div(cls, html) { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; return d; }
 const set = (el, sel, txt) => { const e = el.querySelector(sel); if (e.textContent !== txt) e.textContent = txt; };
 
-function server(m) {
+function servers(m) {
+  const list = [{name: m.name, d: m}].concat(Object.entries(m.peers || {}).map(([n, d]) => ({name: n, d})));
+  const multi = list.length > 1;
+  keyed($('server'), list, s => s.name,
+    s => div('srv', '<div class="sname"></div><div class="tiles"></div>'),
+    (el, s) => { set(el, '.sname', multi ? s.name + (s.d ? '' : ' — unreachable') : '');
+                 if (s.d) server(el.querySelector('.tiles'), s.d.server); });
+  limits([].concat(...list.map(s => ((s.d || {}).limits || []).map(r => Object.assign({server: multi ? s.name : ''}, r)))));
+}
+
+function server(box, m) {
   const t = [
     ['cpu', m.cpu_pct, pct(m.cpu_pct), m.cpus + ' cores'],
     ['memory', m.mem_pct, pct(m.mem_pct), m.mem_total_gb ? m.mem_total_gb + ' GB' : ''],
@@ -5118,7 +5168,7 @@ function server(m) {
     ['uptime', null, m.uptime_h == null ? '–' : m.uptime_h < 48 ? m.uptime_h + ' h' : Math.round(m.uptime_h / 24) + ' d',
      m.rss_mb ? 'nightmux ' + m.rss_mb + ' MB' : ''],
   ].map(([name, v, txt, sub]) => ({name, v, txt, sub}));
-  keyed($('server'), t, x => x.name,
+  keyed(box, t, x => x.name,
     x => div('tile', '<div class="k"></div><div class="v"></div><div class="meta"></div><div class="bar"><i></i></div>'),
     (el, x) => { set(el, '.k', x.name); set(el, '.v', x.txt); set(el, '.meta', x.sub);
                  el.querySelector('.bar').style.visibility = x.v == null ? 'hidden' : '';
@@ -5127,11 +5177,11 @@ function server(m) {
 
 function limits(rows) {
   if (!rows.length) { $('limits').innerHTML = '<p class="empty">no agents on any bench</p>'; return; }
-  keyed($('limits'), rows, r => r.agent,
+  keyed($('limits'), rows, r => r.server + '/' + r.agent,
     r => div('card', '<div class="row"><span class="dot"></span><span class="sess"></span></div><div class="meta"></div><div class="wins"></div>'),
     (el, r) => {
       el.querySelector('.dot').className = 'dot ' + (r.held ? 'offline' : r.busy ? 'busy' : r.live ? 'idle' : 'offline');
-      set(el, '.sess', r.agent);
+      set(el, '.sess', r.agent + (r.server ? ' · ' + r.server : ''));
       set(el, '.meta', r.live + '/' + r.sessions + ' sessions live · ' + r.busy + ' busy' +
           (r.held ? ' · ' + r.held + ' held until ' + clock(r.until) : ''));
       const w = el.querySelector('.wins');
@@ -5161,7 +5211,7 @@ function topics(rows) {
     (el, r) => {
       el.querySelector('.dot').className = 'dot ' + ((r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline');
       set(el, '.sess', r.session);
-      set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : ''));
+      set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + (r.server ? ' · ' + r.server : ''));
       set(el, '.info', (r.usage || r.mode) + (r.queued ? ' · ' + r.queued + ' queued' : '') +
           (r.held_until ? ' · held until ' + clock(r.held_until) : ''));
       const bench = Object.entries(r.bench || {}).map(([a, s]) => a + ' (' + s + ')').join(', ');
@@ -5189,7 +5239,7 @@ async function tick() {
   if (document.hidden) return;
   try {
     const [t, m] = await Promise.all([fetch('/api/topics').then(r => r.json()), fetch('/api/metrics').then(r => r.json())]);
-    topics(t); server(m.server); limits(m.limits);
+    topics(t); servers(m);
   } catch (e) { /* daemon restarting: keep what is on screen */ }
 }
 
@@ -5722,7 +5772,89 @@ draw();
 </body></html>"""
 
 
+# ---------- peers: topics served by another machine ----------
+# Telegram lets one process poll a bot. The primary polls and forwards a remote
+# topic's updates, untouched, to the nightmux on the machine that runs it; that
+# one ("poll": false) replies to Telegram itself with the same token — sending
+# is not exclusive, only polling is. Peers talk over the tailnet, on a listener
+# that serves /peer/ routes to the shared secret and nothing else.
+
+def host_name(cfg):
+    import socket
+    return cfg.get("name") or socket.gethostname()
+
+
+def peer_of(cfg, topic):
+    """The peer that runs this topic, or None when this machine does."""
+    name = (cfg.get("remote") or {}).get(str(topic))
+    return name if name in (cfg.get("peers") or {}) else None
+
+
+def peer_call(cfg, name, path, body=None, timeout=10):
+    """A peer's /peer/<path>: parsed JSON (or text), or None when it is unreachable.
+
+    A dict body goes as JSON, a str as-is (a prompt for /topic/<id>).
+    """
+    p = cfg["peers"][name]
+    data = None if body is None else (body if isinstance(body, str)
+                                      else json.dumps(body)).encode()
+    req = urllib.request.Request(p["url"].rstrip("/") + "/peer/" + path, data=data,
+                                 headers={"X-Nightmux-Secret": p.get("secret", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+    except (OSError, ValueError) as e:
+        print(f"peer {name} /{path}: {e}", file=sys.stderr, flush=True)
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def with_peers(cfg, path, data):
+    """Fold every peer's answer for the same route into this machine's.
+
+    # ponytail: peers asked one after another, 3s each; parallel if anyone runs many.
+    """
+    if not cfg.get("peers"):
+        return data
+    rows = data["rooms"] if isinstance(data, dict) else data
+    for r in rows:
+        r["server"] = host_name(cfg)
+    for name in sorted(cfg["peers"]):
+        got = peer_call(cfg, name, path.lstrip("/"), timeout=3)
+        for r in (got.get("rooms") if isinstance(got, dict) else got) or []:
+            r["server"] = name
+            if isinstance(data, dict):
+                r["name"] = f"{r.get('name')} · {name}"
+            rows.append(r)
+    return data
+
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
+    peer = False   # this request came from another nightmux, through /peer/
+
+    def peer_gate(self):
+        """/peer/<route>: the shared secret or 403, then served by the same code
+        as /<route>. On the peer listener nothing but /peer/ is served at all —
+        the dashboard there would be an unauthenticated keyboard on the tailnet.
+        """
+        if self.path.startswith("/peer/"):
+            sec = self.server.cfg.get("peer_secret") or ""
+            got = self.headers.get("X-Nightmux-Secret", "")
+            if len(sec) < 16 or not hmac.compare_digest(got.encode(), sec.encode()):
+                self.send_response(403)
+                self.end_headers()
+                return False
+            self.path, self.peer = self.path[len("/peer"):], True
+            return True
+        if getattr(self.server, "peer_only", False):
+            self.send_response(404)
+            self.end_headers()
+            return False
+        return True
+
     def resolve_topic(self, topic):
         """Map a session name (e.g. 'api') back to its Telegram thread ID if needed."""
         for t_id, s_name in self.server.cfg.get("topics", {}).items():
@@ -5740,13 +5872,19 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self.peer_gate():
+            return
         if self.path in ("/", ""):
             return self.reply(DASHBOARD_HTML, "text/html; charset=utf-8")
         if self.path == "/api/metrics":
+            cfg = self.server.cfg
             with self.server.lock:
-                lim = agent_limits(self.server.cfg, self.server.state)
-            return self.reply(json.dumps({"server": server_metrics(), "limits": lim}),
-                              "application/json")
+                lim = agent_limits(cfg, self.server.state)
+            out = {"name": host_name(cfg), "server": server_metrics(), "limits": lim}
+            if not self.peer:
+                out["peers"] = {n: peer_call(cfg, n, "api/metrics", timeout=3)
+                                for n in sorted(cfg.get("peers") or {})}
+            return self.reply(json.dumps(out), "application/json")
         if self.path.startswith("/api/analysis"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             d = (q.get("days") or ["30"])[0]
@@ -5759,6 +5897,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
                         else office_snapshot)(self.server.cfg, self.server.state)
+            if not self.peer:
+                data = with_peers(self.server.cfg, self.path, data)
             return self.reply(json.dumps(data), "application/json")
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
@@ -5792,16 +5932,36 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         }).encode('utf-8'))
 
     def do_POST(self):
+        if not self.peer_gate():
+            return
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8').strip()
+        cfg = self.server.cfg
+        if self.peer and self.path == "/update":        # forwarded by the primary
+            try:
+                upd = json.loads(body)
+                upd["update_id"]
+            except (ValueError, KeyError, TypeError):
+                self.send_response(400)
+                self.end_headers()
+                return
+            dispatch(cfg, self.server.state, self.server.lock, self.server.allow,
+                     upd, NoAcks())
+            return self.reply('{"ok": true}', "application/json")
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
             self.end_headers()
             return
-            
+
         topic = self.resolve_topic(parts[1])
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode('utf-8').strip()
-        
+        peer = peer_of(cfg, topic)
+        if peer and body:
+            ok = peer_call(cfg, peer, f"topic/{topic}", body) is not None
+            self.send_response(202 if ok else 502)
+            self.end_headers()
+            return
+
         if not body:
             self.send_response(400)
             self.end_headers()
@@ -5817,17 +5977,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             }
         }
         
-        class DummyAcks:
-            def dispatch(self, uid): pass
-            def ack(self, uid): pass
-            
-        q = _workers.get(topic)
-        if q is None:
-            q = _workers[topic] = queue.Queue()
-            threading.Thread(target=serve, args=(q,), daemon=True).start()
-            
-        q.put((self.server.cfg, self.server.state, self.server.lock, self.server.allow, fake_upd, DummyAcks()))
-        
+        dispatch(cfg, self.server.state, self.server.lock, self.server.allow,
+                 fake_upd, NoAcks())
+
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"Accepted\n")
@@ -5835,13 +5987,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-def run_webhook_server(cfg, state, lock, allow, port):
+def run_webhook_server(cfg, state, lock, allow, port, host="127.0.0.1", peer_only=False):
     class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
-        
-    server = ThreadedHTTPServer(('127.0.0.1', port), WebhookHandler)
+
+    server = ThreadedHTTPServer((host, port), WebhookHandler)
     server.cfg, server.state, server.lock, server.allow = cfg, state, lock, allow
-    print(f"webhook listening on 127.0.0.1:{port}", flush=True)
+    server.peer_only = peer_only
+    print(f"{'peer' if peer_only else 'webhook'} listening on {host}:{port}", flush=True)
     server.serve_forever()
 
 
@@ -5878,8 +6031,12 @@ def main():
         if not cfg.get(key):
             sys.exit(f"{CFG_PATH}: missing '{key}'  (run: {__file__} --setup)")
     cfg.setdefault("topics", {})
+    poll = cfg.get("poll", True)    # false: a peer — the primary polls and forwards
+    if cfg.get("peer_listen") and len(cfg.get("peer_secret") or "") < 16:
+        sys.exit(f"{CFG_PATH}: peer_listen needs a peer_secret of 16+ characters")
     autostart(cfg)
-    register_commands(cfg)
+    if poll:
+        register_commands(cfg)
     state, lock = {}, threading.Lock()
     # Before the watcher runs, or its first save would overwrite the file with
     # the empty state it starts from.
@@ -5891,13 +6048,26 @@ def main():
     restore_startup(cfg, state, lock)
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
 
+    allow = {int(u) for u in cfg["allow_users"]}
+    if cfg.get("peer_listen"):
+        host, _, port = cfg["peer_listen"].rpartition(":")
+        threading.Thread(target=run_webhook_server, daemon=True,
+                         args=(cfg, state, lock, allow, int(port)),
+                         kwargs={"host": host or "127.0.0.1", "peer_only": True}).start()
+    if not poll:
+        if cfg.get("webhook_port"):
+            threading.Thread(target=run_webhook_server, daemon=True,
+                             args=(cfg, state, lock, allow, cfg["webhook_port"])).start()
+        print(f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
+        while True:
+            time.sleep(3600)
+
     # Resume where we stopped: a restart loses nothing. Kept out of the config
     # file, which is hand-edited and must not churn once per message.
     offset = load_offset() or cfg.pop("offset", None)  # migrate the old in-config one
     if offset is None:          # first ever run: skip whatever piled up
         res = (api(cfg, "getUpdates", offset=-1, timeout=0).get("result")) or []
         offset = res[-1]["update_id"] + 1 if res else None
-    allow = {int(u) for u in cfg["allow_users"]}
     acks = Acks()
     print(f"nightmux up. chat={cfg['chat_id']} topics={cfg['topics']} offset={offset}",
           flush=True)
@@ -5966,7 +6136,7 @@ def process(cfg, state, lock, allow, upd):
     print(f"upd chat={chat} user={user} topic={topic} text={redact(text)[:40]!r}"
           f"{' [cb]' if cq else ''}{' [file]' if att or doc or voice else ''}"
           f"{' [topic ' + named + ']' if named else ''}", flush=True)
-    if cq:
+    if cq and not upd.get("_peer"):   # a forwarded tap was answered by the primary
         api(cfg, "answerCallbackQuery", callback_query_id=cq["id"], text=text)
     if str(chat) != str(cfg["chat_id"]):
         print(f"  drop: chat != {cfg['chat_id']}", flush=True)
@@ -5980,6 +6150,12 @@ def process(cfg, state, lock, allow, upd):
         return
     if user not in allow:
         print(f"  drop: user {user} not in allow_users", flush=True)
+        return
+    peer = peer_of(cfg, topic)
+    if peer and not re.match(r"!server\b", text):
+        if peer_call(cfg, peer, "update", dict(upd, _peer=True)) is None:
+            send(cfg, topic, f"⚠️ {peer} did not answer — not delivered. Send it again "
+                 "once it is back, or !server local to run this topic here", mode="plain")
         return
     kind = None if cq or text.startswith("!raw ") else find_secret(text)
     if kind:
@@ -7167,6 +7343,58 @@ def selfcheck():
     assert "keyed(" in dash_ and "/api/metrics" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
+    # Two servers: the primary forwards a remote topic's update, untouched, to
+    # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
+    sec_ = "k" * 24
+    pcfg_ = {"chat_id": -5, "topics": {"77": "w1"}, "started": {"77": "claude"},
+             "peer_secret": sec_}
+    sock_ = socket.socket()
+    sock_.bind(("127.0.0.1", 0))
+    pport_ = sock_.getsockname()[1]
+    sock_.close()
+    threading.Thread(target=run_webhook_server, daemon=True, kwargs={"peer_only": True},
+                     args=(pcfg_, {"w1": {"mode": "idle"}}, threading.Lock(), {1}, pport_)).start()
+    prim_ = {"chat_id": -5, "topics": {}, "remote": {"77": "box2"},
+             "peers": {"box2": {"url": f"http://127.0.0.1:{pport_}", "secret": sec_}}}
+    for _ in range(100):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{pport_}/")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404           # the dashboard is not served to the tailnet
+            break
+        except OSError:
+            time.sleep(0.05)
+    bad_ = dict(prim_, peers={"box2": dict(prim_["peers"]["box2"], secret="x" * 24)})
+    assert peer_call(bad_, "box2", "api/topics") is None          # 403
+    with stubbed(live_sessions=lambda: {"w1": 1}):
+        rows_ = with_peers(prim_, "/api/topics", [])
+    assert [(r["topic"], r["server"]) for r in rows_] == [("77", "box2")], rows_
+    got_, real_process = [], process
+    upd_ = {"update_id": 9, "message": {"message_thread_id": 77, "text": "hello",
+                                        "chat": {"id": -5}, "from": {"id": 1}}}
+    with stubbed(process=lambda c, st, l, a, u: got_.append((c is pcfg_, u))):
+        real_process(prim_, {}, threading.Lock(), {1}, upd_)
+        for _ in range(100):
+            if got_:
+                break
+            time.sleep(0.02)
+    assert got_ and got_[0][0] and got_[0][1]["_peer"] and \
+        got_[0][1]["message"]["text"] == "hello", got_
+    psent_ = []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: psent_.append(x),
+                 save_cfg=lambda c: None):
+        gone_ = dict(prim_, peers={"box2": {"url": "http://127.0.0.1:1", "secret": sec_}})
+        real_process(gone_, {}, threading.Lock(), {1}, upd_)
+        assert "did not answer" in psent_[-1], psent_
+        lk_ = threading.Lock()
+        assert "box2" in handle(prim_, {}, lk_, "77", "!server")
+        assert "!unbind" in handle(dict(prim_, topics={"78": "x"}), {}, lk_, "78", "!server box2")
+        assert "no peer" in handle(prim_, {}, lk_, "78", "!server nope")
+        mv_ = dict(prim_, remote={})
+        handle(mv_, {}, lk_, "78", "!server box2")
+        assert peer_of(mv_, "78") == "box2"
+        handle(mv_, {}, lk_, "78", "!server local")
+        assert peer_of(mv_, "78") is None
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)

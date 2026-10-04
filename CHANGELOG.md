@@ -8,6 +8,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Two (or more) servers behind one bot: the primary forwards a topic's
+  updates to the peer that runs it (`!server <peer>` / `!server local`), the
+  peer (`"poll": false`) replies to Telegram directly. Peers talk on a
+  secret-gated `/peer/` listener; the dashboard and office aggregate every
+  machine's topics, metrics and limits.
+
 - Dashboard (`/` on the webhook port): server metrics (CPU, memory, disk,
   load, uptime, tmux sessions) and limits per agent — sessions live/busy/held
   plus the usage windows Claude Code and Codex report themselves.
