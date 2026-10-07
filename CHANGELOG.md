@@ -8,8 +8,6 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
-- x
-
 - Token savings and a prompt coach: auto-compact on by default (200k), `!fresh` (memory → /clear → re-read after a green `!goal`), `!lint` (holds vague prompts; ✨ improve rewrites them from your first-try prompts), correction detection feeding `!route stats` and learned routing, `!coach`, and `!ladder` (haiku/sonnet/opus by task class, stepping up when the agent struggles).
 - `!briefing HH:MM|now|off`: one message each morning — done overnight, waiting for you (questions, open PRs with GitHub's merge verdict, production errors), usage windows with their forecast, and what is queued, held or stopped — with night reel and stats buttons.
 
