@@ -318,6 +318,16 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## See it on your phone
+
+`!preview` finds the dev server the agent started (from the session's own
+process tree) and replies with a 📱 button per app. A server on all
+interfaces is linked on your tailnet directly; one on `127.0.0.1` gets a
+`tailscale serve` on the same port. Nothing is exposed to the internet.
+`!shot` sends a phone-size screenshot of it (`!shot :5173/settings`, or any
+URL) — uses Playwright's Chromium if present, else the system's, or
+`"browser"` in the config.
+
 ## Keep going until it passes
 
 `!goal npm test` (or `pytest -q`, `npm run build`, anything with an exit code)

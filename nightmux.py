@@ -199,8 +199,9 @@ def md_html(text):
 FILE_AFTER = 2  # more chunks than this and it goes up as one attachment instead
 
 
-def send_file(cfg, topic, name, data, caption="", buttons=None):
-    """Upload text as a document — one attachment beats six walls of <pre>."""
+def send_file(cfg, topic, name, data, caption="", buttons=None, kind="document"):
+    """Upload text as a document — one attachment beats six walls of <pre>.
+    kind="photo" sends an image Telegram shows inline."""
     b = "----nightmux-" + str(int(time.time() * 1000))
 
     def field(k, v):
@@ -215,11 +216,11 @@ def send_file(cfg, topic, name, data, caption="", buttons=None):
     if buttons:
         body += field("reply_markup", buttons)
     ctype = "text/plain" if isinstance(data, str) else "application/octet-stream"
-    body += (f'--{b}\r\nContent-Disposition: form-data; name="document"; '
+    body += (f'--{b}\r\nContent-Disposition: form-data; name="{kind}"; '
              f'filename="{name}"\r\nContent-Type: {ctype}\r\n\r\n').encode()
     body += (data.encode() if isinstance(data, str) else data)
     body += f"\r\n--{b}--\r\n".encode()
-    r = _post(cfg, "sendDocument", body,
+    r = _post(cfg, "send" + kind.capitalize(), body,
               {"Content-Type": f"multipart/form-data; boundary={b}"})
     return (r.get("result") or {}).get("message_id")
 
@@ -3502,7 +3503,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!update",   # runs installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
-              "!goal")     # runs a shell command after every turn
+              "!goal",     # runs a shell command after every turn
+              "!preview")  # opens a port to the tailnet
 
 
 def writes(cfg, cmd, arg=""):
@@ -3583,6 +3585,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd in ("!preview", "!shot") and sess:
+        return preview_cmd(cfg, topic, sess, cmd, arg)
     if cmd == "!server":
         peers = cfg.get("peers") or {}
         if not arg:
@@ -3653,6 +3657,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!version = build, python, and which hooks are wired\n"
                 "!stats [days] = token, cache and prompt statistics per agent from "
                 "this machine's transcripts, with what to change\n"
+                "!preview = open the app this session is serving on your phone "
+                "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -4120,6 +4126,156 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return plugin
 
     return send_prompt(cfg, state, topic, sess, text, mid)
+
+
+# ---------- !preview / !shot: see the app from the phone ----------
+# Vibe coding is judged by looking at the thing. Whatever the session's own
+# processes serve over HTTP is found from the process tree (not a port guess),
+# offered on the tailnet — never the internet — and photographed on request.
+
+def session_pids(sess):
+    """Every pid under the session's panes, from /proc (Linux)."""
+    out = tmux_out("list-panes", "-t", sess, "-F", "#{pane_pid}") or ""
+    kids = {}
+    for d in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat") as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            kids.setdefault(ppid, []).append(int(d))
+    seen, todo = set(), [int(x) for x in out.split() if x.isdigit()]
+    while todo:
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo += kids.get(p, [])
+    return seen
+
+
+def answers_http(port):
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2).close()
+    except urllib.error.HTTPError:
+        pass                     # a 404 at / is still a web server
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def dev_ports(sess, pids=None):
+    """[(port, loopback_only, process)] that something in this session serves
+    over HTTP. The agents' own sockets (agy listens on a few) are not apps."""
+    pids = session_pids(sess) if pids is None else pids
+    try:
+        out = subprocess.run(["ss", "-ltnpH"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    found = {}
+    for line in out.splitlines():
+        f, m = line.split(), re.search(r'\("([^"]+)",pid=(\d+)', line)
+        if len(f) < 4 or not m or int(m.group(2)) not in pids or m.group(1) in AGENT_BINS:
+            continue
+        addr, _, port = f[3].rpartition(":")
+        if not port.isdigit():
+            continue
+        loop = addr.strip("[]") in ("127.0.0.1", "::1") and found.get(int(port), (0, True))[1]
+        found[int(port)] = (int(port), loop, m.group(1))
+    return [p for p in sorted(found.values()) if answers_http(p[0])]
+
+
+def tailnet_host(cfg):
+    host = cfg.get("preview_host") or urllib.parse.urlsplit(cfg.get("office_url") or "").hostname
+    if host:
+        return host
+    try:
+        return json.loads(run("tailscale", "status", "--json"))["Self"]["DNSName"].rstrip(".")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def preview_link(cfg, port, loop_only):
+    """A URL your phone can open. A server bound to all interfaces is already on
+    the tailnet; one on 127.0.0.1 gets `tailscale serve` on the same port."""
+    host = tailnet_host(cfg)
+    if not host:
+        return None, "no tailnet name — set \"preview_host\" in the config"
+    if not loop_only:
+        return f"http://{host}:{port}/", ""
+    try:
+        out = run("tailscale", "serve", "--bg", f"--https={port}", f"http://127.0.0.1:{port}")
+    except OSError as e:
+        return None, f"tailscale serve: {e}"
+    if "error" in out.lower() or "denied" in out.lower():
+        return None, out[-300:]
+    return f"https://{host}:{port}/", ""
+
+
+def browser_bin(cfg):
+    """A headless-capable Chromium: config, then Playwright's, then the system's."""
+    found = sorted(glob.glob(os.path.expanduser(
+        "~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome")))
+    for b in [cfg.get("browser")] + found[-1:] + [
+            shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser")]:
+        if b and os.path.exists(b):
+            return b
+    return None
+
+
+def screenshot(cfg, url):
+    """(png bytes, error) of `url` at phone size."""
+    b = browser_bin(cfg)
+    if not b:
+        return None, 'no Chromium found — install one or set "browser" in the config'
+    out = os.path.join(STATE_DIR, f"shot-{os.getpid()}.png")
+    os.makedirs(STATE_DIR, exist_ok=True)
+    r = ""
+    try:
+        r = run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+                "--window-size=390,844", "--force-device-scale-factor=2",
+                "--virtual-time-budget=6000", f"--screenshot={out}", url, timeout=60)
+        with open(out, "rb") as f:
+            return f.read(), ""
+    except OSError:
+        return None, f"no screenshot from {os.path.basename(b)}: {r[-300:]}"
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(out)
+
+
+def preview_cmd(cfg, topic, sess, cmd, arg):
+    if cmd == "!shot" and re.match(r"https?://", arg):
+        url = arg
+    else:
+        ports = dev_ports(sess)
+        if not ports:
+            return (f"nothing in {sess} is serving HTTP. Ask it to start the dev server "
+                    "(e.g. `npm run dev`), then !preview again")
+        want = re.match(r":?(\d+)(/.*)?$", arg) if cmd == "!shot" else None
+        pick = [p for p in ports if want and p[0] == int(want.group(1))] or ports
+        if cmd == "!shot":
+            path = (want.group(2) if want else arg if arg.startswith("/") else "") or "/"
+            url = f"http://127.0.0.1:{pick[0][0]}{path}"
+        else:
+            rows, notes = [], []
+            for port, loop, proc in ports:
+                link, err = preview_link(cfg, port, loop)
+                if link:
+                    rows.append([{"text": f"📱 :{port} {proc}", "url": link}])
+                else:
+                    notes.append(f":{port} {proc} — {err}")
+            send(cfg, topic, "\n".join([f"👀 {sess} is serving (tailnet only):"] + notes),
+                 mode="plain", buttons=json.dumps({"inline_keyboard": rows + [
+                     [{"text": "📸 screenshot", "callback_data": "!shot"}]]}) if rows else None)
+            return None
+    png, err = screenshot(cfg, url)
+    if not png:
+        return f"📸 {err}"
+    send_file(cfg, topic, "shot.png", png, caption=f"📸 {url}", kind="photo",
+              buttons=kb([[("📸 again", "!shot " + (arg or "")), ("👀 preview", "!preview")]]))
+    return None
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -7535,6 +7691,32 @@ def selfcheck():
         goal_round()
         assert gsaid_[-1] == "✅ goal green: true", gsaid_[-1]
         assert goal_cmd(gcfg_, glk_, "4", "off") == "goal off" and not gcfg_["goals"]
+    # !preview finds what the session's own processes serve over HTTP — by
+    # process tree, not port guessing — and links it on the tailnet.
+    if shutil.which("ss"):
+        sk_ = socket.socket()
+        sk_.bind(("127.0.0.1", 0))
+        dport_ = sk_.getsockname()[1]
+        sk_.close()
+        dev_ = subprocess.Popen([sys.executable, "-m", "http.server", str(dport_),
+                                 "--bind", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(100):
+                if answers_http(dport_):
+                    break
+                time.sleep(0.05)
+            assert (dport_, True) in [p[:2] for p in dev_ports("x", {dev_.pid})]
+            assert dev_ports("x", {os.getpid() + 999999}) == []       # not ours
+        finally:
+            dev_.kill()
+    served_ = []
+    with stubbed(run=lambda *a, **k: served_.append(a) or "Available within your tailnet"):
+        pcfg2_ = {"office_url": "https://box.ts.net/office"}
+        assert preview_link(pcfg2_, 5173, True) == ("https://box.ts.net:5173/", "")
+        assert served_[-1][:4] == ("tailscale", "serve", "--bg", "--https=5173"), served_
+        assert preview_link(pcfg2_, 3000, False) == ("http://box.ts.net:3000/", "")
+        assert len(served_) == 1                  # already on the tailnet: no serve
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
