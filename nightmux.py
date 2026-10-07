@@ -49,6 +49,13 @@ def load_cfg():
         return json.load(f)
 
 
+def bad_cfg(e):
+    """A hand edit that broke the JSON, said in one line instead of a traceback."""
+    return (f"{CFG_PATH} is not valid JSON: {e.msg} at line {e.lineno}, column {e.colno}.\n"
+            "Usually a missing comma at the end of the line before, or a comma after the "
+            f"last item. Check it with: python3 -m json.tool {CFG_PATH}")
+
+
 def save_cfg(cfg):
     """Merge onto what is on disk, so a hand edit between saves survives.
 
@@ -8349,7 +8356,12 @@ def join_cli(code):
         sys.exit(f"cannot reach {base}: {e}\n  is this machine on the same tailnet?")
     try:
         cfg = load_cfg()
-    except (OSError, ValueError):
+    except OSError:
+        cfg = {}
+    except ValueError:
+        # Broken by hand: start fresh, but keep it to copy anything back from.
+        os.replace(CFG_PATH, CFG_PATH + ".broken")
+        print(f"   {CFG_PATH} was not valid JSON — kept as {CFG_PATH}.broken")
         cfg = {}
     cfg.update({k: got[k] for k in ("token", "chat_id", "allow_users")})
     cfg.update({"poll_telegram": False, "name": got["name"], "peer_secret": got["secret"],
@@ -8705,7 +8717,10 @@ def main():
     if added:
         print(f"PATH += {os.pathsep.join(added)}", flush=True)
     migrate()
-    cfg = load_cfg()
+    try:
+        cfg = load_cfg()
+    except json.JSONDecodeError as e:
+        sys.exit(bad_cfg(e))
     for key in ("token", "chat_id", "allow_users"):
         if not cfg.get(key):
             sys.exit(f"{CFG_PATH}: missing '{key}'  (run: {__file__} --setup)")
@@ -10560,6 +10575,12 @@ def selfcheck():
         assert e.code == 403
     page_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "+ add server" in page_ and "/api/setup" in page_
+    # A hand-broken config is named in one line: where, and the usual cause.
+    try:
+        json.loads('{\n "a": 1\n "b": 2\n}')
+    except json.JSONDecodeError as e:
+        msg_ = bad_cfg(e)
+    assert "line 3, column 2" in msg_ and "missing comma" in msg_, msg_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24

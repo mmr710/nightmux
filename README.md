@@ -115,11 +115,14 @@ The fastest way to install is using the one-line installer:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash
 ```
-*(This automatically checks for `pipx`, installs nightmux, and runs setup).*
+*(Clones — or updates — `~/nightmux` from GitHub and runs setup. Adding a
+second server? Use the command its dashboard gives you instead: servers →
+**+ add server**.)*
 
 **To test the rate limit auto-recovery instantly:** run `python3 nightmux.py --demo` after installing.
 
-Or install from PyPI manually:
+Or from PyPI (may lag behind GitHub — the peer and dashboard features need
+the current version):
 ```bash
 pipx install nightmux
 nightmux --setup
