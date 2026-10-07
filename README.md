@@ -351,6 +351,16 @@ interfaces is linked on your tailnet directly; one on `127.0.0.1` gets a
 URL) — uses Playwright's Chromium if present, else the system's, or
 `"browser"` in the config.
 
+## A second pair of eyes
+
+`!pair codex` in a Claude topic (any two agents): after every turn that
+changed the tree, the reviewer — started on the topic's bench if it is not
+running, never switched to — runs `git diff <since>` in the same folder and
+reports only real problems as `file:line — problem — fix`, or `LGTM`. LGTM is
+a quiet 👍; findings go straight back to the coder, at most 2 rounds per
+change (`!pair codex 4` for more) before it hands the disagreement to you.
+`!pair off` ends it.
+
 ## When an agent goes in circles
 
 Every finished turn leaves a few cheap readings: error lines, which files
