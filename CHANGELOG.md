@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Limit forecast: usage windows are sampled every minute; when one will fill before it resets (within 90 min) at the last hour's pace, topics working on that agent get one ⏳ warning with a switch button; `!forecast`, and the dashboard limit cards show the projected time.
+
 - Project memory: `.nightmux/memory.md` per project (what it is, how to run/test, decisions, gotchas, in progress), rewritten by the live agent after 6 turns and 15 quiet minutes and read first by every session nightmux starts or switches to; `!memory [update|on|off]`.
 
 - Office: a server strip with status dots, ⚙ dashboard / + project / + server links (deep-linking to the form and the add-server steps), and a banner when a server is not answering. Topics on a peer that is down no longer vanish from the office and dashboard: they show, marked, with where to fix it.
