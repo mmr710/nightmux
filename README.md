@@ -508,6 +508,30 @@ does not start from zero, and you stop re-explaining. It is kept out of git
 through `.git/info/exclude`. `!memory` shows it, `!memory update` refreshes
 it now, `!memory off` stops it for the topic.
 
+## Spend fewer tokens per task
+
+Every turn re-reads the whole context, so the savings are in turns that
+never happen and contexts that stay small.
+
+- **Auto-compact is on by default** at 200k tokens on Claude Code sessions
+  (`!autocompact 150k|70|off`).
+- **Fresh session per task** — once `!goal` goes green and the thread is past
+  60k tokens, the agent writes its notes to project memory, then `/clear`
+  (`/new` on codex/opencode) and re-reads them. `!fresh now` does it on
+  request; `!fresh off` keeps threads.
+- **Prompt lint** — "fix it", "still broken" are held for one tap: ✨ improve
+  rewrites it with Claude Haiku in the style of your own prompts that landed
+  first try, adding the error on the agent's screen and the `!goal` check as
+  the done-condition; or send as is. `!lint off` turns it off.
+- **Corrections are counted** — "no", "still same", "not working"… mark the
+  previous task as missed. `!coach` shows what your first-try prompts have in
+  common; `!route stats` shows the first-try rate per agent and task class,
+  and auto routing (`!route auto`) uses it once an agent has 5 tasks in a class.
+- **Model ladder** (`!ladder on`) — Claude takes light tasks on haiku, normal
+  on sonnet, heavy on opus, and steps up one model when `!goal` fails the
+  same way twice, the loop guard fires, or you correct it twice. It never
+  drops to haiku on a context over 120k.
+
 ## Keep going until it passes
 
 `!goal npm test` (or `pytest -q`, `npm run build`, anything with an exit code)

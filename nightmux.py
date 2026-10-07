@@ -1416,7 +1416,7 @@ def warn_ctx(cfg, st, topic, sess):
         
     pct = (st.get("snap") or {}).get("ctx_pct")
     if pct is None:
-        if cfg.get("autocompact") and st.get("mode"):
+        if cfg.get("autocompact") and st.get("mode"):   # set by hand: they expect it
             wk = f"ctx_blind_{sess}"
             with _warned_lock:   # wk is sess-scoped, but save_warned() writes one shared file
                 fire = not _warned.get(wk)
@@ -1426,7 +1426,7 @@ def warn_ctx(cfg, st, topic, sess):
             if fire:
                 send(cfg, topic, f"🙈 no context figure for {sess}\n"
                      "it comes from Claude Code's status line, so !ctx, autocompact "
-                     f"({cfg['autocompact']}%) and the idle hint do not run here\n"
+                     f"({cfg.get('autocompact', AUTOCOMPACT_DEFAULT)}) and the idle hint do not run here\n"
                      "!agents shows which of this topic's agents do report",
                      mode="plain")
         return
@@ -1559,6 +1559,9 @@ def spend_cap(cfg):
     return parse_amount(cfg.get("spendcap"))
 
 
+AUTOCOMPACT_DEFAULT = "200k"   # on unless set: a 300k turn costs ~6x a 50k one
+
+
 def compact_at(cfg):
     """(percent of the window, absolute tokens) from cfg["autocompact"].
 
@@ -1569,7 +1572,7 @@ def compact_at(cfg):
     and the bill was already the problem it exists to prevent. A suffixed value
     (`!autocompact 150k`) trips on what a turn actually carries instead.
     """
-    return parse_amount(cfg.get("autocompact"))
+    return parse_amount(cfg.get("autocompact", AUTOCOMPACT_DEFAULT))
 
 
 def token_tally(paths):
@@ -3590,6 +3593,9 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!deps",     # runs the package managers, types a prompt
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
+              "!lint",     # types the held prompt
+              "!ladder",   # switches the agent's model
+              "!fresh",    # clears the agent's context
               "!tools",    # changes agent config, restarts the agent
               "!desktop",  # starts programs, opens a VNC port to the tailnet
               "!errors",   # can publish a port to the internet
@@ -3694,6 +3700,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
         return route_cmd(cfg, lock, topic, arg)
+    if cmd == "!lint":
+        return lint_cmd(cfg, state, lock, topic, sess, arg, mid)
+    if cmd == "!coach":
+        send(cfg, topic, "🎯 reading your prompts…", mode="plain", quiet=True)
+        return coach_cmd(cfg)
+    if cmd == "!ladder":
+        return ladder_cmd(cfg, lock, topic, arg)
+    if cmd == "!fresh":
+        return fresh_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!reel":
         return reel_cmd(cfg, lock, topic, arg)
     if cmd == "!pair":
@@ -3789,7 +3804,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
                 "!route auto|off = send each new task to the bench agent that fits it "
-                "(routine → light, design/debug → heavy), learning from !goal results\n"
+                "(routine → light, design/debug → heavy), learning from !goal results "
+                "and corrections; !route stats = first-try rate per agent\n"
+                "!lint on|off = hold a vague prompt ('fix it') for ✨ improve or send as is\n"
+                "!coach = what your prompts that land first try have in common\n"
+                "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
+                "struggles\n!fresh now|on|off = after a green !goal: notes to memory, "
+                "/clear, re-read\n"
                 "!reel [hours] | daily HH:MM | off = the night as a GIF of the office, "
                 "with what each agent did\n"
                 "!pair <agent> [rounds] | off = a second agent reviews every change "
@@ -3831,7 +3852,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 f"!plugins = list executables in {PLUGIN_DIR}; any file there "
                 "is a command, its name the trigger\n"
                 "!autocompact <pct|150k|off> = /compact at a share of the window, "
-                "or at a token count\n!idlectx <pct|off>\n"
+                "or at a token count (default 200k)\n!idlectx <pct|off>\n"
                 "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
                 "turns, or tokens, in 5m\n"
                 "type / for the same commands with autocomplete\n"
@@ -4283,10 +4304,17 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if plugin is not None:
             return plugin
 
+    held = coach(cfg, state, lock, topic, sess, text)
+    if held is not None:
+        return held
     note = ""
     routed = route(cfg, state, lock, topic, sess, text)
     if routed:
         sess, note = routed
+    tier, queued = coach_after(cfg, state, topic, sess, text)
+    if queued:
+        save_queue(state)
+        return "\n".join(x for x in (note, tier) if x)
     out = send_prompt(cfg, state, topic, sess, text, mid)
     return "\n".join(x for x in (note, out) if x) or None
 
@@ -5042,7 +5070,8 @@ LIGHT = re.compile(r"^\W*(?:rename|format|lint|fix (?:the |a )?typo|typo|add (?:
 HEAVY = re.compile(r"\b(?:design|architect\w*|refactor\w*|why\b|debug\w*|investigat\w*|"
                    r"race condition|deadlock|security|vulnerab\w*|performance|optimi[sz]\w*|"
                    r"migrat\w*|from scratch|root cause|memory leak|concurren\w*)", re.I)
-_route_last = {}  # topic -> (class, agent) of the last routed task, for learning
+_route_last = {}  # topic -> (class, agent) of the last task, for learning
+ROUTE_MIN_N = 5  # outcomes before a learned rate outranks the defaults
 
 
 def task_class(text):
@@ -5057,8 +5086,14 @@ def route_pick(cfg, cls, live):
     """Best agent for a class among the live ones: learned score, then prefs."""
     prefs = (cfg.get("route_prefs") or {}).get(cls) or ROUTE_PREFS.get(cls) or []
     score = (cfg.get("route_scores") or {}).get(cls) or {}
+    seen = (cfg.get("route_stats") or {}).get(cls) or {}
+
+    def rate(a):   # first-try rate once there is enough of it, else a coin
+        ok, n = seen.get(a) or (0, 0)
+        return round((ok + 1) / (n + 2), 2) if n >= ROUTE_MIN_N else 0.5
     cand = [a for a in live if a in prefs] or list(live)
-    return max(cand, key=lambda a: (score.get(a, 0) if abs(score.get(a, 0)) >= 2 else 0,
+    return max(cand, key=lambda a: (rate(a),
+                                    score.get(a, 0) if abs(score.get(a, 0)) >= 2 else 0,
                                     -prefs.index(a) if a in prefs else -99))
 
 
@@ -5088,8 +5123,13 @@ def route(cfg, state, lock, topic, sess, text):
 
 
 def route_learn(cfg, topic, delta):
-    cls, agent_ = _route_last.get(topic) or (None, None)
-    if not cls or not agent_ or (cfg.get("route") or {}).get(topic) != "auto":
+    """One outcome per task: goal green/stuck, or how the next prompt reads."""
+    cls, agent_ = _route_last.pop(topic, None) or (None, None)
+    if not cls or not agent_:
+        return
+    ok_n = cfg.setdefault("route_stats", {}).setdefault(cls, {}).setdefault(agent_, [0, 0])
+    ok_n[0], ok_n[1] = ok_n[0] + (delta > 0), ok_n[1] + 1
+    if (cfg.get("route") or {}).get(topic) != "auto":
         return
     sc = cfg.setdefault("route_scores", {}).setdefault(cls, {})
     sc[agent_] = max(-10, min(10, sc.get(agent_, 0) + delta))
@@ -5108,11 +5148,378 @@ def route_cmd(cfg, lock, topic, arg):
                 "bench — light → " + " / ".join(ROUTE_PREFS["light"][:2]) + ", heavy → "
                 + " / ".join(ROUTE_PREFS["heavy"][:2]) + ". Mid-task prompts stay put."
                 if arg == "auto" else "↪️ routing off")
+    if arg == "stats":
+        rows = [f"{c:<7} {a:<9} {ok}/{n} first try ({ok / n:.0%})"
+                for c, v in sorted((cfg.get("route_stats") or {}).items())
+                for a, (ok, n) in sorted(v.items(), key=lambda kv: -kv[1][1]) if n]
+        return ("↪️ learned routing — a task counts as first-try when !goal goes green or "
+                "your next prompt is not a correction\n" + ("\n".join(rows) or "nothing yet")
+                + f"\nauto routing uses a rate once an agent has {ROUTE_MIN_N}+ tasks in a class")
     sc = cfg.get("route_scores") or {}
     return ((f"↪️ routing {(cfg.get('route') or {}).get(topic) or 'off'} here\n")
             + ("learned: " + "; ".join(f"{c}: " + ", ".join(f"{a} {n:+d}" for a, n in v.items())
                                        for c, v in sc.items()) if sc else "nothing learned yet")
-            + "\n!route auto|off")
+            + "\n!route auto|off|stats")
+
+
+# ---------- prompt coach: lint, rewrite, corrections, model ladder, fresh ----------
+# Every turn re-reads the whole context, so the cheap turns are the ones that
+# never had to happen: the "fix it" that sends the agent exploring, the
+# correction after a wrong guess, the 300k thread carried into an unrelated
+# task, the opus call for a rename. The coach holds a vague prompt for one tap,
+# rewrites it in the style of your own prompts that landed first try, counts
+# corrections (feeding !route's learned table), moves Claude up a model when it
+# is struggling and back down for light work, and starts a fresh session once
+# a task is done — with the project memory carrying what matters across.
+CORRECTION = re.compile(
+    r"^\s*(?:no\b|nope\b|wrong\b|revert\b|undo\b|stop\b)|that'?s (?:wrong|not)|not what I|"
+    r"\bstill\b(?! need)|\bsame (?:error|issue|problem|thing|result)\b|"
+    r"\bnot (?:working|showing|fixed|loading|right|correct|updated|changed)\b|"
+    r"\b(?:doesn'?t|didn'?t|isn'?t|wasn'?t|won'?t|can'?t) (?:work|show|load|fix|change|run|start)|"
+    r"\b(?:is|it'?s|its|got|are) (?:stuck|broken|wrong|missing)\b|"
+    r"\byou (?:broke|missed|forgot|removed|deleted)\b|why did you|\bproperly\b", re.I)
+VAGUE = re.compile(
+    r"^\s*(?:(?:please )?fix (?:it|this|that|the bug|the error)|make it work|it(?:'?s| is) "
+    r"(?:broken|not working)|try again|do (?:it|that|this) better|improve (?:it|this)|"
+    r"something(?:'?s| is) wrong|not working)\W*$", re.I)
+FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the same|same)|"
+                      r"(?:it(?:'?s| is) )?(?:stuck|not working|broken)|"
+                    r"(?:it )?(?:doesn'?t|didn'?t) work|same (?:error|issue|problem))", re.I)
+P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
+P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
+P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
+LADDER = {"claude": ["haiku", "sonnet", "opus"]}
+LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
+LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
+FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new"}
+FRESH_MIN = 60000           # a thread this small is cheap to keep
+_lint_hold = {}   # topic -> {"text", "better"?}
+_lint_pass = set()
+_coach = {}       # topic -> {"miss": consecutive corrections}
+_ladder = {}      # topic -> tier index last set
+_lessons = {}
+
+
+def prompt_feats(text):
+    return {"file": bool(P_FILE.search(text)), "error": bool(P_ERR.search(text)),
+            "done": bool(P_DONE.search(text)), "long": len(text) >= 80}
+
+
+def is_correction(text):
+    return bool(CORRECTION.search(text[:160]))
+
+
+def lint_why(text):
+    """What a prompt lacks, when it lacks enough to send the agent exploring."""
+    f = prompt_feats(text)
+    if VAGUE.match(text) or (FAIL_SAY.match(text) and len(text) <= 25
+                             and not f["file"] and not f["error"]):
+        return [w for k, w in (("file", "which file/function"), ("error", "the error"),
+                               ("done", "what done looks like")) if not f[k]]
+    return []
+
+
+def coach_log(rec):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "corrections.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def ladder_on(cfg, topic):
+    return (cfg.get("ladder") or {}).get(str(topic)) == "on"
+
+
+def ladder_tiers(cfg, topic, sess):
+    a = agent_key(cfg, topic, sess)
+    return ((cfg.get("ladder_tiers") or {}).get(a) or LADDER.get(a)) if ladder_on(cfg, topic) else None
+
+
+def ladder_set(cfg, state, topic, sess, idx, why):
+    """Queue a /model switch to tier idx; the switch itself waits for idle like a prompt."""
+    tiers = ladder_tiers(cfg, topic, sess)
+    if not tiers:
+        return None
+    idx = max(0, min(len(tiers) - 1, idx))
+    tok = (state.get(sess) or {}).get("ctx_tok")
+    if idx == 0 and tok and tok > LADDER_HAIKU_MAX:
+        idx = 1
+    if _ladder.get(topic) == idx:
+        return None
+    _ladder[topic] = idx
+    state.setdefault(sess, {}).setdefault("queue", []).append(f"/model {tiers[idx]}")
+    return f"🪜 {sess} → {tiers[idx]} ({why})"
+
+
+def ladder_up(cfg, state, topic, sess, why):
+    tiers = ladder_tiers(cfg, topic, sess)
+    if not tiers:
+        return
+    cur = _ladder.get(topic, LADDER_START["normal"])
+    if cur < len(tiers) - 1:
+        note = ladder_set(cfg, state, topic, sess, cur + 1, why)
+        if note:
+            send(cfg, topic, note + " · !ladder off to stop", mode="plain")
+
+
+def fresh_after(cfg, state, topic, sess, why, force=False):
+    """A finished task's thread is dead weight: save notes, clear, re-read notes."""
+    if (cfg.get("fresh") or {}).get(str(topic)) == "off" or not sess:
+        return None
+    clear = FRESH.get(agent_key(cfg, topic, sess))
+    st = state.setdefault(sess, {})
+    if not clear or (st.get("queue") and not force):
+        return None              # more of your work is waiting on this thread
+    tok = st.get("ctx_tok")
+    if tok is not None and tok < FRESH_MIN and not force:
+        return None
+    mem = mem_on(cfg, topic) and (cfg.get("dirs") or {}).get(topic)
+    if mem:
+        mem_ask(cfg, state, topic, sess)
+    st.setdefault("queue", []).extend([clear] + ([MEM_READ] if mem else []))
+    msg = (f"🧼 {why} → " + ("notes to .nightmux/memory.md, then " if mem else "")
+           + f"{clear} — the next task starts small · !fresh off to keep threads")
+    send(cfg, topic, msg, mode="plain", quiet=True)
+    return msg
+
+
+def session_errors(sess, n=6):
+    lines = [l.strip() for l in (visible(sess) or "").split("\n") if P_ERR.search(l)]
+    return redact("\n".join(lines[-n:]))[-1200:]
+
+
+def improve_plain(cfg, topic, sess, text):
+    """The rewrite with no model: what nightmux itself knows about the task."""
+    add, errs = [], session_errors(sess) if sess else ""
+    goal = ((cfg.get("goals") or {}).get(topic) or {}).get("cmd")
+    if errs and not P_ERR.search(text):
+        add.append("The error on screen:\n" + errs)
+    add.append(f"Done when `{goal}` passes." if goal else
+               "Done when you have shown it working (a test, a run, or the output).")
+    add.append("Find the root cause before editing, and say which file you changed and why.")
+    return text.rstrip() + "\n\n" + "\n".join(add)
+
+
+def prompt_lessons(home=None):
+    """Your Claude prompts, split by whether the next prompt corrected them.
+
+    Gives the first-try rate with and without each feature, and the best
+    first-try prompts as examples for the rewrite. Kept in memory, cached an
+    hour, never written anywhere.
+    """
+    hit = _lessons.get("r")
+    if home is None and hit and time.time() - hit["at"] < 3600:
+        return hit
+    root = os.path.join(home or os.path.expanduser("~"), ".claude", "projects")
+    since = time.time() - 60 * 86400
+    rows = []
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            p = os.path.join(dirpath, n)
+            if not n.endswith(".jsonl") or os.path.getmtime(p) < since:
+                continue
+            seq = []
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"type":"user"' not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    c = (d.get("message") or {}).get("content")
+                    if (isinstance(c, str) and not d.get("isMeta") and not d.get("isSidechain")
+                            and not c.startswith(("<", "/", "!")) and not NUDGE.match(c)):
+                        seq.append(c)
+            for a, b in zip(seq, seq[1:]):
+                rows.append((a, not is_correction(b)))
+    stats = {}
+    for k in ("file", "error", "done", "long"):
+        w = [ok for t, ok in rows if prompt_feats(t)[k]]
+        wo = [ok for t, ok in rows if not prompt_feats(t)[k]]
+        stats[k] = (sum(w) / len(w) if w else None, len(w),
+                    sum(wo) / len(wo) if wo else None, len(wo))
+    good = [t for t, ok in rows if ok and 60 <= len(t) <= 500]
+    good.sort(key=lambda t: -sum(prompt_feats(t).values()))
+    out = {"at": time.time(), "n": len(rows), "ok": sum(ok for _, ok in rows),
+           "feats": stats, "winners": [redact(t) for t in good[:5]]}
+    if home is None:
+        _lessons["r"] = out
+    return out
+
+
+def lint_rewrite(cfg, topic, sess, draft):
+    """Background: rewrite the held prompt with a small model, else plainly."""
+    better = ""
+    claude = shutil.which("claude")
+    if claude:
+        les = prompt_lessons()
+        ask = ("<rewrite> Rewrite this prompt for a coding agent so it can be done in one go. "
+               "Keep the user's intent and voice. Add only what is missing and known: the "
+               "file or function, the exact error, what done looks like. Never invent facts. "
+               "Output only the rewritten prompt.\n\nThis user's prompts that worked first "
+               "try:\n---\n" + "\n---\n".join(les["winners"][:3])
+               + "\n\nErrors on the agent's screen right now:\n" + (session_errors(sess) or "none")
+               + "\n\nCheck that must pass when done: " + (((cfg.get("goals") or {}).get(topic)
+                                                         or {}).get("cmd") or "none set")
+               + "\n\nPrompt to rewrite:\n" + draft)
+        try:
+            p = subprocess.run([claude, "-p", "--model", "haiku", ask], capture_output=True,
+                               text=True, timeout=90, cwd=STATE_DIR, stdin=subprocess.DEVNULL)
+            better = p.stdout.strip() if p.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not better or len(better) > 4000:
+        better = improve_plain(cfg, topic, sess, draft)
+    h = _lint_hold.get(topic)
+    if not h or h["text"] != draft:
+        return                    # you sent something else meanwhile
+    h["better"] = better
+    send(cfg, topic, "✨ " + better, mode="plain",
+         buttons=kb([[("send ✨", "!lint better"), ("send original", "!lint send")]]))
+
+
+def coach(cfg, state, lock, topic, sess, text):
+    """Before a typed prompt goes out: hold it if vague, learn from it if not."""
+    _lint_hold.pop(topic, None)
+    if text.startswith(("!", "/")) or not sess:
+        return None
+    nudge = NUDGE.match(text)
+    if cfg.get("lint", "on") != "off" and topic not in _lint_pass:
+        why = lint_why(text)
+        if why:
+            _lint_hold[topic] = {"text": text}
+            send(cfg, topic, "✏️ held: this leaves the agent guessing — no " + ", no ".join(why)
+                 + ". Guessing means exploring, and exploring re-reads the context.",
+                 mode="plain",
+                 buttons=kb([[("✨ improve", "!lint improve"), ("send as is", "!lint send")]]))
+            return ""
+    _lint_pass.discard(topic)
+    if nudge:
+        return None
+    co = _coach.setdefault(topic, {"miss": 0})
+    if is_correction(text):
+        prev = _route_last.get(topic)
+        if prev:
+            coach_log({"t": int(time.time()), "topic": topic, "cls": prev[0], "agent": prev[1]})
+        route_learn(cfg, topic, -1)
+        co["miss"] += 1
+        if co["miss"] >= 2:
+            co["miss"] = 0
+            ladder_up(cfg, state, topic, sess, "two corrections in a row")
+    else:
+        route_learn(cfg, topic, +1)
+        co["miss"] = 0
+    return None
+
+
+def coach_after(cfg, state, topic, sess, text):
+    """After routing: remember the task for learning, pick its model tier.
+
+    (note, queued) — queued True when the prompt went into the queue behind a
+    /model switch rather than straight to the pane.
+    """
+    if text.startswith(("!", "/")) or not sess or NUDGE.match(text) or is_correction(text):
+        return None, False
+    cls = task_class(text)
+    _route_last[topic] = (cls, agent_key(cfg, topic, sess))
+    st = state.get(sess) or {}
+    if st.get("mode") != "idle" or st.get("queue"):
+        return None, False            # mid-task: the model stays as it is
+    note = ladder_set(cfg, state, topic, sess, LADDER_START[cls], f"{cls} task")
+    if not note:
+        return None, False
+    state[sess]["queue"].append(text)
+    return note + " · !ladder off to stop", True
+
+
+def lint_cmd(cfg, state, lock, topic, sess, arg, mid=None):
+    h = _lint_hold.get(topic)
+    if arg in ("on", "off"):
+        with lock:
+            cfg["lint"] = arg
+            save_cfg(cfg)
+        return f"✏️ prompt lint {arg}"
+    if arg in ("send", "better"):
+        if not h:
+            return "nothing held"
+        _lint_hold.pop(topic, None)
+        _lint_pass.add(topic)
+        return handle(cfg, state, lock, topic, h.get("better") if arg == "better" and h.get("better")
+                      else h["text"], mid)
+    if arg == "improve":
+        if not h:
+            return "nothing held"
+        threading.Thread(target=lint_rewrite, args=(cfg, topic, sess, h["text"]),
+                         daemon=True).start()
+        return "✨ rewriting…"
+    return (f"✏️ prompt lint {cfg.get('lint', 'on')} — holds a vague prompt ('fix it', "
+            "'still broken') for one tap: ✨ improve or send as is\n!lint on|off")
+
+
+def coach_cmd(cfg):
+    les = prompt_lessons()
+    if not les["n"]:
+        return "🎯 no Claude prompts in the last 60 days to learn from"
+    out = [f"🎯 {les['n']} prompts, 60 days: {les['ok'] / les['n']:.0%} landed without a "
+           "correction"]
+    names = {"file": "name a file/function", "error": "paste the error",
+             "done": "say what done looks like", "long": "are 80+ chars"}
+    for k, (w, nw, wo, nwo) in les["feats"].items():
+        if w is not None and wo is not None and nw >= 5 and nwo >= 5:
+            out.append(f"• prompts that {names[k]}: {w:.0%} first try vs {wo:.0%} ({nw}/{nwo})")
+    try:
+        with open(os.path.join(STATE_DIR, "corrections.jsonl")) as f:
+            recs = [json.loads(l) for l in f if l.strip()][-200:]
+    except (OSError, ValueError):
+        recs = []
+    if recs:
+        by = {}
+        for r in recs:
+            k = f"{r.get('cls')} → {r.get('agent')}"
+            by[k] = by.get(k, 0) + 1
+        out.append("corrections here by task: " + ", ".join(
+            f"{k} {n}" for k, n in sorted(by.items(), key=lambda kv: -kv[1])[:5]))
+    out.append("!route stats = first-try rate per agent · !lint · !ladder · !fresh")
+    return "\n".join(out)
+
+
+def ladder_cmd(cfg, lock, topic, arg):
+    if arg in ("on", "off"):
+        with lock:
+            lm = cfg.setdefault("ladder", {})
+            if arg == "on":
+                lm[str(topic)] = "on"
+            else:
+                lm.pop(str(topic), None)
+            save_cfg(cfg)
+        _ladder.pop(topic, None)
+    tiers = LADDER.get("claude")
+    return (f"🪜 model ladder {'on' if ladder_on(cfg, topic) else 'off'} here — Claude "
+            f"starts each task on {tiers[0]} (light) / {tiers[1]} / {tiers[2]} (heavy), steps "
+            "up when !goal fails the same way twice, the loop guard fires or you correct it "
+            "twice\n!ladder on|off")
+
+
+def fresh_cmd(cfg, state, lock, topic, sess, arg):
+    if arg in ("on", "off"):
+        with lock:
+            fm = cfg.setdefault("fresh", {})
+            if arg == "off":
+                fm[str(topic)] = "off"
+            else:
+                fm.pop(str(topic), None)
+            save_cfg(cfg)
+        return f"🧼 fresh session after a green !goal: {arg}"
+    if arg == "now":
+        msg = fresh_after(cfg, state, topic, sess, "on request", force=True)
+        return "" if msg else "🧼 nothing to clear here (no session, or an agent with no clear command)"
+    on = (cfg.get("fresh") or {}).get(str(topic)) != "off"
+    return (f"🧼 fresh sessions {'on' if on else 'off'} — once !goal goes green and the "
+            f"thread is over {FRESH_MIN // 1000}k tokens: notes to project memory, then /clear "
+            "and re-read them, so the next task does not carry the last one\n!fresh now|on|off")
 
 
 # ---------- night reel: the night as a GIF ----------
@@ -5630,6 +6037,7 @@ def loop_tick(cfg, state, lock):
             continue
         lp["at"], lp["fired"] = now, lp["fired"] + 1
         auto = cfg.get("loopguard") == "auto" and lp["fired"] == 1
+        ladder_up(cfg, state, topic, sess, "looks stuck")
         if auto:
             state.setdefault(sess, {}).setdefault("queue", []).append(prompts(cfg)["step-back"])
         cur = (cfg.get("started") or {}).get(topic)
@@ -6386,6 +6794,7 @@ def goal_tick(cfg, state):
             route_learn(cfg, topic, +1)
             send(cfg, topic, f"✅ goal green: {cmd}"
                  + (f" — after {n} fix round{'s' * (n != 1)}" if n else ""), mode="plain")
+            fresh_after(cfg, state, topic, run["sess"], "task done")
             continue
         tail = goal_tail(run["out"])
         # Numbers change between runs of the same failure (times, ids, line
@@ -6401,6 +6810,8 @@ def goal_tick(cfg, state):
             send(cfg, topic, f"🛑 goal stuck — {why}: {cmd} (exit {run['rc']})\n\n{tail[-1500:]}"
                  "\n\nyour next message resumes it · !goal off stops it", mode="mono")
             continue
+        if gs["same"] == 2:
+            ladder_up(cfg, state, topic, run["sess"], "the same failure twice")
         state.setdefault(run["sess"], {}).setdefault("queue", []).append(
             f"The check `{cmd}` failed (exit {run['rc']}, round {gs['rounds']}/{top}). "
             f"Last lines:\n{tail}\n\nFix the root cause in the code. Do not skip, "
@@ -10777,7 +11188,7 @@ def selfcheck():
         assert "4" not in _goal_due
         goal_cmd(gcfg_, glk_, "4", "true")
         goal_round()
-        assert gsaid_[-1] == "✅ goal green: true", gsaid_[-1]
+        assert "✅ goal green: true" in gsaid_ and "/clear" in gst_["g"]["queue"], gsaid_[-2:]
         assert goal_cmd(gcfg_, glk_, "4", "off") == "goal off" and not gcfg_["goals"]
     # !preview finds what the session's own processes serve over HTTP — by
     # process tree, not port guessing — and links it on the tailnet.
@@ -10905,8 +11316,61 @@ def selfcheck():
         ro_ = route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y")
         assert ro_ and ro_[0] == "r-codex" and "light" in ro_[1] and switched_ == ["codex"], ro_
         route_learn(rcfg_, "4", -1)
+        assert "4" not in _route_last              # one outcome per task
+        _route_last["4"] = ("light", "codex")
         route_learn(rcfg_, "4", -1)
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
+        rcfg_["route_stats"] = {"light": {"codex": [9, 10], "claude": [1, 10]}}
+        assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "codex"
+    # Prompt coach: vague prompts held, corrections learned, model ladder, fresh.
+    assert lint_why("fix it") and lint_why("still broken") and lint_why("Doesn't work")
+    assert not lint_why("no, do not do that") and not lint_why("fix the null check in app.js")
+    assert not lint_why("add a dark mode toggle")
+    ccfg_ = {"topics": {"9": "k"}, "ladder": {"9": "on"}}
+    cst_, csaid_, clog_ = {"k": {"mode": "idle"}}, [], []
+    with stubbed(send=lambda c, t, x, **k: csaid_.append(x), coach_log=clog_.append,
+                 agent_key=lambda c, t, s: "claude", visible=lambda s: "TypeError: x is null\nok"):
+        assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "fix it") == ""
+        assert _lint_hold["9"]["text"] == "fix it" and "held" in csaid_[-1]
+        better = improve_plain(ccfg_, "9", "k", "fix it")
+        assert "TypeError" in better and "root cause" in better, better
+        _lint_pass.add("9")
+        assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "fix it") is None
+        assert "9" not in _lint_pass and "9" not in _lint_hold
+        note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
+        assert queued and "haiku" in note and cst_["k"]["queue"] == [
+            "/model haiku", "rename foo to bar in utils"], cst_
+        assert _route_last["9"] == ("light", "claude")
+        cst_["k"]["queue"] = []
+        assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
+        assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
+        _route_last["9"] = ("light", "claude")
+        coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
+        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
+        cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
+        _ladder.pop("9", None)
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") and cst_["k"]["queue"] == ["/model sonnet"]
+        cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 10000
+        assert fresh_after(ccfg_, cst_, "9", "k", "done") is None          # small: keep
+        assert fresh_after(ccfg_, cst_, "9", "k", "done", force=True)
+        assert cst_["k"]["queue"] == ["/clear"], cst_
+        ccfg_["fresh"] = {"9": "off"}
+        assert fresh_after(ccfg_, cst_, "9", "k", "done", force=True) is None
+    _ladder.pop("9", None)
+    _route_last.pop("9", None)
+    _coach.pop("9", None)
+    with tempfile.TemporaryDirectory() as lh_:
+        os.makedirs(os.path.join(lh_, ".claude", "projects", "x"))
+        rows_ = ["fix the parser in lexer.py so `tokens()` handles tabs, tests must pass",
+                 "continue", "now add a cli flag", "that's wrong, it should be --tabs",
+                 "add tests in test_lexer.py for the error on line 3 until they pass", "thanks"]
+        with open(os.path.join(lh_, ".claude", "projects", "x", "s.jsonl"), "w") as f:
+            for r_ in rows_:
+                f.write(json.dumps({"type": "user", "message": {"content": r_}},
+                                   separators=(",", ":")) + "\n")
+        les_ = prompt_lessons(home=lh_)
+        assert les_["n"] == 4 and les_["ok"] == 3, les_
+        assert les_["feats"]["file"][0] == 1.0 and les_["winners"][0].startswith(("add tests", "fix the")), les_
     # Point and fix: a photo soon after a preview carries the page, its console
     # and DOM; one with no recent preview stays a plain image path.
     with stubbed(page_probe=lambda c, u: (['Uncaught TypeError: x is null  (app.js:12)'],
