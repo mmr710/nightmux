@@ -2076,10 +2076,12 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                    lines, prompt_key(lines)):
             return
     elif body:
-        if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body):
+        if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body) \
+                and not pair_review_capture(topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
+            pair_capture(cfg, topic, sess, body)
     else:
         return
     if st.get("react"):
@@ -2438,6 +2440,7 @@ def watcher(cfg, state, lock):
             goal_tick(cfg, state)
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
+            pair_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3511,6 +3514,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
               "!loopguard",  # interrupts or switches the agent
+              "!pair",     # starts a second agent and types to it
               "!watch")    # can merge a pull request
 
 
@@ -3592,6 +3596,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!pair":
+        return pair_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!loopguard":
         return loopguard_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!p":
@@ -3678,6 +3684,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
+                "!pair <agent> [rounds] | off = a second agent reviews every change "
+                "this one makes; real issues go back to the coder, LGTM stays quiet\n"
                 "!loopguard [ping|auto|off] = notice an agent going in circles (same "
                 "error, same file churned, apologies) and ping you, or step it back\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
@@ -4582,6 +4590,145 @@ def idea_cmd(cfg, state, lock, topic, arg):
             "green.\n!preview once it serves something · !goal off to stop the loop")
 
 
+# ---------- ghost pair: a second model reviews every change ----------
+# One model reviewing its own work shares its own blind spots. With !pair on, a
+# finished turn that changed the tree is put to another agent on the bench —
+# same folder, so it reads `git diff <since>` itself rather than a paste. LGTM
+# is a 👍; anything else goes back to the coder, a few rounds at most, and the
+# review rounds are not posted as answers (the verdict is).
+PAIR_ROUNDS = 2
+PAIR_REVIEW = (
+    "Review another agent's latest change in this folder: run `git diff {sha}` and "
+    "read what changed. Its own summary:\n{summary}\n\n"
+    "Report only real problems — bugs, security holes, broken edge cases, missing "
+    "tests for new behaviour — one per line as `file:line — problem — fix`. Do not "
+    "edit any file. Style nits are not problems. If there is nothing real, reply "
+    "with exactly: LGTM")
+_pair = {}        # topic -> {"sha", "rounds", "due", "wait", "got"}
+
+
+def pair_capture(cfg, topic, sess, body):
+    p, conf = _pair.get(topic), (cfg.get("pair") or {}).get(topic)
+    if conf and p is not None and sess == cfg.get("topics", {}).get(topic) and not p.get("wait"):
+        p["due"] = body or ""
+
+
+def pair_review_capture(topic, sess, body):
+    p = _pair.get(topic)
+    if not p or p.get("wait") != sess:
+        return False
+    p["got"] = body or ""
+    return True
+
+
+def git_head(cwd):
+    out = run("git", "-C", cwd, "rev-parse", "HEAD") if cwd else ""
+    return out.strip() if re.match(r"^[0-9a-f]{40}$", out.strip()) else None
+
+
+def pair_reviewer(cfg, topic, key):
+    """The reviewer's session on this topic's bench, started (not switched to)
+    when it is not running."""
+    bench, cwd = bench_of(cfg, topic), (cfg.get("dirs") or {}).get(topic)
+    sess = bench.get(key)
+    if sess and has_session(sess):
+        return sess, ""
+    if not cwd:
+        return None, "no folder recorded for this topic"
+    base = re.sub(r"-(%s)$" % "|".join(map(re.escape, agents(cfg))), "",
+                  cfg["topics"][topic])
+    sess = sess or f"{base}-{key}"
+    spawn(sess, cwd, agent(cfg, key)[0])
+    cfg.setdefault("bench", {}).setdefault(str(topic), {})[key] = sess
+    save_cfg(cfg)
+    return sess, f"started {key} as '{sess}' to review"
+
+
+def pair_tick(cfg, state, lock):
+    for topic in cfg.get("pair") or {}:       # a restart forgets the baseline
+        if topic not in _pair:
+            head = git_head((cfg.get("dirs") or {}).get(topic))
+            if head:
+                _pair[topic] = {"sha": head, "rounds": 0}
+    for topic, p in list(_pair.items()):
+        conf = (cfg.get("pair") or {}).get(topic)
+        coder = cfg.get("topics", {}).get(topic)
+        cwd = (cfg.get("dirs") or {}).get(topic)
+        if not conf or not coder:
+            _pair.pop(topic, None)
+            continue
+        if "got" in p:
+            review, rsess = p.pop("got").strip(), p.pop("wait")
+            p["sha"] = git_head(cwd) or p["sha"]
+            if not review or re.match(r"^\W*LGTM\b", review, re.I):
+                send(cfg, topic, f"👥 {conf['with']}: LGTM 👍", mode="plain", quiet=True)
+                p["rounds"] = 0
+                continue
+            p["rounds"] += 1
+            if p["rounds"] > (conf.get("max") or PAIR_ROUNDS):
+                send(cfg, topic, f"👥 {conf['with']} still has issues after {p['rounds'] - 1} "
+                     f"rounds — your call:\n\n{review[:2500]}", mode="md")
+                p["rounds"] = 0
+                continue
+            state.setdefault(coder, {}).setdefault("queue", []).append(
+                f"Review of your last change by {conf['with']}:\n{review[:4000]}\n\n"
+                "Fix what is real. If you disagree with a point, say why in one line "
+                "instead of changing it.")
+            send(cfg, topic, f"👥 {conf['with']} found issues — sent to {coder}:\n\n"
+                 f"{review[:2500]}", mode="md")
+            continue
+        if "due" not in p or p.get("wait"):
+            continue
+        st = state.get(coder) or {}
+        if st.get("queue") or st.get("mode") != "idle":
+            continue
+        summary = p.pop("due")
+        changed = run("git", "-C", cwd, "diff", "--stat", p["sha"]).strip() if cwd else ""
+        if not changed or changed.startswith("fatal"):
+            continue                                  # a turn that touched nothing
+        rsess, _ = pair_reviewer(cfg, topic, conf["with"])
+        if not rsess:
+            continue
+        p["wait"] = rsess
+        state.setdefault(rsess, {}).setdefault("queue", []).append(
+            PAIR_REVIEW.format(sha=p["sha"][:12], summary=redact(summary)[-1500:] or "(none)"))
+
+
+def pair_cmd(cfg, state, lock, topic, sess, arg):
+    pairs = cfg.get("pair") or {}
+    if arg == "off":
+        with lock:
+            pairs.pop(topic, None)
+            save_cfg(cfg)
+        _pair.pop(topic, None)
+        return "👥 pair off"
+    m = re.match(r"(\S+)(?:\s+(\d+))?$", arg)
+    if not m:
+        conf = pairs.get(topic)
+        return (f"👥 {conf['with']} reviews every change here" if conf else "no pair here") + \
+            "\n!pair <agent> [rounds] · !pair off"
+    key, n = m.group(1).lower(), m.group(2)
+    if key not in agents(cfg):
+        return f"no agent '{key}' — have: {', '.join(agents(cfg))}"
+    if not sess:
+        return "bind a session here first"
+    if key == (cfg.get("started") or {}).get(topic):
+        return f"{key} is the one coding here — pick a different agent to review"
+    head = git_head((cfg.get("dirs") or {}).get(topic))
+    if not head:
+        return "the topic's folder is not a git repo with a commit — the review needs a diff"
+    rsess, note = pair_reviewer(cfg, topic, key)
+    if not rsess:
+        return f"could not start {key}: {note}"
+    with lock:
+        cfg["pair"] = pairs
+        pairs[topic] = {"with": key, **({"max": int(n)} if n else {})}
+        save_cfg(cfg)
+    _pair[topic] = {"sha": head, "rounds": 0}
+    return (f"👥 {key} ('{rsess}') now reviews every change {sess} makes, from "
+            f"{head[:8]} on" + (f"\n{note}" if note else ""))
+
+
 # ---------- loop guard: notice an agent going in circles ----------
 # Left alone — and !goal / !watch leave it alone for hours — an agent can burn a
 # whole usage window re-applying one fix. Every finished turn leaves a few cheap
@@ -4827,6 +4974,8 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
     if topic in _goal:       # you stepped in: the fix-round budget starts over
         _goal[topic] = {"rounds": 0, "same": 0}
     _loop.pop(topic, None)   # ...and whatever looked like a loop was before you
+    if topic in _pair:
+        _pair[topic]["rounds"] = 0
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -8220,6 +8369,43 @@ def selfcheck():
         assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
         assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
         icfg_["goals"].clear()
+    # Ghost pair: a turn that changed the tree goes to the reviewer (in the same
+    # folder, by diff range); its findings go to the coder, LGTM is a 👍, a turn
+    # that changed nothing is not reviewed.
+    psaid3_ = []
+    with tempfile.TemporaryDirectory() as pg_, stubbed(
+            spawn=lambda *a: None, has_session=lambda n: n == "c", save_cfg=lambda c: None,
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: psaid3_.append(x)):
+        for a_ in (("init", "-q"), ("-c", "user.email=a@b", "-c", "user.name=a", "commit",
+                                    "-q", "--allow-empty", "-m", "init")):
+            subprocess.run(("git", "-C", pg_) + a_, check=True)
+        pcfg3_ = {"topics": {"9": "c"}, "dirs": {"9": pg_}, "started": {"9": "claude"}}
+        pst3_ = {"c": {"mode": "idle"}}
+        _pair.clear()
+        assert "now reviews" in pair_cmd(pcfg3_, pst3_, threading.Lock(), "9", "c", "codex")
+        assert pcfg3_["bench"]["9"]["codex"] == "c-codex"
+        pair_capture(pcfg3_, "9", "c", "renamed nothing")
+        pair_tick(pcfg3_, pst3_, threading.Lock())
+        assert not pst3_.get("c-codex")                      # no change, no review
+        with open(os.path.join(pg_, "a.py"), "w") as f:
+            f.write("x = 1\n")
+        subprocess.run(("git", "-C", pg_, "add", "a.py"), check=True)
+        pair_capture(pcfg3_, "9", "c", "added a.py")
+        pair_tick(pcfg3_, pst3_, threading.Lock())
+        assert "git diff" in pst3_["c-codex"]["queue"][0] and "added a.py" in pst3_["c-codex"]["queue"][0]
+        assert pair_review_capture("9", "c-codex", "a.py:1 — x is unused — drop it")
+        pair_tick(pcfg3_, pst3_, threading.Lock())
+        assert "x is unused" in pst3_["c"]["queue"][0] and "found issues" in psaid3_[-1]
+        pst3_["c"]["queue"] = []
+        pair_capture(pcfg3_, "9", "c", "fixed")
+        with open(os.path.join(pg_, "a.py"), "w") as f:
+            f.write("y = 2\n")
+        pair_tick(pcfg3_, pst3_, threading.Lock())
+        assert pair_review_capture("9", "c-codex", "LGTM")
+        pair_tick(pcfg3_, pst3_, threading.Lock())
+        assert psaid3_[-1].endswith("LGTM 👍") and not pst3_["c"]["queue"], psaid3_
+        assert "different agent" in pair_cmd(pcfg3_, pst3_, threading.Lock(), "9", "c", "claude")
+        _pair.clear()
     # Loop guard: two independent signs of circling ping once, with a cooldown;
     # one sign alone (a long refactor of one file) does not.
     lsaid_ = []
