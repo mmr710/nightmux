@@ -332,6 +332,25 @@ Saved prompts: `!p` shows `review`, `fix-tests`, `spec`, `explain`, `tidy`
 and `ship` as buttons; `!p save <name> <text>` adds yours (`{{args}}` marks
 where `!p <name> <args>` puts the rest).
 
+## Previews and production errors
+
+**Deploy previews:** while `!watch` follows a PR, the preview URL your host
+attaches to its commit — a GitHub deployment (Vercel, Render…), a
+`deploy-preview` status (Netlify) or a link in a bot's comment (Cloudflare
+Pages, Netlify) — is posted once per commit with 🔗 open and 📸 screenshot
+(`!shot last`); a photo after that is a point-and-fix report about the
+preview. Bot comments are no longer sent to the agent as review feedback.
+
+**Errors:** `!errors` in a topic gives it a webhook,
+`https://<host>:8443/hook/<topic>?key=…`. Point a Sentry custom (internal)
+integration's alert action at it — or POST any JSON `{title, stack, url}` —
+and each new error (deduplicated for 6 hours) arrives as 🚨 with a **fix it**
+button; `!errors auto` sends it straight to the agent: reproduce with a
+failing test, fix, push. Sentry is on the internet, so `!errors expose` (you
+run it) publishes only `/hook`, on port 8443, with Tailscale Funnel — the
+dashboard stays tailnet-only and the hook refuses anything without the key.
+`!errors unexpose` takes it back off the internet.
+
 ## Issues in, pull requests out
 
 `!issues` lists the repo's open issues as buttons. Tap one (or

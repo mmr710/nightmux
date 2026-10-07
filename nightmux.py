@@ -3548,6 +3548,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
               "!desktop",  # starts programs, opens a VNC port to the tailnet
+              "!errors",   # can publish a port to the internet
               "!issues", "!issue",   # sets the agent to work on an issue
               "!apk", "!android",    # builds, installs on a phone
               "!watch")    # can merge a pull request
@@ -3633,6 +3634,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return goal_cmd(cfg, lock, topic, arg)
     if cmd in ("!issues", "!issue"):
         return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
+    if cmd == "!errors":
+        return errors_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!desktop":
         return desktop_cmd(cfg, topic, arg)
     if cmd == "!tools":
@@ -3746,6 +3749,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "your phone over wireless debugging · !shot android\n"
                 "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
                 "one and the agent branches, fixes, opens a PR that nightmux watches\n"
+                "!errors [auto|ask|off|expose] = Sentry (or any JSON) webhook: new "
+                "production errors become fix buttons or go straight to the agent\n"
                 "!desktop [open <app>|shot|off] = a virtual desktop agents can drive "
                 "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
@@ -4574,7 +4579,9 @@ def point_fix(cfg, topic, caption, img):
 
 
 def preview_cmd(cfg, topic, sess, cmd, arg):
-    if cmd == "!shot" and re.match(r"https?://", arg):
+    if cmd == "!shot" and arg == "last" and _preview.get(topic):
+        url = _preview[topic]["url"]
+    elif cmd == "!shot" and re.match(r"https?://", arg):
         url = arg
     else:
         ports = dev_ports(sess)
@@ -4664,9 +4671,53 @@ def pr_events(cwd, pr, seen):
                  for c in json.loads(gh(cwd, "api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/comments"))]
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         pass
-    ev += [("comment", k, f"@{who} {what}:\n{body}") for k, who, what, body in talk
+    # Bots are not reviewers: their comments are deploy links and coverage
+    # tables, and fed to the agent as "review feedback" they were noise.
+    human = [t for t in talk if not is_bot(t[1])]
+    ev += [("comment", k, f"@{who} {what}:\n{body}") for k, who, what, body in human
            if body and who != me and k not in seen]
+    for url in pr_previews(cwd, sha, checks, [t[3] for t in talk if is_bot(t[1]) and t[3]]):
+        key = f"preview:{sha[:12]}:{url}"
+        if key not in seen:
+            ev.append(("preview", key, url))
     return ev
+
+
+BOTS = {"vercel", "netlify", "cloudflare-workers-and-pages", "github-actions", "codecov",
+        "sonarcloud", "dependabot", "renovate", "railway-app", "render"}
+PREVIEW_HOST = re.compile(r"https://[\w.-]+\.(?:vercel\.app|netlify\.app|pages\.dev|"
+                          r"workers\.dev|onrender\.com|fly\.dev|up\.railway\.app|surge\.sh|"
+                          r"github\.io|web\.app|firebaseapp\.com|amplifyapp\.com)[^\s)\]>\"']*")
+
+
+def is_bot(login):
+    login = (login or "").lower()
+    return login.endswith("[bot]") or login.replace("[bot]", "") in BOTS
+
+
+def pr_previews(cwd, sha, checks, bot_bodies):
+    """Preview URLs a host attached to this commit: GitHub deployments (Vercel,
+    Render…), a successful status whose name says preview/deploy (Netlify), or
+    a preview link in a bot's comment (Cloudflare Pages, Netlify)."""
+    urls = []
+    try:
+        for dep in json.loads(gh(cwd, "api", f"repos/{{owner}}/{{repo}}/deployments?sha={sha}"
+                                              "&per_page=5"))[:5]:
+            st = json.loads(gh(cwd, "api", f"repos/{{owner}}/{{repo}}/deployments/{dep['id']}"
+                                           "/statuses?per_page=1"))
+            if st and st[0].get("state") == "success":
+                urls.append(st[0].get("environment_url") or st[0].get("target_url") or "")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        pass
+    for c in checks:
+        name = (c.get("name") or c.get("context") or "").lower()
+        if re.search(r"preview|deploy", name) and (c.get("state") or c.get("conclusion") or
+                                                  "").upper() == "SUCCESS":
+            urls.append(c.get("targetUrl") or c.get("detailsUrl") or "")
+    for body in bot_bodies:
+        urls += PREVIEW_HOST.findall(body)
+    return [u for u in dict.fromkeys(u.rstrip(".,") for u in urls)
+            if u.startswith("https://") and "github.com" not in u][:3]
 
 
 def watch_poll(cwd, pr, seen, out, branch=None):
@@ -4734,7 +4785,13 @@ def watch_tick(cfg, state, lock):
             send(cfg, topic, f"💬 PR #{w['pr']}: {len(talk)} new comment(s) — sent to {sess}",
                  mode="plain")
         for k, _, url in ev:
-            if k == "green":
+            if k == "preview":
+                _preview[topic] = {"url": url, "at": time.time()}   # !shot last, point-and-fix
+                send(cfg, topic, f"🔗 preview for PR #{w['pr']}:\n{url}", mode="plain",
+                     buttons=json.dumps({"inline_keyboard": [[
+                         {"text": "🔗 open", "url": url},
+                         {"text": "📸 screenshot", "callback_data": "!shot last"}]]}))
+            elif k == "green":
                 send(cfg, topic, f"🟢 PR #{w['pr']} — every check green\n{url}", mode="plain",
                      buttons=kb([[("✅ merge", "!watch merge"), ("stop watching", "!watch off")]]))
             elif k == "closed":
@@ -5975,6 +6032,124 @@ def mcp_desktop(inp=None, out=None):
                   "error": {"code": -32601, "message": f"no method {m}"}})
         out.write(json.dumps(reply) + "\n")
         out.flush()
+
+
+# ---------- !errors: production errors become fix prompts ----------
+# Sentry (or anything that can POST JSON) calls /hook/<topic>?key=… and the
+# error lands in that topic as a 🛠 fix button — or straight in the agent's
+# queue with !errors auto. Sentry lives on the internet, so this one path can
+# be published with Tailscale Funnel on its own port (8443): the dashboard
+# stays tailnet-only, and the hook answers nothing without the key.
+HOOK_PORT, ERR_COOL = 8443, 6 * 3600
+_err_seen, _err_fix = {}, {}      # fingerprint -> last time; topic -> {id: prompt}
+
+
+def hook_key(cfg):
+    if not cfg.get("hook_key"):
+        cfg["hook_key"] = __import__("secrets").token_urlsafe(18)
+        save_cfg(cfg)
+    return cfg["hook_key"]
+
+
+def error_parse(body):
+    """{title, where, frames, url, level, id} from a Sentry webhook (internal
+    integration or legacy alert) or a plain {title|message, stack, url}."""
+    data = body.get("data") or {}
+    ev = data.get("event") or body.get("event") or {}
+    issue = data.get("issue") or {}
+    title = (ev.get("title") or issue.get("title") or body.get("title")
+             or body.get("message") or "error")
+    frames = []
+    for val in ((ev.get("exception") or {}).get("values") or [])[-1:]:
+        fr = ((val.get("stacktrace") or {}).get("frames") or [])
+        mine = [f for f in fr if f.get("in_app")] or fr
+        frames = [f"{f.get('filename') or f.get('abs_path')}:{f.get('lineno')} in "
+                  f"{f.get('function')}" for f in mine[-8:]]
+    if not frames and body.get("stack"):
+        frames = str(body["stack"]).strip().splitlines()[-12:]
+    return {"title": str(title)[:300],
+            "where": str(ev.get("culprit") or issue.get("culprit") or body.get("culprit") or ""),
+            "frames": frames, "level": str(ev.get("level") or issue.get("level") or
+                                           body.get("level") or "error"),
+            "url": str(issue.get("web_url") or issue.get("permalink") or ev.get("web_url")
+                       or body.get("url") or ""),
+            "id": str(issue.get("id") or ev.get("issue_id") or body.get("id") or "")}
+
+
+def error_in(cfg, state, topic, body):
+    """One reported error -> the topic (and, on auto, the agent). (status, text)."""
+    mode = (cfg.get("errors") or {}).get(topic)
+    sess = cfg.get("topics", {}).get(topic)
+    if not mode or not sess:
+        return 404, "this topic takes no errors — !errors in it"
+    e = error_parse(body)
+    # Ids and counts change between occurrences of one error; without them the
+    # title is the error. (Outside the f-string: no backslashes there on 3.8.)
+    plain = re.sub(r"[0-9a-f]{6,}|\d+", "#", e["title"])
+    fp = f"{topic}:{e['id'] or plain}"
+    now = time.time()
+    if now - _err_seen.get(fp, 0) < ERR_COOL:
+        return 200, "seen"
+    _err_seen[fp] = now
+    prompt = (f"A production error was reported ({e['level']}): {e['title']}\n"
+              + (f"Where: {e['where']}\n" if e["where"] else "")
+              + ("Stack, most recent last:\n" + "\n".join(e["frames"]) + "\n" if e["frames"] else "")
+              + (f"{e['url']}\n" if e["url"] else "")
+              + "\nReproduce it with a failing test, fix the cause, and push the fix.")
+    prompt = redact(prompt)
+    head = f"🚨 {e['level']}: {e['title'][:200]}" + (f"\n{e['where']}" if e["where"] else "")
+    if mode == "auto":
+        state.setdefault(sess, {}).setdefault("queue", []).append(prompt)
+        send(cfg, topic, head + f"\n→ sent to {sess}", mode="plain")
+    else:
+        eid = __import__("hashlib").sha1(fp.encode()).hexdigest()[:8]
+        _err_fix.setdefault(topic, {})[eid] = prompt
+        send(cfg, topic, head, mode="plain", buttons=json.dumps({"inline_keyboard": [
+            [{"text": "🛠 fix it", "callback_data": f"!errors fix {eid}"}]
+            + ([{"text": "🔗 sentry", "url": e["url"]}] if e["url"].startswith("https://") else [])]}))
+    return 200, "ok"
+
+
+def errors_cmd(cfg, state, lock, topic, sess, arg):
+    verb, _, rest = arg.partition(" ")
+    port = cfg.get("webhook_port")
+    if verb == "fix":
+        prompt = (_err_fix.get(topic) or {}).pop(rest.strip(), None)
+        if not (prompt and sess):
+            return "that error is no longer pending"
+        return send_prompt(cfg, state, topic, sess, prompt)
+    if verb in ("expose", "unexpose"):
+        if not port:
+            return 'needs "webhook_port" in the config first'
+        argv = (["tailscale", "funnel", "--bg", f"--https={HOOK_PORT}", "--set-path", "/hook",
+                 f"http://127.0.0.1:{port}/hook"] if verb == "expose"
+                else ["tailscale", "funnel", f"--https={HOOK_PORT}", "off"])
+        try:
+            out = run(*argv, timeout=30)
+        except OSError as e:
+            return f"tailscale: {e}"
+        return (("🌐 /hook is public on :%d (nothing else on that port)\n" % HOOK_PORT
+                 if verb == "expose" else "🔒 /hook is tailnet-only again\n") + out[-400:])
+    with lock:
+        errs = cfg.setdefault("errors", {})
+        if verb == "off":
+            errs.pop(topic, None)
+        elif verb in ("auto", "ask") or topic not in errs:
+            errs[topic] = verb if verb in ("auto", "ask") else "ask"
+        save_cfg(cfg)
+    if verb == "off":
+        return "🚨 error feed off here"
+    host = tailnet_host(cfg) or "<this machine>"
+    url = f"https://{host}:{HOOK_PORT}/hook/{topic}?key={hook_key(cfg)}"
+    send(cfg, topic, f"🚨 error feed: {errs[topic]} ({'errors go straight to the agent' if errs[topic] == 'auto' else 'a fix button per new error'})\n\n"
+         f"Webhook URL:\n{url}\n\nSentry: Settings → Developer Settings → Custom Integration "
+         "(internal), Webhook URL above, tick Alert Rule Action, then in an Alert rule add "
+         "\"Send a notification via\" this integration. Anything else can POST JSON "
+         "{title, stack, url}. The URL must be reachable from the internet: 🌐 expose "
+         "publishes only /hook, on its own port.", mode="plain",
+         buttons=kb([[("🌐 expose", "!errors expose"), ("auto", "!errors auto"),
+                      ("ask", "!errors ask"), ("off", "!errors off")]]))
+    return None
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -8121,6 +8296,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         }).encode('utf-8'))
 
     def do_POST(self):
+        if self.path.startswith("/hook/") and not getattr(self.server, "peer_only", False):
+            return self.error_hook()
         if not self.peer_gate():
             return
         length = int(self.headers.get('Content-Length', 0))
@@ -8174,6 +8351,32 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"Accepted\n")
+
+    def error_hook(self):
+        """POST /hook/<topic>?key=… — the one route that may face the internet."""
+        cfg = self.server.cfg
+        u = urllib.parse.urlsplit(self.path)
+        key = (urllib.parse.parse_qs(u.query).get("key") or [""])[0]
+        topic = u.path[len("/hook/"):].strip("/")
+        n = int(self.headers.get("Content-Length") or 0)
+        if not cfg.get("hook_key") or not hmac.compare_digest(key.encode(), cfg["hook_key"].encode()) \
+                or not topic.isdigit() or n > 2_000_000:
+            self.send_response(403)
+            self.end_headers()
+            return
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self.send_response(400)
+            self.end_headers()
+            return
+        code, msg = error_in(cfg, self.server.state, topic, body)
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(msg.encode())
 
     def manage(self, cfg, body):
         """POST /api/topic/new · /api/topic/<id>/{start,agent,close}, JSON in and out.
@@ -10054,6 +10257,45 @@ def selfcheck():
     assert mr_[2]["result"]["isError"] and "!desktop" in mr_[2]["result"]["content"][0]["text"]
     assert mr_[3]["error"]["code"] == -32601
     assert tool_cmd({}, "desktop")[-1] == "--mcp-desktop"
+    # Deploy previews: a bot's comment is a preview link, not review feedback.
+    assert is_bot("vercel[bot]") and is_bot("netlify") and not is_bot("alice")
+    assert pr_previews("/", "abc", [{"context": "netlify/site/deploy-preview", "state": "SUCCESS",
+                                     "targetUrl": "https://deploy-preview-7--x.netlify.app"}],
+                       ["Preview: https://x-git-fix-me.vercel.app)."]) == \
+        ["https://deploy-preview-7--x.netlify.app", "https://x-git-fix-me.vercel.app"]
+    # Error feed: Sentry's internal-integration shape and a plain one parse; a
+    # repeat is dropped; ask mode is a button, auto queues; wrong key is 403.
+    e_ = error_parse({"data": {"issue": {"id": "42", "web_url": "https://s.io/i/42"},
+                               "event": {"title": "TypeError: x is undefined", "culprit": "cart.js in add",
+                                         "level": "error", "exception": {"values": [{"stacktrace": {
+                                             "frames": [{"filename": "lib.js", "lineno": 1, "in_app": False},
+                                                        {"filename": "cart.js", "lineno": 9,
+                                                         "function": "add", "in_app": True}]}}]}}}})
+    assert e_["frames"] == ["cart.js:9 in add"] and e_["id"] == "42" and e_["url"].endswith("/42"), e_
+    assert error_parse({"message": "boom", "stack": "a\nb"})["frames"] == ["a", "b"]
+    esaid_ = []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: esaid_.append((x, buttons)),
+                 save_cfg=lambda c: None):
+        ecfg_, est_ = {"topics": {"8": "e"}, "errors": {"8": "ask"}}, {}
+        _err_seen.clear()
+        assert error_in(ecfg_, est_, "8", {"title": "boom 123"})[0] == 200
+        assert "!errors fix" in esaid_[-1][1] and not est_.get("e")
+        assert error_in(ecfg_, est_, "8", {"title": "boom 456"})[1] == "seen"     # same error
+        ecfg_["errors"]["8"] = "auto"
+        error_in(ecfg_, est_, "8", {"title": "other"})
+        assert "Reproduce it" in est_["e"]["queue"][0]
+        assert error_in(ecfg_, est_, "9", {})[0] == 404
+    ocfg["hook_key"] = "k" * 24
+    for key_, want_ in (("bad", 403), ("k" * 24, 404)):
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{port_}/hook/5?key={key_}", data=b"{}", method="POST"))
+            got_ = 200
+        except urllib.error.HTTPError as e:
+            got_ = e.code
+        assert got_ == want_, (key_, got_)
+    ocfg.pop("hook_key")
+    _err_seen.clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
