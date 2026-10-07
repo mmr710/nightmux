@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!desktop`: a virtual screen (Xvfb + openbox) with a password-protected noVNC link over the tailnet; `!tools add desktop` gives the agent nightmux's own computer-use MCP server (screenshot, click, type, key, scroll, open); `!desktop open|shot|off`.
+
 - `!issues` / `!issue <n>`: open issues as buttons; the agent gets the issue, a branch and the PR recipe, nightmux finds the branch's PR and watches it (CI failures, reviews, merge button). `!issues auto [label]` takes labelled issues one at a time while the topic is quiet.
 
 - `!tools add browser [all]`: registers Playwright's MCP server with the topic's agent(s) via each CLI's own `mcp add` (Claude Code at local scope), tells the agent to verify UI changes with it, and offers a restart to load it; `!tools rm browser`, `!tools restart`.
