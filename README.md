@@ -441,6 +441,18 @@ peer listener serves only `/peer/` routes, and only with the secret.
 
 ## The dashboard
 
+**+ new project** opens a form: a name, an agent, a folder (defaults to
+`projects_root/<name>`), a server when you have peers, and an optional idea.
+It creates the Telegram topic, the folder and the session — with an idea, the
+agent gets the spec → build → `./check.sh` brief and the `!goal` loop. On
+every topic card: the live agent and the rest of its bench as chips (tap one
+to make it live), **+ agent** to start another beside it, and **close**, which
+stops the topic's agents, unbinds it and closes the Telegram topic — files
+are never deleted. The bot needs the *Manage topics* admin right to create
+and close topics. These actions require an `X-Nightmux` header, so another
+website you visit cannot trigger them.
+
+
 `http://127.0.0.1:<webhook_port>/` (or over `tailscale serve`) shows server
 metrics, limits per agent, every topic with a send box, and a **chat
 analysis**: per agent, how many prompts, model calls and tokens you spent,
