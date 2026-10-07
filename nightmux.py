@@ -26,6 +26,7 @@ import queue
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -33,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 VERSION = "1.2.0"
 CFG_PATH = os.path.expanduser(os.environ.get("NIGHTMUX_CONFIG", "~/.nightmux.json"))
@@ -2441,6 +2443,7 @@ def watcher(cfg, state, lock):
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
+            reel_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3596,6 +3599,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!reel":
+        return reel_cmd(cfg, lock, topic, arg)
     if cmd == "!pair":
         return pair_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!loopguard":
@@ -3684,6 +3689,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
+                "!reel [hours] | daily HH:MM | off = the night as a GIF of the office, "
+                "with what each agent did\n"
                 "!pair <agent> [rounds] | off = a second agent reviews every change "
                 "this one makes; real issues go back to the coder, LGTM stays quiet\n"
                 "!loopguard [ping|auto|off] = notice an agent going in circles (same "
@@ -4588,6 +4595,308 @@ def idea_cmd(cfg, state, lock, topic, arg):
     return (f"💡 {name}: {cwd}\n{key} is starting with the spec → build → check prompt "
             "queued.\n🎯 goal: sh ./check.sh after every turn — failures go back until "
             "green.\n!preview once it serves something · !goal off to stop the loop")
+
+
+# ---------- night reel: the night as a GIF ----------
+# The office's desks are recorded once a minute (only when something changed),
+# and in the morning replayed: each sampled moment is drawn by the office page
+# itself (?reel, the state in the URL hash) in headless Chromium, and the
+# screenshots are stitched into a GIF here — PNG decode, palette and LZW in
+# stdlib, so no Pillow. One room per reel: the one that did the most.
+REEL_FRAMES, REEL_EVERY = 30, 60
+_reel = {"at": 0, "last": None, "busy": False, "day": None}
+
+
+def reel_path():
+    return os.path.join(STATE_DIR, "reel.jsonl")
+
+
+def reel_tick(cfg, state, lock):
+    now = time.time()
+    if now - _reel["at"] >= REEL_EVERY:
+        _reel["at"] = now
+        with lock:
+            snap = office_snapshot(cfg, state)
+        rec = [{"topic": r["topic"], "name": r["name"],
+                "d": [[d["agent"], d["state"], d["live"], d["queued"]] for d in r["desks"]]}
+               for r in snap["rooms"]]
+        if rec != _reel["last"]:
+            _reel["last"] = rec
+            os.makedirs(STATE_DIR, exist_ok=True)
+            p = reel_path()
+            if os.path.exists(p) and os.path.getsize(p) > 2_000_000:   # keep ~the last half
+                with open(p) as f:
+                    keep = f.readlines()[-2000:]
+                with open(p, "w") as f:
+                    f.writelines(keep)
+            with open(p, "a") as f:
+                f.write(json.dumps({"t": round(now), "r": rec}) + "\n")
+    at = cfg.get("reel_at")
+    if at and not _reel["busy"]:
+        due = at_epoch(cfg, at, now - 86400)
+        day = time.strftime("%Y-%m-%d", time.gmtime(due))
+        if due <= now < due + 3600 and _reel["day"] != day:
+            _reel["day"] = day
+            topic = daemon_topic(cfg)
+            if topic:
+                reel_start(cfg, topic, 12)
+
+
+def reel_records(since):
+    try:
+        with open(reel_path()) as f:
+            out = [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+    return [r for r in out if r["t"] >= since]
+
+
+def reel_story(cfg, recs, since, until):
+    """(room name, [frame dicts for the page], caption) — or None for a quiet night."""
+    if not recs:
+        return None
+    work = {}
+    for a, b in zip(recs, recs[1:] + [{"t": until}]):
+        for r in a["r"]:
+            n = sum(1 for d in r["d"] if d[1] == "busy")
+            work[r["topic"]] = work.get(r["topic"], 0) + n * (b["t"] - a["t"])
+    topic = max(work, key=work.get)
+    if not work[topic]:
+        return None
+    frames, last, cap = [], None, ""
+    for i in range(REEL_FRAMES):
+        t = since + (until - since) * i / (REEL_FRAMES - 1)
+        rec = next((r for r in reversed(recs) if r["t"] <= t), recs[0])
+        room = next((r for r in rec["r"] if r["topic"] == topic), None)
+        if not room:
+            continue
+        states = {d[0]: d[1] for d in room["d"]}
+        fx, events = [], []
+        for a, st in states.items():
+            was = (last or {}).get(a)
+            if was and was != st:
+                events.append({"busy": f"{a} gets to work", "limit": f"{a} hits its limit",
+                               "waiting": f"{a} asks you something",
+                               "idle": f"{a} finishes" if was == "busy" else f"{a} is free"}
+                              .get(st, f"{a}: {st}"))
+                if was == "busy" and st == "idle":
+                    fx.append({"type": "sparkle", "on": a, "start": i * 3 - 2})
+        if events:
+            cap = ", ".join(events[:2])
+        last = states
+        frames.append({"room": {"topic": topic, "name": room["name"], "desks": [
+            {"agent": d[0], "session": d[0], "live": d[2], "state": d[1], "queued": d[3],
+             "prog": 0.5 if d[1] == "limit" else 0} for d in room["d"]]},
+            "o": {"nodim": True, "clock": clock(cfg, t),
+                  "caption": f"{clock(cfg, t)}|{cap or 'the night shift'}",
+                  "dawn": max(0, (i / (REEL_FRAMES - 1) - 0.75) * 4), "fx": fx}})
+    return room["name"], frames
+
+
+def png_pixels(data):
+    """(width, height, rows of RGB bytes) from an 8-bit RGB/RGBA PNG."""
+    pos, idat, hdr = 8, b"", None
+    while pos < len(data):
+        n, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        if typ == b"IHDR":
+            hdr = struct.unpack(">IIBBBBB", data[pos + 8:pos + 21])
+        elif typ == b"IDAT":
+            idat += data[pos + 8:pos + 8 + n]
+        pos += 12 + n
+    w, h, depth, ctype = hdr[:4]
+    bpp = {2: 3, 6: 4}[ctype]
+    raw, stride, rows, prev, i = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp), 0
+    for _ in range(h):
+        f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):
+            a = line[x - bpp] if x >= bpp else 0
+            b = prev[x]
+            c = prev[x - bpp] if x >= bpp else 0
+            if f == 1:
+                line[x] = (line[x] + a) & 255
+            elif f == 2:
+                line[x] = (line[x] + b) & 255
+            elif f == 3:
+                line[x] = (line[x] + ((a + b) >> 1)) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line) if bpp == 3 else bytes(
+            v for k, v in enumerate(line) if k % 4 != 3))
+        prev = line
+    return w, h, rows
+
+
+def lzw(idx, min_size=8):
+    clear, eoi = 1 << min_size, (1 << min_size) + 1
+    out, buf, nbits, size = bytearray(), 0, 0, min_size + 1
+    table, nxt = {}, eoi + 1
+
+    def emit(code):
+        nonlocal buf, nbits
+        buf |= code << nbits
+        nbits += size
+        while nbits >= 8:
+            out.append(buf & 255)
+            buf >>= 8
+            nbits -= 8
+    emit(clear)
+    prefix = idx[0]
+    for k in idx[1:]:
+        key = (prefix << 8) | k
+        c = table.get(key)
+        if c is not None:
+            prefix = c
+            continue
+        emit(prefix)
+        if nxt < 4096:
+            table[key] = nxt
+            if nxt == (1 << size) and size < 12:
+                size += 1
+            nxt += 1
+        else:
+            emit(clear)
+            table, nxt, size = {}, eoi + 1, min_size + 1
+        prefix = k
+    emit(prefix)
+    emit(eoi)
+    if nbits:
+        out.append(buf & 255)
+    return bytes(out)
+
+
+def gif(frames, delay=40):
+    """GIF89a from [(w, h, rows of RGB bytes)] of one size, looping forever."""
+    w, h = frames[0][0], frames[0][1]
+    count = {}
+    for _, _, rows in frames:
+        for row in rows[::3]:
+            for x in range(0, len(row), 9):
+                c = row[x:x + 3]
+                count[c] = count.get(c, 0) + 1
+    pal = sorted(count, key=count.get, reverse=True)[:256]
+    pal += [b"\0\0\0"] * (256 - len(pal))
+    near = {c: i for i, c in enumerate(pal)}
+
+    def index(c):
+        i = near.get(c)
+        if i is None:
+            i = near[c] = min(range(256), key=lambda j: sum(
+                (c[k] - pal[j][k]) ** 2 for k in range(3)))
+        return i
+    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", w, h, 0xF7, 0, 0) + b"".join(pal))
+    out += b"!\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00"
+    for _, _, rows in frames:
+        idx = bytes(index(row[x:x + 3]) for row in rows for x in range(0, w * 3, 3))
+        data = lzw(idx)
+        out += b"!\xf9\x04\x04" + struct.pack("<H", delay) + b"\x00\x00"
+        out += b"," + struct.pack("<HHHHB", 0, 0, w, h, 0) + b"\x08"
+        for k in range(0, len(data), 255):
+            out += bytes([len(data[k:k + 255])]) + data[k:k + 255]
+        out += b"\x00"
+    return bytes(out + b";")
+
+
+def crop(frames):
+    """Trim the page background around the stage, the same box for every frame."""
+    bg, box = frames[0][2][0][:3], None
+    for w, h, rows in frames:
+        ys = [y for y, r in enumerate(rows) if r != bg * w]
+        xs = [x for r in rows[::4] for x in range(0, w * 3, 3) if r[x:x + 3] != bg]
+        if ys and xs:
+            b = (min(xs) // 3, ys[0], max(xs) // 3 + 1, ys[-1] + 1)
+            box = b if not box else (min(box[0], b[0]), min(box[1], b[1]),
+                                     max(box[2], b[2]), max(box[3], b[3]))
+    if not box:
+        return frames
+    x0, y0, x1, y1 = box
+    return [(x1 - x0, y1 - y0, [r[x0 * 3:x1 * 3] for r in rows[y0:y1]]) for _, _, rows in frames]
+
+
+def reel_render(cfg, frames):
+    """GIF bytes for the story frames, or (None, why)."""
+    b = browser_bin(cfg)
+    if not b:
+        return None, 'no Chromium — install one or set "browser" in the config'
+    os.makedirs(STATE_DIR, exist_ok=True)
+    page, shot = os.path.join(STATE_DIR, "reel.html"), os.path.join(STATE_DIR, "reel.png")
+    with open(page, "w") as f:
+        f.write(OFFICE_HTML)
+    pics = []
+    for i, fr in enumerate(frames):
+        url = (f"file://{page}?reel&scale=2&f={i * 3}#"
+               + urllib.parse.quote(json.dumps(fr, separators=(",", ":"))))
+        run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+            "--window-size=560,300", "--virtual-time-budget=1500",
+            f"--screenshot={shot}", url, timeout=60)
+        try:
+            with open(shot, "rb") as f:
+                pics.append(png_pixels(f.read()))
+            os.remove(shot)
+        except (OSError, KeyError, struct.error, zlib.error):
+            continue
+    if len(pics) < 2:
+        return None, "the browser drew no frames"
+    return gif(crop(pics)), ""
+
+
+def reel_caption(cfg, since):
+    lines = []
+    for topic, sess in sorted((cfg.get("topics") or {}).items(), key=lambda kv: int(kv[0])):
+        cwd = (cfg.get("dirs") or {}).get(topic)
+        if not cwd or not os.path.isdir(os.path.join(cwd, ".git")):
+            continue
+        log = run("git", "-C", cwd, "log", f"--since=@{int(since)}", "--shortstat",
+                  "--format=%h")
+        n = len([l for l in log.splitlines() if re.match(r"^[0-9a-f]{7,}$", l)])
+        if n:
+            add = sum(int(x) for x in re.findall(r"(\d+) insertion", log))
+            rm = sum(int(x) for x in re.findall(r"(\d+) deletion", log))
+            lines.append(f"{(cfg.get('topic_names') or {}).get(topic) or sess}: "
+                         f"{n} commit{'s' * (n != 1)}, +{add} −{rm}")
+    return lines
+
+
+def reel_start(cfg, topic, hours):
+    """Render on a thread: a minute of Chromium is not the watcher's to spend."""
+    if _reel["busy"]:
+        return "a reel is already being drawn"
+    now = time.time()
+    since = now - hours * 3600
+    story = reel_story(cfg, reel_records(since), since, now)
+    if not story:
+        return f"🌙 nothing worked in the last {hours}h — no reel"
+    name, frames = story
+    _reel["busy"] = True
+
+    def go():
+        try:
+            data, err = reel_render(cfg, frames)
+            if not data:
+                send(cfg, topic, f"🌙 no reel: {err}", mode="plain")
+                return
+            cap = [f"🌙 the last {hours}h · {name}"] + reel_caption(cfg, since)
+            send_file(cfg, topic, "night.gif", data, caption="\n".join(cap),
+                      kind="animation")
+        finally:
+            _reel["busy"] = False
+    threading.Thread(target=go, daemon=True).start()
+    return f"🎬 drawing the last {hours}h of {name} — about a minute"
+
+
+def reel_cmd(cfg, lock, topic, arg):
+    m = re.match(r"daily\s+(\d{1,2}:\d{2})$", arg)
+    if m or arg == "off":
+        with lock:
+            if m:
+                cfg["reel_at"] = m.group(1)
+            else:
+                cfg.pop("reel_at", None)
+            save_cfg(cfg)
+        return f"🎬 daily reel at {m.group(1)}" if m else "🎬 daily reel off"
+    hours = int(arg) if arg.isdigit() and 0 < int(arg) <= 48 else 12
+    return reel_start(cfg, topic, hours)
 
 
 # ---------- ghost pair: a second model reviews every change ----------
@@ -6201,7 +6510,7 @@ body.demo #stage{display:block}
 <div id="sheet"></div><div id="toast"></div>
 <script>
 // ---------- pixel kit ----------
-const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo');
+const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo'), REEL = Q.has('reel');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 function mix(c1, c2, t) {
   const a = parseInt(c1.slice(1), 16), b = parseInt(c2.slice(1), 16), m = (x, y) => Math.round(x + (y - x) * t);
@@ -6623,8 +6932,10 @@ async function poll() {
 }
 
 function draw() {
-  if (DEMO) {
-    const {room, o} = scene(frame), cv = document.getElementById('stage');
+  if (DEMO || REEL) {
+    // ?reel: one recorded moment of the night, handed over in the URL hash.
+    const {room, o} = REEL ? JSON.parse(decodeURIComponent(location.hash.slice(1))) : scene(frame),
+          cv = document.getElementById('stage');
     drawRoom(cv, room, frame, o);
     cv.style.width = cv.width * (+Q.get('scale') || 3) + 'px';
     return;
@@ -6635,7 +6946,8 @@ function draw() {
 
 // GIF capture drives frames itself, one exact frame per call.
 window.__frame = n => { auto = false; frame = n; draw(); };
-if (DEMO) document.body.classList.add('demo');
+if (REEL) { auto = false; frame = +Q.get('f') || 0; }
+if (DEMO || REEL) document.body.classList.add('demo');
 else { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
@@ -8369,6 +8681,28 @@ def selfcheck():
         assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
         assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
         icfg_["goals"].clear()
+    # Night reel: the busiest room is told as a story, PNG frames decode, and the
+    # GIF is well formed — one image block per frame, a loop, a trailer.
+    t0_ = 1_700_000_000
+    recs_ = [{"t": t0_, "r": [{"topic": "1", "name": "quiet", "d": [["claude", "idle", True, 0]]},
+                              {"topic": "2", "name": "busy", "d": [["claude", "busy", True, 0],
+                                                                    ["codex", "idle", False, 0]]}]},
+             {"t": t0_ + 3600, "r": [{"topic": "1", "name": "quiet", "d": [["claude", "idle", True, 0]]},
+                                     {"topic": "2", "name": "busy", "d": [["claude", "limit", True, 1],
+                                                                           ["codex", "busy", False, 0]]}]}]
+    rname_, rfr_ = reel_story({}, recs_, t0_, t0_ + 7200)
+    assert rname_ == "busy" and len(rfr_) == REEL_FRAMES, rname_
+    assert "claude hits its limit, codex gets to work" in rfr_[-1]["o"]["caption"], rfr_[-1]["o"]
+    assert reel_story({}, [{"t": t0_, "r": recs_[0]["r"][:1]}], t0_, t0_ + 60) is None   # nobody busy
+    raw_ = b"".join(bytes([1]) + bytes([10, 20, 30]) + bytes([5, 5, 5]) * 3 for _ in range(2))
+    png_ = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I4s", 13, b"IHDR")
+            + struct.pack(">IIBBBBB", 4, 2, 8, 2, 0, 0, 0) + b"\0" * 4)
+    idat_ = zlib.compress(raw_)
+    png_ += struct.pack(">I4s", len(idat_), b"IDAT") + idat_ + b"\0" * 4 + struct.pack(">I4s", 0, b"IEND") + b"\0" * 4
+    pw_, ph_, prow_ = png_pixels(png_)
+    assert (pw_, ph_) == (4, 2) and prow_[0][:6] == bytes([10, 20, 30, 15, 25, 35]), prow_
+    g_ = gif([(pw_, ph_, prow_)] * 3)
+    assert g_[:6] == b"GIF89a" and g_.endswith(b";") and g_.count(b"!\xf9\x04") == 3
     # Ghost pair: a turn that changed the tree goes to the reviewer (in the same
     # folder, by diff range); its findings go to the coder, LGTM is a 👍, a turn
     # that changed nothing is not reviewed.

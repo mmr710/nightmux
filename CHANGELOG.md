@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!reel [hours]` / `!reel daily HH:MM`: the office's desks are recorded once a minute; the busiest room is replayed as a GIF (the office page draws each moment in headless Chromium, a stdlib PNG/GIF encoder stitches them) with captions and per-project commit stats.
+
 - `!pair <agent> [rounds]`: after every turn that changed the tree, a second agent on the bench reviews `git diff <since>` in the same folder; real findings go back to the coder (2 rounds by default, then to you), LGTM is a quiet 👍.
 
 - Loop guard: two independent signs of an agent circling (same error 3×, one file churned while the diff stays flat, repeated apologies, `!goal` failing the same way) ping the topic with step back / hand to another agent / pause buttons; `!loopguard auto|ping|off`.
