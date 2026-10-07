@@ -476,34 +476,31 @@ the night. Your next message resumes it; `!goal off` ends it.
 
 ## Two servers
 
-One bot, one group, topics spread over several machines. Telegram lets only
-one process poll a bot, so one nightmux is the **primary**: it polls and
-forwards each remote topic's messages and button taps, untouched, to the
-nightmux that runs it. That one replies to Telegram itself with the same
-token (sending is not exclusive, only polling is). Put both machines on the
-same tailnet.
+One bot, one group, topics spread over several machines. On the dashboard,
+**servers → + add server** shows four steps:
 
-On the second machine, `~/.nightmux.json` is a normal config (same `token`,
-`chat_id`, `allow_users`) plus:
+1. On the new machine: `sudo apt install -y tmux git python3`, then install
+   Tailscale and `sudo tailscale up` into the same tailnet.
+2. Install the agents you want there and sign each in once.
+3. Paste the command the dashboard gives you — `nightmux.py --join <code>`.
+   The code is good once, for 30 minutes. It fetches the bot settings and a
+   fresh peer secret from this machine over the tailnet, writes the new
+   machine's config as a peer, wires the Claude Code hooks and installs the
+   service.
+4. The new server appears on the dashboard. Pick it as the **server** in
+   **+ new project**, or send `!server <name>` in a topic to move it there
+   (`!server local` brings it back).
 
-```json
-"poll_telegram": false,
-"name": "vps2",
-"peer_listen": "100.x.y.z:9091",
-"peer_secret": "<python3 -c 'import secrets; print(secrets.token_urlsafe(32))'>"
-```
+How it works: Telegram lets one process poll a bot, so this machine stays the
+primary — it forwards each remote topic's messages to the peer that runs it,
+and the peer replies to Telegram itself with the same token. Peers talk on a
+listener that serves only `/peer/` routes, with the shared secret. The
+dashboard and office show every machine's topics, metrics and limits;
+**remove** on a server card forgets it (once its topics are moved or closed).
 
-On the primary:
-
-```json
-"peers": {"vps2": {"url": "http://100.x.y.z:9091", "secret": "<same secret>"}}
-```
-
-Then in any topic: `!server vps2` routes it there (`!new name dir` starts a
-session on that machine), `!server local` brings it back, bare `!server` says
-where it runs. The primary's dashboard and office show every machine's
-topics, metrics and limits, and typing into a remote topic is routed. The
-peer listener serves only `/peer/` routes, and only with the secret.
+The **setup** panel at the top of the dashboard lists anything not yet set
+up on this machine — bot rights, agents, tailnet access, `gh`, Chromium — each
+with the command that fixes it (the same checks as `nightmux --doctor`).
 
 ## The dashboard
 

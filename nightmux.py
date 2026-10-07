@@ -7305,12 +7305,37 @@ textarea { background: #0b0e14; border: 1px solid #232838; color: #d8dee9; borde
 #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 92vw;
          background: #131722; border: 1px solid #2d3346; border-radius: 8px; padding: 8px 14px;
          font-size: 13px; display: none; z-index: 9; }
-.srv + .srv { margin-top: 14px; } .sname { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+.srv + .srv { margin-top: 14px; }
+#addp { display: none; margin-bottom: 12px; } #addp.open { display: block; }
+ol.steps { margin: 0; padding-left: 20px; } ol.steps li { margin-bottom: 10px; }
+pre { background: #0b0e14; border: 1px solid #232838; border-radius: 6px; padding: 8px 10px;
+      overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 6px 0; }
+code { background: #0b0e14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+#setup .card { border-color: #d2992266; margin-bottom: 8px; }
+#setup .ok { color: #3fb950; font-size: 13px; margin: 0 0 6px; height: auto; }
+#setup li { margin-bottom: 6px; } #setup li span { color: #8b949e; font-size: 12px; display: block; } .sname { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
 .sname:empty { display: none; }
 </style></head>
 <body><main>
 <header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a></span></header>
-<h2>server</h2><div id="server"></div>
+<div id="setup"></div>
+<h2>servers <button id="addsrv" class="primary">+ add server</button></h2>
+<div id="addp" class="card">
+  <ol class="steps">
+    <li><b>On the new server</b>, install tmux, git and Tailscale, and join <i>this</i> tailnet:
+      <pre>sudo apt install -y tmux git python3
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up</pre></li>
+    <li><b>Install the agents</b> you want to run there (claude, codex, agy, opencode) and sign each in once.</li>
+    <li><b>Run this</b> there — one use, valid 30 minutes:
+      <pre id="joincmd">making a join code…</pre>
+      <button id="copyjoin" type="button">copy</button> <button id="newjoin" type="button">new code</button></li>
+    <li>It appears here within a minute. Pick it as the <b>server</b> in <b>+ new project</b>, or send
+      <code>!server &lt;name&gt;</code> in a topic to move that topic there.</li>
+  </ol>
+</div>
+<div class="grid" id="srvlist"></div>
+<div id="server" style="margin-top:12px"></div>
 <h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
 <h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
 <div id="newp" class="card"><form id="newf">
@@ -7472,6 +7497,55 @@ async function openNew() {
   f.title.oninput(); f.title.focus();
 }
 $('newbtn').onclick = openNew;
+
+// Setup: only what is missing, each with how to fix it.
+async function setupPanel() {
+  const box = $('setup');
+  try {
+    const rows = await (await fetch('/api/setup')).json();
+    const bad = rows.filter(r => r.ok === false), opt = rows.filter(r => r.ok === null);
+    if (!bad.length && !opt.length) { box.innerHTML = '<p class="ok">✓ setup complete — ' + rows.length + ' checks pass</p>'; return; }
+    box.innerHTML = '<div class="card"><div class="row"><b>setup</b><span class="meta">' +
+      (rows.length - bad.length - opt.length) + '/' + rows.length + ' done</span>' +
+      '<button id="recheck" type="button" style="margin-left:auto">recheck</button></div><ul style="margin:6px 0 0;padding-left:18px">' +
+      bad.concat(opt).map(r => '<li>' + (r.ok === false ? '✗ ' : '○ ') + esc(r.label) +
+        (r.fix ? '<span>' + esc(r.fix) + '</span>' : '') + '</li>').join('') + '</ul></div>';
+    $('recheck').onclick = () => { box.innerHTML = '<p class="meta">checking…</p>'; setupPanel(); };
+  } catch (e) { box.innerHTML = ''; }
+}
+
+// Servers: this one and its peers; + add server makes a join code.
+async function servers2() {
+  try {
+    const rows = await (await fetch('/api/servers')).json();
+    keyed($('srvlist'), rows, r => r.name,
+      r => { const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
+               '<span class="meta tid"></span></div><div class="meta info"></div><div class="chipsrow acts"></div>');
+             if (!r.me) { const b = document.createElement('button'); b.type = 'button'; b.className = 'close'; b.textContent = 'remove';
+               b.onclick = async () => { if (!confirm('Remove server ' + r.name + '? Its topics must be moved or closed first.')) return;
+                 const o = await act('/api/servers/' + encodeURIComponent(r.name) + '/remove'); toast(o.msg); servers2(); };
+               c.querySelector('.acts').appendChild(b); }
+             return c; },
+      (el, r) => { el.querySelector('.dot').className = 'dot ' + (r.ok ? 'idle' : 'offline');
+        set(el, '.sess', r.name); set(el, '.tid', r.me ? 'this server' : (r.ok ? 'peer' : 'peer · unreachable'));
+        set(el, '.info', (r.version ? 'v' + r.version + ' · ' : '') + r.topics + ' topic' + (r.topics === 1 ? '' : 's') +
+            ' · ' + ((r.agents || []).join(', ') || 'no agents found')); });
+  } catch (e) {}
+}
+async function joinCode() {
+  $('joincmd').textContent = 'making a join code…';
+  const o = await act('/api/servers/invite');
+  $('joincmd').textContent = o.ok ? o.command : '⚠ ' + o.msg;
+}
+$('addsrv').onclick = () => { const p = $('addp'); p.classList.toggle('open'); if (p.classList.contains('open')) joinCode(); };
+$('newjoin').onclick = joinCode;
+$('copyjoin').onclick = async () => {
+  const t = $('joincmd').textContent;
+  try { await navigator.clipboard.writeText(t); toast('copied'); }
+  catch (e) { const r = document.createRange(); r.selectNodeContents($('joincmd'));
+              getSelection().removeAllRanges(); getSelection().addRange(r); toast('selected — copy it'); }
+};
+setupPanel(); servers2(); setInterval(servers2, 30000);
 $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
@@ -8189,6 +8263,110 @@ def with_peers(cfg, path, data):
     return data
 
 
+# ---------- adding a server: one code, one command ----------
+# The dashboard makes a one-time join code (30 minutes). On the new machine
+# `nightmux.py --join <code>` reaches this one over the tailnet, gets the bot
+# settings and a fresh peer secret, tells it where it listens, writes its own
+# config as a peer and installs the service. Nobody edits JSON on either side.
+JOIN_FOR, PEER_PORT = 1800, 9091
+_joins = {}       # token -> expiry
+
+
+def public_base(cfg):
+    """How another tailnet machine reaches this dashboard: tailscale serve's
+    https name (office_url, else the tailnet name), or None."""
+    u = urllib.parse.urlsplit(cfg.get("office_url") or "")
+    if u.scheme == "https" and u.netloc:
+        return f"https://{u.netloc}"
+    host = tailnet_host(cfg)
+    return f"https://{host}" if host else None
+
+
+def join_invite(cfg):
+    base = public_base(cfg)
+    if not base:
+        return None, "this server is not on a tailnet with `tailscale serve` — see the setup panel"
+    tok = __import__("secrets").token_urlsafe(18)
+    now = time.time()
+    for t in [t for t, exp in _joins.items() if exp < now]:
+        _joins.pop(t)
+    _joins[tok] = now + JOIN_FOR
+    code = __import__("base64").urlsafe_b64encode(
+        json.dumps({"u": base, "t": tok}).encode()).decode().rstrip("=")
+    return code, ""
+
+
+def join_accept(cfg, lock, req):
+    """POST /join from a new machine: the token buys the bot settings once."""
+    tok = str(req.get("t") or "")
+    exp = _joins.pop(tok, 0) if tok in _joins else 0
+    if not exp or exp < time.time():
+        return 403, {"error": "join code unknown, used or expired — make a new one"}
+    url = str(req.get("url") or "")
+    if not re.match(r"^http://[\w.:-]+$", url):
+        return 400, {"error": "bad listen url"}
+    name = re.sub(r"[^\w.-]", "-", str(req.get("name") or "peer"))[:30] or "peer"
+    peers = cfg.get("peers") or {}
+    base, n = name, 2
+    while name in peers or name == host_name(cfg):
+        name, n = f"{base}-{n}", n + 1
+    secret = __import__("secrets").token_urlsafe(24)
+    with lock:
+        cfg.setdefault("peers", {})[name] = {"url": url, "secret": secret}
+        save_cfg(cfg)
+    return 200, {"name": name, "secret": secret, "token": cfg.get("token"),
+                 "chat_id": cfg.get("chat_id"), "allow_users": cfg.get("allow_users"),
+                 "primary": host_name(cfg)}
+
+
+def join_cli(code):
+    """nightmux --join <code>: make this machine a peer of the one that made it."""
+    import base64
+    try:
+        inv = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+        base, tok = inv["u"], inv["t"]
+    except (ValueError, KeyError, TypeError):
+        sys.exit("that is not a join code — copy it again from the dashboard")
+    widen_path()
+    need = [b for b in ("tmux", "tailscale") if not shutil.which(b)]
+    if need:
+        sys.exit("missing: " + ", ".join(need) + "\n  tmux: sudo apt install tmux\n  tailscale: "
+                 "curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up")
+    ip = run("tailscale", "ip", "-4").strip().splitlines()[:1]
+    if not ip or not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip[0]):
+        sys.exit("tailscale is not up here — sudo tailscale up (same tailnet as the primary)")
+    import socket
+    print(f"🌙 joining {base} as {socket.gethostname()} ({ip[0]})")
+    req = urllib.request.Request(base.rstrip("/") + "/join", data=json.dumps({
+        "t": tok, "name": socket.gethostname(), "url": f"http://{ip[0]}:{PEER_PORT}"}).encode(),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            got = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"the primary refused: {e.read().decode(errors='replace')[:300]}")
+    except OSError as e:
+        sys.exit(f"cannot reach {base}: {e}\n  is this machine on the same tailnet?")
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    cfg.update({k: got[k] for k in ("token", "chat_id", "allow_users")})
+    cfg.update({"poll_telegram": False, "name": got["name"], "peer_secret": got["secret"],
+                "peer_listen": f"{ip[0]}:{PEER_PORT}"})
+    cfg.setdefault("topics", {})
+    save_cfg(cfg)
+    print(f"   config written ({CFG_PATH}, 0600) — peer '{got['name']}' of {got['primary']}")
+    for note in wire_claude() or ["claude settings already wired"]:
+        print(f"   {note}")
+    have = installed_agents(cfg)
+    print("   agents here: " + (", ".join(have) if have else
+                                 "none yet — install claude / codex / agy / opencode"))
+    print("   " + (wire_unit() or "service started"))
+    print(f"\n✅ {got['name']} joined. On the primary's dashboard pick it as the server for a "
+          f"new project, or send !server {got['name']} in a topic.")
+
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     peer = False   # this request came from another nightmux, through /peer/
 
@@ -8250,9 +8428,26 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps(analyze_chats(days)), "application/json")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
+        if self.path == "/api/setup":
+            return self.reply(json.dumps([{"label": l, "ok": ok, "fix": fix}
+                                          for l, ok, fix in setup_checks(self.server.cfg)]),
+                              "application/json")
+        if self.path == "/api/servers":
+            cfg = self.server.cfg
+            rows = [{"name": host_name(cfg), "me": True, "ok": True, "version": VERSION,
+                     "agents": installed_agents(cfg),
+                     "topics": sum(1 for t in cfg.get("topics", {}) if not peer_of(cfg, t))}]
+            for n, p_ in sorted((cfg.get("peers") or {}).items()):
+                got = peer_call(cfg, n, "api/agents", timeout=3)
+                rows.append({"name": n, "me": False, "ok": isinstance(got, dict), "url": p_["url"],
+                             "version": (got or {}).get("version") if isinstance(got, dict) else None,
+                             "agents": (got or {}).get("installed") if isinstance(got, dict) else [],
+                             "topics": sum(1 for t, s_ in (cfg.get("remote") or {}).items() if s_ == n)})
+            return self.reply(json.dumps(rows), "application/json")
         if self.path == "/api/agents":
             cfg = self.server.cfg
             return self.reply(json.dumps({
+                "version": VERSION,
                 "installed": installed_agents(cfg), "agents": sorted(agents(cfg)),
                 "projects_root": os.path.expanduser(cfg.get("projects_root") or "~/projects"),
                 "servers": [host_name(cfg)] + sorted(cfg.get("peers") or {})}),
@@ -8314,6 +8509,43 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             dispatch(cfg, self.server.state, self.server.lock, self.server.allow,
                      upd, NoAcks())
             return self.reply('{"ok": true}', "application/json")
+        if self.path == "/join" and not self.peer and not getattr(self.server, "peer_only", False):
+            try:
+                req = json.loads(body or "{}")
+            except ValueError:
+                req = {}
+            code, out = join_accept(cfg, self.server.lock, req if isinstance(req, dict) else {})
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(out).encode())
+            return
+        if self.path.startswith("/api/servers/"):
+            if self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            parts = self.path.strip("/").split("/")       # api servers <invite | name remove>
+            if parts[2:] == ["invite"]:
+                code, err = join_invite(cfg)
+                out = {"ok": bool(code), "msg": err, "code": code,
+                       "command": ("git clone -q https://github.com/mmr710/nightmux ~/nightmux 2>/dev/null "
+                                   "|| git -C ~/nightmux pull -q; "
+                                   f"python3 ~/nightmux/nightmux.py --join {code}") if code else ""}
+            elif len(parts) == 4 and parts[3] == "remove":
+                name = parts[2]
+                used = [t for t, s_ in (cfg.get("remote") or {}).items() if s_ == name]
+                if used:
+                    out = {"ok": False, "msg": f"topics {', '.join(used)} run there — close or "
+                                               "move them first (!server local)"}
+                else:
+                    with self.server.lock:
+                        (cfg.get("peers") or {}).pop(name, None)
+                        save_cfg(cfg)
+                    out = {"ok": True, "msg": f"removed {name} — stop nightmux there too"}
+            else:
+                out = {"ok": False, "msg": "unknown action"}
+            return self.reply(json.dumps(out), "application/json")
         if self.path.startswith("/api/topic"):
             return self.manage(cfg, body)
         parts = self.path.strip('/').split('/')
@@ -10296,6 +10528,33 @@ def selfcheck():
         assert got_ == want_, (key_, got_)
     ocfg.pop("hook_key")
     _err_seen.clear()
+    # Joining: an invite is a one-use code pointing here; /join buys the bot
+    # settings and a fresh peer secret once, and registers the new peer.
+    with stubbed(save_cfg=lambda c: None):
+        jcfg_ = {"token": "T", "chat_id": -1, "allow_users": [7],
+                 "office_url": "https://box.ts.net/office"}
+        code_, _ = join_invite(jcfg_)
+        import base64
+        inv_ = json.loads(base64.urlsafe_b64decode(code_ + "=" * (-len(code_) % 4)))
+        assert inv_["u"] == "https://box.ts.net" and inv_["t"] in _joins, inv_
+        st_, got_ = join_accept(jcfg_, threading.Lock(), {"t": inv_["t"], "name": "vps 2",
+                                                          "url": "http://100.1.2.3:9091"})
+        assert st_ == 200 and got_["token"] == "T" and got_["name"] == "vps-2", got_
+        assert jcfg_["peers"]["vps-2"] == {"url": "http://100.1.2.3:9091", "secret": got_["secret"]}
+        assert join_accept(jcfg_, threading.Lock(), {"t": inv_["t"], "url": "http://x:1"})[0] == 403
+        code2_, _ = join_invite(jcfg_)
+        t2_ = json.loads(base64.urlsafe_b64decode(code2_ + "=" * (-len(code2_) % 4)))["t"]
+        assert join_accept(jcfg_, threading.Lock(), {"t": t2_, "url": "file:///etc"})[0] == 400
+        _joins[t2_] = time.time() - 1                      # expired
+        assert join_accept(jcfg_, threading.Lock(), {"t": t2_, "url": "http://x:1"})[0] == 403
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port_}/api/servers/invite", data=b"{}", method="POST"))
+        assert False, "invite without the header"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+    page_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
+    assert "+ add server" in page_ and "/api/setup" in page_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
@@ -11244,37 +11503,56 @@ def selfcheck():
     print("selfcheck ok")
 
 
-def doctor():
-    """nightmux --doctor: one ✓/✗ line per check, triage only, nothing fixed."""
-    ok = [True]
-
-    def line(label, passed, detail=""):
-        ok[0] = ok[0] and passed
-        print(f"{'✓' if passed else '✗'} {label}" + (f" — {detail}" if detail else ""))
-
-    line("tmux binary found", bool(shutil.which("tmux")))
-    try:
-        cfg = load_cfg()
-    except (OSError, ValueError) as e:
-        cfg = {}
-        line("config file", False, f"{CFG_PATH}: {e}")
-    else:
-        missing = [k for k in ("token", "chat_id", "allow_users") if not cfg.get(k)]
-        line("config has token/chat_id/allow_users", not missing,
-             ("missing " + ", ".join(missing)) if missing else "")
-    if cfg.get("token"):
-        me = api(cfg, "getMe")
-        line("token accepted by Telegram", bool(me.get("ok")), me.get("description", ""))
-    else:
-        line("token accepted by Telegram", False, "no token to check")
+def setup_checks(cfg=None):
+    """[(label, ok, how to fix)] — ok None means optional and not set up. The
+    one list behind --doctor and the dashboard's setup panel."""
+    out = []
+    add = lambda label, ok, fix="": out.append((label, ok, fix))
+    add("tmux installed", bool(shutil.which("tmux")), "sudo apt install tmux  (macOS: brew install tmux)")
+    if cfg is None:
+        try:
+            cfg = load_cfg()
+        except (OSError, ValueError) as e:
+            add("config file", False, f"{CFG_PATH}: {e} — run: nightmux --setup")
+            cfg = {}
+    missing = [k for k in ("token", "chat_id", "allow_users") if not cfg.get(k)]
+    add("config has token/chat_id/allow_users", not missing,
+        ("missing " + ", ".join(missing) + " — run: nightmux --setup") if missing else "")
+    me = api(cfg, "getMe") if cfg.get("token") else {}
+    add("token accepted by Telegram", bool(me.get("ok")),
+        me.get("description", "") or "get one from @BotFather, then nightmux --setup")
     if cfg.get("token") and cfg.get("chat_id"):
         chat = api(cfg, "getChat", chat_id=cfg["chat_id"])
-        line("bot reachable in the configured chat", bool(chat.get("ok")),
-             chat.get("description", ""))
-    else:
-        line("bot reachable in the configured chat", False, "no token/chat_id to check")
+        add("bot reachable in the configured chat", bool(chat.get("ok")),
+            chat.get("description", "") or "add the bot to the group")
+        bot_id = (me.get("result") or {}).get("id")
+        if bot_id:
+            mem = (api(cfg, "getChatMember", chat_id=cfg["chat_id"],
+                       user_id=bot_id).get("result") or {})
+            add("bot can create and close topics",
+                mem.get("status") == "creator" or bool(mem.get("can_manage_topics")),
+                "in the group: make the bot an admin with 'Manage topics'")
     on = wired()
-    line("Claude Code hooks wired", bool(on), ", ".join(on) if on else "none found")
+    add("Claude Code hooks wired", bool(on) or None,
+        ", ".join(on) if on else "nightmux --setup wires them (optional: richer output)")
+    have = installed_agents(cfg)
+    add("agents installed", bool(have), ", ".join(have) if have else
+        "install at least one: claude, codex, agy, opencode…")
+    root = os.path.expanduser(cfg.get("projects_root") or "~/projects")
+    add("projects folder", os.path.isdir(root) or None,
+        root if os.path.isdir(root) else f'{root} does not exist yet — it is made on first use; '
+        'set "projects_root" to where your projects live')
+    port = cfg.get("webhook_port")
+    served = bool(port) and f":{port}" in run("tailscale", "serve", "status") \
+        if shutil.which("tailscale") else False
+    add("dashboard reachable from your phone", served or None,
+        "" if served else (f"tailscale serve --bg {port}" if port else
+                           'set "webhook_port": 9090, restart, then: tailscale serve --bg 9090'))
+    add("gh signed in (for !watch, !issues)",
+        (subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0)
+        if shutil.which("gh") else None, "gh auth login")
+    add("Chromium (for !shot, !reel, browser tool)", bool(browser_bin(cfg)) or None,
+        "npx playwright install chromium  (or set \"browser\")")
     if sys.platform == "darwin":
         active = "com.nightmux" in run("launchctl", "list")
     else:
@@ -11284,12 +11562,23 @@ def doctor():
         # session with it, because they are all in this unit's cgroup.
         km = run("systemctl", "--user", "show", "-p", "KillMode", "--value",
                  "nightmux").strip()
-        line("restarting the service keeps sessions alive", km == "process",
-             "" if km == "process" else
-             f"KillMode={km} — add 'KillMode=process' under [Service] in "
-             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
-    line("service active", active)
-    return ok[0]
+        add("restarting the service keeps sessions alive", km == "process",
+            "" if km == "process" else
+            f"KillMode={km} — add 'KillMode=process' under [Service] in "
+            f"{UNIT_PATH}, then: systemctl --user daemon-reload")
+    add("service active", active, "nightmux --setup installs it")
+    return out
+
+
+def doctor():
+    """nightmux --doctor: one ✓/✗ line per check, triage only, nothing fixed."""
+    ok = True
+    for label, passed, fix in setup_checks():
+        mark = "✓" if passed else "–" if passed is None else "✗"
+        ok = ok and passed is not False
+        print(f"{mark} {label}" + (f" — {fix}" if fix and not passed else
+                                   f" — {fix}" if fix and passed and label.startswith(("Claude", "agents")) else ""))
+    return ok
 
 
 def cli():
@@ -11298,6 +11587,11 @@ def cli():
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
+    elif "--join" in sys.argv:
+        i = sys.argv.index("--join")
+        if i + 1 >= len(sys.argv):
+            sys.exit("usage: nightmux --join <code from the dashboard>")
+        join_cli(sys.argv[i + 1])
     elif "--doctor" in sys.argv:
         sys.exit(0 if doctor() else 1)
     elif "--version" in sys.argv:
