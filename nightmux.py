@@ -3548,6 +3548,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
               "!issues", "!issue",   # sets the agent to work on an issue
+              "!apk", "!android",    # builds, installs on a phone
               "!watch")    # can merge a pull request
 
 
@@ -3645,6 +3646,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
         return watch_cmd(cfg, lock, topic, arg)
+    if cmd == "!shot" and arg.split()[:1] == ["android"]:
+        return android_shot(cfg, topic)
+    if cmd in ("!apk", "!android"):
+        return android_cmd(cfg, state, lock, topic, sess, cmd, arg)
     if cmd in ("!preview", "!shot") and sess:
         return preview_cmd(cfg, topic, sess, cmd, arg)
     if cmd == "!server":
@@ -3733,6 +3738,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "this one makes; real issues go back to the coder, LGTM stays quiet\n"
                 "!loopguard [ping|auto|off] = notice an agent going in circles (same "
                 "error, same file churned, apologies) and ping you, or step it back\n"
+                "!apk [install] = build the project's debug APK and send it here (or "
+                "install it on your phone) · !android connect|pair <ip:port> [code] = "
+                "your phone over wireless debugging · !shot android\n"
                 "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
                 "one and the agent branches, fixes, opens a PR that nightmux watches\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
@@ -4348,12 +4356,192 @@ def page_probe(cfg, url):
     return msgs[-15:], out[a:z + 7] if a >= 0 and z > a else ""
 
 
+# ---------- Android: build here, run on your phone ----------
+# No emulator on an ARM server — your phone is the device. Wireless debugging
+# (Developer options) over the tailnet makes it reachable to adb from here:
+# !android pair once, !android connect, then !apk install and !shot android.
+# Without a phone the APK still arrives in the topic to tap and install.
+_adb = []
+
+
+def adb_bin():
+    """The first adb on PATH that actually runs: an SDK's x86 build on an ARM box
+    is on PATH too, and fails on exec."""
+    if not _adb:
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            b = os.path.join(d, "adb")
+            if os.access(b, os.X_OK):
+                try:
+                    if subprocess.run([b, "version"], capture_output=True, timeout=10).returncode == 0:
+                        _adb.append(b)
+                        break
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+    return _adb[0] if _adb else None
+
+
+def adb(*args, timeout=30, binary=False):
+    b = adb_bin()
+    if not b:
+        raise OSError("no working adb — on Debian/Ubuntu: sudo apt install adb")
+    p = subprocess.run([b] + list(args), capture_output=True, timeout=timeout,
+                       stdin=subprocess.DEVNULL)
+    if p.returncode:
+        raise OSError((p.stderr or p.stdout).decode(errors="replace").strip()[-300:])
+    return p.stdout if binary else p.stdout.decode(errors="replace")
+
+
+def android_device():
+    """Serial of the one device adb sees, or None."""
+    try:
+        rows = [l.split("\t") for l in adb("devices").splitlines()[1:] if "\t" in l]
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    ready = [r[0] for r in rows if r[1] == "device"]
+    return ready[0] if ready else None
+
+
+def apk_build_cmd(cwd):
+    """(argv, folder) to build a debug APK here: Flutter, or a Gradle wrapper at
+    the root or under android/ (React Native, Capacitor, Expo prebuild)."""
+    if os.path.exists(os.path.join(cwd, "pubspec.yaml")) and shutil.which("flutter"):
+        return ["flutter", "build", "apk", "--debug"], cwd
+    for d in (cwd, os.path.join(cwd, "android")):
+        if os.path.exists(os.path.join(d, "gradlew")):
+            return ["sh", "./gradlew", "assembleDebug", "--console=plain"], d
+    return None, None
+
+
+def newest_apk(cwd, since=0):
+    found = [p for p in glob.glob(os.path.join(cwd, "**", "*.apk"), recursive=True)
+             if "/intermediates/" not in p and os.path.getmtime(p) >= since]
+    return max(found, key=os.path.getmtime, default=None)
+
+
+def android_shot(cfg, topic):
+    dev = android_device()
+    if not dev:
+        return "no phone connected — !android for how"
+    try:
+        png = adb("-s", dev, "exec-out", "screencap", "-p", binary=True)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"screencap failed: {e}"
+    _preview[topic] = {"android": dev, "at": time.time(), "url": f"android:{dev}"}
+    send_file(cfg, topic, "android.png", png, caption=f"📱 {dev}", kind="photo",
+              buttons=kb([[("📸 again", "!shot android")]]))
+    return None
+
+
+def android_fix(caption, img, dev):
+    """Point and fix for the phone: the screen, the activity on top, recent errors."""
+    try:
+        top = re.findall(r"mResumedActivity.*?(\S+/\S+)", adb("-s", dev, "shell", "dumpsys",
+                                                              "activity", "activities"))
+        errs = adb("-s", dev, "logcat", "-d", "-t", "300", "*:E").strip().splitlines()[-25:]
+    except (OSError, subprocess.TimeoutExpired):
+        top, errs = [], []
+    return ((caption or "Fix what is marked in this screenshot.") + "\n\n"
+            f"Screenshot of the Android app on my phone (I may have drawn on it): {img}\n"
+            + (f"Activity on screen: {top[0]}\n" if top else "")
+            + "Recent logcat errors:\n" + (redact("\n".join(errs))[-3000:] or "(none)")
+            + "\n\nFind the code behind what is marked, fix it, rebuild (`!apk install` "
+              "puts it back on the phone).")
+
+
+_apk_busy = set()
+
+
+def apk_start(cfg, state, topic, sess, cwd, install):
+    argv, where = apk_build_cmd(cwd)
+    if not argv:
+        return "no Android build here (gradlew, android/gradlew, or a Flutter pubspec.yaml)"
+    if topic in _apk_busy:
+        return "a build is already running here"
+    _apk_busy.add(topic)
+    t0 = time.time()
+
+    def go():
+        try:
+            p = subprocess.run(argv, cwd=where, capture_output=True, text=True, timeout=1800,
+                               stdin=subprocess.DEVNULL)
+            out = (p.stdout or "") + (p.stderr or "")
+            apk = newest_apk(cwd, t0 - 5)
+            if p.returncode or not apk:
+                tail = goal_tail(out)
+                if sess:
+                    _apk_fail[topic] = tail
+                send(cfg, topic, f"🔴 APK build failed (exit {p.returncode})\n\n{tail[-1500:]}",
+                     mode="mono", buttons=kb([[("🛠 send to agent", "!apk fix")]]) if sess else None)
+                return
+            size = os.path.getsize(apk)
+            dev = android_device() if install else None
+            note = ""
+            if dev:
+                try:
+                    adb("-s", dev, "install", "-r", apk, timeout=300)
+                    note = f"\n📲 installed on {dev}"
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    note = f"\n📲 install failed: {e}"
+            elif install:
+                note = "\nno phone connected — tap the file to install it"
+            if size <= 49 * 2 ** 20:      # the Bot API's upload ceiling is 50 MB
+                with open(apk, "rb") as f:
+                    send_file(cfg, topic, os.path.basename(apk), f.read(),
+                              caption=f"✅ {os.path.basename(apk)} · {size / 2 ** 20:.1f} MB"
+                              f" · {time.time() - t0:.0f}s{note}",
+                              buttons=kb([[("📲 install", "!apk install"), ("📸 phone", "!shot android")]]))
+            else:
+                send(cfg, topic, f"✅ built {apk} ({size / 2 ** 20:.0f} MB, over Telegram's "
+                     f"50 MB limit){note}", mode="plain")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            send(cfg, topic, f"🔴 APK build: {e}", mode="plain")
+        finally:
+            _apk_busy.discard(topic)
+    threading.Thread(target=go, daemon=True).start()
+    return f"🔨 building {' '.join(argv[-2:] if argv[0] == 'sh' else argv)} in {where}…"
+
+
+_apk_fail = {}
+
+
+def android_cmd(cfg, state, lock, topic, sess, cmd, arg):
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    if cmd == "!apk":
+        if arg == "fix":
+            tail = _apk_fail.pop(topic, None)
+            if not (tail and sess):
+                return "no failed build to send"
+            return send_prompt(cfg, state, topic, sess,
+                               f"The Android debug build fails. Last lines:\n{tail}\n\n"
+                               "Fix the cause, then run the build again until it succeeds.")
+        if not cwd:
+            return "no folder recorded for this topic"
+        return apk_start(cfg, state, topic, sess, cwd, arg == "install")
+    words = arg.split()
+    try:
+        if words[:1] == ["pair"] and len(words) == 3:
+            return "🔗 " + adb("pair", words[1], words[2]).strip()
+        if words[:1] == ["connect"] and len(words) == 2:
+            return "🔗 " + adb("connect", words[1]).strip()
+        if words[:1] == ["disconnect"]:
+            return adb("disconnect", *words[1:]).strip() or "disconnected"
+        dev = android_device()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"adb: {e}"
+    return ((f"📱 connected: {dev}\n!apk install · !shot android" if dev else "📱 no phone connected.")
+            + "\nOn the phone: Developer options → Wireless debugging (on the same tailnet or "
+              "Wi-Fi). Once: 'Pair device with pairing code' → !android pair <ip:port> <code>; "
+              "then !android connect <ip:port> (the port on the main Wireless debugging screen).")
+
+
 def point_fix(cfg, topic, caption, img):
     """A photo sent soon after !preview/!shot is a bug report about that page:
     the agent gets the picture, the URL, the console and the rendered DOM."""
     pv = _preview.get(topic)
     if not pv or time.time() - pv["at"] > POINT_FOR:
         return None
+    if pv.get("android"):
+        return android_fix(caption, img, pv["android"])
     errs, dom = page_probe(cfg, pv["url"])
     dom_path = ""
     if dom:
@@ -9585,6 +9773,23 @@ def selfcheck():
         issues_tick(icfg2_, ist2_, ilk_, time.time())
         assert icfg2_["watch"]["7"]["issue"] == 3 and "#3" in isaid_[-1], isaid_[-1]
         _watch_run.clear()
+    # Android: which build runs where, the newest APK outside intermediates, and
+    # point-and-fix on a phone screen carries its activity and logcat errors.
+    with tempfile.TemporaryDirectory() as ad_:
+        assert apk_build_cmd(ad_) == (None, None)
+        os.makedirs(os.path.join(ad_, "android", "app", "build", "outputs", "apk", "debug"))
+        open(os.path.join(ad_, "android", "gradlew"), "w").close()
+        assert apk_build_cmd(ad_) == (["sh", "./gradlew", "assembleDebug", "--console=plain"],
+                                      os.path.join(ad_, "android"))
+        os.makedirs(os.path.join(ad_, "android", "app", "build", "intermediates"))
+        for rel_ in ("android/app/build/intermediates/x.apk",
+                     "android/app/build/outputs/apk/debug/app-debug.apk"):
+            open(os.path.join(ad_, rel_), "w").close()
+        assert newest_apk(ad_).endswith("app-debug.apk")
+    with stubbed(adb=lambda *a, **k: ("  mResumedActivity: ActivityRecord{1 u0 com.x/.CartActivity t9}"
+                                     if "dumpsys" in a else "E/Cart: NullPointerException")):
+        af_ = android_fix("cart overlaps", "/i.jpg", "100.1.2.3:5555")
+        assert "com.x/.CartActivity" in af_ and "NullPointerException" in af_ and "/i.jpg" in af_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
