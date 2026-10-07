@@ -332,6 +332,18 @@ Saved prompts: `!p` shows `review`, `fix-tests`, `spec`, `explain`, `tidy`
 and `ship` as buttons; `!p save <name> <text>` adds yours (`{{args}}` marks
 where `!p <name> <args>` puts the rest).
 
+## Issues in, pull requests out
+
+`!issues` lists the repo's open issues as buttons. Tap one (or
+`!issue 12`): the agent gets the issue and its comments, a branch name
+(`issue-12-…`) and the recipe — branch, fix with a test that fails first,
+push, `gh pr create` ending in `Fixes #12`. nightmux watches for that
+branch's PR and, once it opens, `!watch` takes over: CI failures and review
+comments go back to the agent, green gets a merge button.
+`!issues auto` (label `nightmux`, or `!issues auto <label>`) works through
+labelled issues one at a time whenever the topic has been quiet 10 minutes
+with nothing in flight — label a few before bed. `!issues auto off` stops.
+
 ## Close the PR loop
 
 `!watch pr` (this branch's PR) or `!watch pr 12`: nightmux polls it with `gh`.
