@@ -225,6 +225,9 @@ def send_file(cfg, topic, name, data, caption="", buttons=None, kind="document")
     if buttons:
         body += field("reply_markup", buttons)
     ctype = "text/plain" if isinstance(data, str) else "application/octet-stream"
+    if not isinstance(data, str):      # text documents came through send(), logged there
+        chat_log(topic, "bot", f"[{'📸' if kind == 'photo' else '🎞' if kind == 'animation' else '📎'} "
+                 f"{name}] {caption}".strip(), buttons)
     body += (f'--{b}\r\nContent-Disposition: form-data; name="{kind}"; '
              f'filename="{name}"\r\nContent-Type: {ctype}\r\n\r\n').encode()
     body += (data.encode() if isinstance(data, str) else data)
@@ -235,10 +238,34 @@ def send_file(cfg, topic, name, data, caption="", buttons=None, kind="document")
 
 
 
+# The dashboard's chat view: what was said in each topic, both ways, kept in
+# memory (the last CHAT_KEEP per topic; a restart starts it fresh — Telegram
+# keeps the record). Buttons are kept too, so a menu answered from the page
+# runs the same command a tap in Telegram would.
+CHAT_KEEP = 300
+_chat, _chat_n = {}, [0]
+
+
+def chat_log(topic, who, text, buttons=None):
+    rows = []
+    try:
+        for row in (json.loads(buttons) if isinstance(buttons, str) else buttons or {}).get(
+                "inline_keyboard") or []:
+            rows.append([{"text": b.get("text", ""), "data": b.get("callback_data"),
+                          "url": b.get("url")} for b in row])
+    except (ValueError, AttributeError):
+        pass
+    _chat_n[0] += 1
+    log = _chat.setdefault(str(topic), [])
+    log.append({"id": _chat_n[0], "t": round(time.time()), "who": who, "text": text, "buttons": rows})
+    del log[:-CHAT_KEEP]
+
+
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
+    chat_log(topic, "bot", text, buttons)
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
     parts, mid = chunks(text), None
     if len(parts) > FILE_AFTER:
@@ -7609,6 +7636,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🌙 nightmux</title>
+<link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14'%3E%F0%9F%8C%99%3C/text%3E%3C/svg%3E">
 <style>
 :root { color-scheme: dark; }
@@ -7670,6 +7698,7 @@ textarea { background: #0b0e14; border: 1px solid #232838; color: #d8dee9; borde
          background: #131722; border: 1px solid #2d3346; border-radius: 8px; padding: 8px 14px;
          font-size: 13px; display: none; z-index: 9; }
 .srv + .srv { margin-top: 14px; }
+a.chatlnk { margin-left: auto; text-decoration: none; font-size: 16px; }
 #addp { display: none; margin-bottom: 12px; } #addp.open { display: block; }
 ol.steps { margin: 0; padding-left: 20px; } ol.steps li { margin-bottom: 10px; }
 pre { background: #0b0e14; border: 1px solid #232838; border-radius: 6px; padding: 8px 10px;
@@ -7798,7 +7827,8 @@ function topics(rows) {
   keyed($('grid'), rows, r => r.topic,
     r => {
       const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
-        '<span class="meta tid"></span></div><div class="meta info"></div><div class="bench"></div>' +
+        '<span class="meta tid"></span><a class="chatlnk" href="/chat?t=' + encodeURIComponent(r.topic) + '">💬</a></div>' +
+        '<div class="meta info"></div><div class="bench"></div>' +
         '<div class="chipsrow agents"></div>' +
         '<form><input placeholder="send a prompt…" autocomplete="off" enterkeyhint="send">' +
         '<button type="submit">send</button></form><div class="ok"></div>');
@@ -7912,6 +7942,7 @@ $('copyjoin').onclick = async () => {
               getSelection().removeAllRanges(); getSelection().addRange(r); toast('selected — copy it'); }
 };
 setupPanel(); servers2(); setInterval(servers2, 30000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
 if (location.hash === '#servers') { $('addsrv').click(); $('addsrv').scrollIntoView(); }
@@ -7982,6 +8013,107 @@ tick();
 setInterval(tick, 4000);
 </script>
 </body></html>"""
+
+ICON_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' "
+            "rx='14' fill='#0b0e14'/><path d='M40 12a22 22 0 1 0 12 34A18 18 0 0 1 40 12z' "
+            "fill='#f5d76e'/></svg>")
+
+# One topic as a conversation: your messages, the agents' answers, their
+# menus as buttons that work, a box to type in. Polls /api/chat for what is
+# new; never re-renders what is already on screen, so nothing jumps.
+CHAT_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>nightmux chat</title>
+<link rel="manifest" href="/manifest.json"><link rel="icon" href="/icon.svg">
+<meta name="theme-color" content="#0b0e14">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: #0b0e14; color: #d8dee9; display: flex; flex-direction: column;
+       font: 14px/1.45 -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
+header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #232838;
+         position: sticky; top: 0; background: #0b0e14; }
+header a { color: #79c0ff; text-decoration: none; font-size: 13px; }
+header b { font-size: 15px; } .meta { color: #8b949e; font-size: 12px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; flex: none; }
+.dot.idle { background: #3fb950; } .dot.busy { background: #d29922; } .dot.waiting { background: #f0883e; }
+#log { flex: 1; overflow-y: auto; padding: 12px 14px 4px; }
+.msg { max-width: 92%; margin: 0 0 10px; padding: 8px 11px; border-radius: 10px; white-space: pre-wrap;
+       overflow-wrap: anywhere; }
+.msg.bot { background: #131722; border: 1px solid #232838; font: 12.5px/1.45 ui-monospace, Menlo, monospace; }
+.msg.you { background: #1f6feb; color: #fff; margin-left: auto; }
+.msg .t { display: block; font: 11px -apple-system, sans-serif; color: #8b949e; margin-top: 4px; }
+.msg.you .t { color: #cfe0ff; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.btns button, .btns a { background: #232838; border: 1px solid #2d3346; color: #d8dee9; border-radius: 6px;
+       padding: 5px 10px; font: 13px -apple-system, sans-serif; cursor: pointer; text-decoration: none; }
+#typing { color: #d29922; font-size: 12px; padding: 0 14px 6px; min-height: 18px; }
+form { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid #232838; }
+textarea { flex: 1; resize: none; background: #131722; border: 1px solid #232838; color: #d8dee9; border-radius: 8px;
+           padding: 9px 10px; font: inherit; font-size: 16px; max-height: 40vh; }
+form button { background: #1f6feb; border: 0; color: #fff; border-radius: 8px; padding: 0 16px; font: inherit; }
+.empty { color: #6b7280; text-align: center; margin-top: 30vh; }
+</style></head><body>
+<header><a href="/">←</a><span class="dot" id="dot"></span><b id="name">…</b><span class="meta" id="meta"></span>
+<a href="#" id="notify" style="margin-left:auto">🔔</a></header>
+<div id="log"><p class="empty">nothing here yet — what nightmux says in this topic shows up here</p></div>
+<div id="typing"></div>
+<form id="f"><textarea id="box" rows="1" placeholder="message the agent…" enterkeyhint="send"></textarea><button>send</button></form>
+<script>
+const T = new URLSearchParams(location.search).get('t'), log = document.getElementById('log');
+let last = 0, first = true;
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function post(text) {
+  return fetch('/topic/' + encodeURIComponent(T), {method: 'POST', body: text});
+}
+function add(m) {
+  const el = document.createElement('div'); el.className = 'msg ' + m.who;
+  el.innerHTML = esc(m.text) + '<span class="t">' + new Date(m.t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '</span>';
+  const rows = (m.buttons || []).flat();
+  if (rows.length) {
+    const b = document.createElement('div'); b.className = 'btns';
+    rows.forEach(x => { let e;
+      if (x.url) { e = document.createElement('a'); e.href = x.url; e.target = '_blank'; }
+      else { e = document.createElement('button'); e.onclick = () => { post(x.data); e.disabled = true; }; }
+      e.textContent = x.text; b.appendChild(e); });
+    el.appendChild(b);
+  }
+  log.appendChild(el);
+}
+async function poll() {
+  try {
+    const d = await (await fetch('/api/chat/' + encodeURIComponent(T) + '?after=' + last, {cache: 'no-store'})).json();
+    document.getElementById('name').textContent = d.name || ('topic ' + T);
+    document.getElementById('meta').textContent = (d.agent || '') + (d.error ? ' · ' + d.error : '');
+    document.getElementById('dot').className = 'dot ' + (d.mode || '');
+    document.getElementById('typing').textContent = d.mode === 'busy' ? '⚙️ working…' : d.mode === 'waiting' ? '✋ waiting for you' : '';
+    document.title = (d.mode === 'waiting' ? '✋ ' : '') + (d.name || 'nightmux');
+    if (d.items && d.items.length) {
+      const near = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+      if (first) log.innerHTML = '';
+      d.items.forEach(add); last = d.items[d.items.length - 1].id;
+      if (near || first) log.scrollTop = log.scrollHeight;
+      const bot = d.items.filter(m => m.who === 'bot');
+      if (!first && document.hidden && bot.length && window.Notification && Notification.permission === 'granted')
+        new Notification(d.name || 'nightmux', {body: bot[bot.length - 1].text.slice(0, 160), icon: '/icon.svg'});
+      first = false;
+    }
+  } catch (e) {}
+}
+const box = document.getElementById('box');
+box.addEventListener('input', () => { box.style.height = 'auto'; box.style.height = box.scrollHeight + 'px'; });
+box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) { e.preventDefault(); document.getElementById('f').requestSubmit(); } });
+document.getElementById('f').onsubmit = async e => {
+  e.preventDefault(); const t = box.value.trim(); if (!t) return;
+  const r = await post(t); if (r.ok) { box.value = ''; box.style.height = 'auto'; setTimeout(poll, 600); }
+};
+document.getElementById('notify').onclick = e => { e.preventDefault();
+  if (window.Notification) Notification.requestPermission().then(p => document.getElementById('notify').textContent = p === 'granted' ? '🔔✓' : '🔕'); };
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+poll(); setInterval(poll, 2000);
+</script></body></html>"""
 
 # The office: a room per topic, a desk per agent on its bench, every animation a
 # real state from office_snapshot(). Pixel art is drawn as rectangles on a small
@@ -8838,6 +8970,37 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
             # No lock: reads transcript files, not daemon state.
             return self.reply(json.dumps(analyze_chats(days)), "application/json")
+        if self.path.startswith("/chat"):
+            return self.reply(CHAT_HTML, "text/html; charset=utf-8")
+        if self.path == "/manifest.json":
+            return self.reply(json.dumps({
+                "name": "nightmux", "short_name": "nightmux", "start_url": "/",
+                "display": "standalone", "background_color": "#0b0e14", "theme_color": "#0b0e14",
+                "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]}),
+                "application/manifest+json")
+        if self.path == "/icon.svg":
+            return self.reply(ICON_SVG, "image/svg+xml")
+        if self.path == "/sw.js":       # installable as an app; no offline cache
+            return self.reply("self.addEventListener('fetch', () => {});", "text/javascript")
+        if self.path.startswith("/api/chat/"):
+            u = urllib.parse.urlsplit(self.path)
+            topic = u.path[len("/api/chat/"):].strip("/")
+            after = (urllib.parse.parse_qs(u.query).get("after") or ["0"])[0]
+            cfg = self.server.cfg
+            peer = None if self.peer else peer_of(cfg, topic)
+            if peer:
+                got = peer_call(cfg, peer, f"api/chat/{topic}?after={after}", timeout=5)
+                return self.reply(json.dumps(got if isinstance(got, dict) else
+                                             {"items": [], "error": f"{peer} not answering"}),
+                                  "application/json")
+            after = int(after) if after.isdigit() else 0
+            with self.server.lock:
+                row = next((r for r in topics_status(cfg, self.server.state) if r["topic"] == topic), {})
+            return self.reply(json.dumps({
+                "items": [m for m in _chat.get(topic, []) if m["id"] > after],
+                "session": row.get("session"), "mode": row.get("mode"), "agent": row.get("agent"),
+                "name": (cfg.get("topic_names") or {}).get(topic) or row.get("session") or topic}),
+                "application/json")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
         if self.path == "/api/setup":
@@ -9267,6 +9430,7 @@ def process(cfg, state, lock, allow, upd):
              + "\nIt reached Telegram either way: rotate it if it was real. "
              "!raw <text> sends it to the agent anyway.", mode="plain")
         return
+    chat_log(topic, "you", text if not cq else f"tap: {text}")
     if att or doc or voice:  # hand Claude the path; it reads images and files itself
         path = fetch_file(cfg, doc.get("file_id") or voice.get("file_id") or att,
                           doc.get("file_name") or voice.get("file_name"))
@@ -11056,6 +11220,21 @@ def selfcheck():
                 break
             time.sleep(0.02)
         assert dsaid_ == []
+    # Chat view: both directions are logged with their buttons, a reader asks
+    # only for what is new, and the page and the PWA bits are served.
+    _chat.clear()
+    chat_log("5", "bot", "✅ done", kb([[("yes", "!y s")]]))     # what send() records
+    chat_log("5", "you", "fix the cart")
+    first_ = _chat["5"][0]
+    assert first_["who"] == "bot" and first_["buttons"] == [[{"text": "yes", "data": "!y s", "url": None}]], _chat["5"]
+    cj_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/chat/5?after={first_['id']}").read())
+    assert [m["text"] for m in cj_["items"]] == ["fix the cart"], cj_
+    assert "message the agent" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/chat?t=5").read().decode()
+    assert json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/manifest.json").read())["display"] == "standalone"
+    for _ in range(CHAT_KEEP + 5):
+        chat_log("5", "bot", "x")
+    assert len(_chat["5"]) == CHAT_KEEP
+    _chat.clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
