@@ -4467,9 +4467,20 @@ def apk_start(cfg, state, topic, sess, cwd, install):
 
     def go():
         try:
-            p = subprocess.run(argv, cwd=where, capture_output=True, text=True, timeout=1800,
-                               stdin=subprocess.DEVNULL)
-            out = (p.stdout or "") + (p.stderr or "")
+            # Its own process group: on a timeout the whole build goes, not just
+            # the `sh ./gradlew` wrapper while the Gradle client runs on.
+            limit = int(cfg.get("apk_timeout") or 3600)
+            p = subprocess.Popen(argv, cwd=where, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, text=True, start_new_session=True)
+            try:
+                out, _ = p.communicate(timeout=limit)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, 9)
+                p.communicate()
+                send(cfg, topic, f"🔴 APK build still running after {left(limit)} — stopped. "
+                     '"apk_timeout" in the config (seconds) gives it longer.', mode="plain")
+                return
+            out = out or ""
             apk = newest_apk(cwd, t0 - 5)
             if p.returncode or not apk:
                 tail = goal_tail(out)
@@ -10000,6 +10011,27 @@ def selfcheck():
                      "android/app/build/outputs/apk/debug/app-debug.apk"):
             open(os.path.join(ad_, rel_), "w").close()
         assert newest_apk(ad_).endswith("app-debug.apk")
+    # A build past its limit is stopped whole, children included.
+    with tempfile.TemporaryDirectory() as at_:
+        with open(os.path.join(at_, "gradlew"), "w") as f:
+            f.write("#!/bin/sh\nsleep 30 &\necho $! > child.pid\nwait\n")
+        asaid_ = []
+        with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: asaid_.append(x)):
+            apk_start({"apk_timeout": 1}, {}, "77", None, at_, False)
+            for _ in range(200):
+                if "77" not in _apk_busy:
+                    break
+                time.sleep(0.05)
+        assert "stopped" in asaid_[-1], asaid_
+        with open(os.path.join(at_, "child.pid")) as f:
+            cpid_ = int(f.read())
+        time.sleep(0.2)
+        try:
+            os.kill(cpid_, 0)
+            with open(f"/proc/{cpid_}/stat") as f:
+                assert f.read().split(")")[1].split()[0] == "Z", "build child survived"
+        except (OSError, FileNotFoundError):
+            pass                                   # gone: what we want
     with stubbed(adb=lambda *a, **k: ("  mResumedActivity: ActivityRecord{1 u0 com.x/.CartActivity t9}"
                                      if "dumpsys" in a else "E/Cart: NullPointerException")):
         af_ = android_fix("cart overlaps", "/i.jpg", "100.1.2.3:5555")
