@@ -10392,6 +10392,11 @@ def selfcheck():
     isaid_, iprs_ = [], []
 
     def fake_gh2(cwd, *a, timeout=60):
+        if a[:2] == ("api", "user"):
+            return "me\n"
+        if a[:2] == ("pr", "view"):
+            return json.dumps({"state": "OPEN", "url": "u", "headRefOid": "0" * 40,
+                               "statusCheckRollup": [], "reviews": [], "comments": []})
         if a[:2] == ("pr", "list"):
             return json.dumps(iprs_)
         if a[:2] == ("issue", "list"):
@@ -11462,7 +11467,7 @@ def selfcheck():
     with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
                 api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
                 run=lambda *a, **kw: "process" if "KillMode" in a else "active",
-                shutil=_FakeShutil()):
+                shutil=_FakeShutil(), installed_agents=lambda c: ["claude"]):
         assert doctor() is True                # every check stubbed healthy
     with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
                 api=lambda c, m, **kw: {"ok": False, "description": "bad token"},
@@ -11548,9 +11553,12 @@ def setup_checks(cfg=None):
     add("dashboard reachable from your phone", served or None,
         "" if served else (f"tailscale serve --bg {port}" if port else
                            'set "webhook_port": 9090, restart, then: tailscale serve --bg 9090'))
-    add("gh signed in (for !watch, !issues)",
-        (subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0)
-        if shutil.which("gh") else None, "gh auth login")
+    try:                                                # optional: None, never ✗
+        gh_ok = subprocess.run(["gh", "auth", "status"], capture_output=True,
+                               timeout=20).returncode == 0 or None
+    except (OSError, subprocess.TimeoutExpired):
+        gh_ok = None
+    add("gh signed in (for !watch, !issues)", gh_ok, "gh auth login")
     add("Chromium (for !shot, !reel, browser tool)", bool(browser_bin(cfg)) or None,
         "npx playwright install chromium  (or set \"browser\")")
     if sys.platform == "darwin":
