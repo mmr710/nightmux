@@ -8,6 +8,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!p`: saved prompts as tap-to-send buttons — built-ins `review`,
+  `fix-tests`, `spec`, `explain`, `tidy`, `ship`; `!p save <name> <text>`
+  with `{{args}}` for what follows the name; config overrides and hides
+  built-ins.
+
 - `!watch pr [n]`: polls the topic's pull request; a failed check's log and
   new review comments (inline too) are queued to the agent once each, the gh
   account's own comments skipped; green pings once per commit with a merge
