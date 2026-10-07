@@ -2077,6 +2077,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     elif body:
         if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
+            goal_capture(cfg, topic, sess)
     else:
         return
     if st.get("react"):
@@ -2432,6 +2433,7 @@ def watcher(cfg, state, lock):
             consult_tick(cfg, state)
             auto_update_tick(cfg)
             failover_tick(cfg, state, lock)
+            goal_tick(cfg, state)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3499,7 +3501,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all",
               "!update",   # runs installers on the host: no business in a read-only topic
               "!failover",
-              "!server")   # re-routes the topic to another machine
+              "!server",   # re-routes the topic to another machine
+              "!goal")     # runs a shell command after every turn
 
 
 def writes(cfg, cmd, arg=""):
@@ -3578,6 +3581,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if days not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
         return stats_report(analyze_chats(days))
+    if cmd == "!goal":
+        return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!server":
         peers = cfg.get("peers") or {}
         if not arg:
@@ -3648,6 +3653,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!version = build, python, and which hooks are wired\n"
                 "!stats [days] = token, cache and prompt statistics per agent from "
                 "this machine's transcripts, with what to change\n"
+                "!goal [n] <check> | off = run a check (tests, build) after every "
+                "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
                 "to another nightmux (see README: two servers)\n"
                 "!office = link to the live office page: a room per topic, a desk "
@@ -4115,6 +4122,121 @@ def handle(cfg, state, lock, topic, text, mid=None):
     return send_prompt(cfg, state, topic, sess, text, mid)
 
 
+# ---------- !goal: keep going until a check passes ----------
+# After every finished turn the topic's check (tests, build, lint) runs in the
+# project dir. Red: its tail goes back to the agent as the next prompt. Green,
+# or the same failure three times, or out of rounds: you hear about it. Turn
+# end is captured lock-free in flush_new and acted on in the watcher's tick;
+# the check itself runs on its own thread, since a test suite takes minutes.
+GOAL_TIMEOUT = 600
+GOAL_ROUNDS = 6
+_goal_due = {}    # topic -> session whose turn just ended
+_goal_run = {}    # topic -> {"sess", and "rc"/"out" once the check is done}
+_goal = {}        # topic -> {"rounds", "same", "last", "paused"}: in memory
+
+
+def goal_capture(cfg, topic, sess):
+    if (cfg.get("goals") or {}).get(topic) and not (_goal.get(topic) or {}).get("paused"):
+        _goal_due[topic] = sess
+
+
+def goal_check(cmd, cwd, out):
+    # ponytail: timeout kills the shell, not a grandchild it left running.
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True,
+                           timeout=GOAL_TIMEOUT, stdin=subprocess.DEVNULL)
+        out["out"], out["rc"] = (p.stdout or "") + (p.stderr or ""), p.returncode
+    except subprocess.TimeoutExpired:
+        out["out"], out["rc"] = f"timed out after {GOAL_TIMEOUT}s", 124
+    except OSError as e:
+        out["out"], out["rc"] = str(e), 127
+
+
+def goal_tail(text, n=40):
+    return redact("\n".join(text.rstrip().split("\n")[-n:]))[-3000:]
+
+
+def goal_tick(cfg, state):
+    now, goals = time.time(), cfg.get("goals") or {}
+    for topic, sess in list(_goal_due.items()):
+        g, st = goals.get(topic), state.get(sess) or {}
+        if not g:
+            _goal_due.pop(topic, None)
+            continue
+        # Not while it is busy, held, or has more of your prompts to get through:
+        # the check is for the work as you left it, not half of it.
+        if (topic in _goal_run or st.get("queue") or st.get("mode") != "idle"
+                or st.get("limit_until", 0) > now):
+            continue
+        _goal_due.pop(topic, None)
+        run = _goal_run[topic] = {"sess": sess}
+        cwd = (cfg.get("dirs") or {}).get(topic) or sess_cwd(sess)
+        threading.Thread(target=goal_check, args=(g["cmd"], cwd, run), daemon=True).start()
+    for topic, run in list(_goal_run.items()):
+        if "rc" not in run:
+            continue
+        _goal_run.pop(topic, None)
+        g = goals.get(topic)
+        if not g:
+            continue
+        gs = _goal.setdefault(topic, {"rounds": 0, "same": 0})
+        cmd, top = g["cmd"], g.get("max") or GOAL_ROUNDS
+        if run["rc"] == 0:
+            n = gs["rounds"]
+            _goal[topic] = {"rounds": 0, "same": 0}
+            send(cfg, topic, f"✅ goal green: {cmd}"
+                 + (f" — after {n} fix round{'s' * (n != 1)}" if n else ""), mode="plain")
+            continue
+        tail = goal_tail(run["out"])
+        # Numbers change between runs of the same failure (times, ids, line
+        # counts); without them the fingerprint is the failure itself.
+        sig = hash(re.sub(r"\d+", "#", tail))
+        gs["same"] = gs["same"] + 1 if sig == gs.get("last") else 1
+        gs["last"], gs["rounds"] = sig, gs["rounds"] + 1
+        if gs["same"] >= 3 or gs["rounds"] > top:
+            gs["paused"] = True
+            why = ("the same failure 3 times in a row" if gs["same"] >= 3
+                   else f"still red after {top} rounds")
+            send(cfg, topic, f"🛑 goal stuck — {why}: {cmd} (exit {run['rc']})\n\n{tail[-1500:]}"
+                 "\n\nyour next message resumes it · !goal off stops it", mode="mono")
+            continue
+        state.setdefault(run["sess"], {}).setdefault("queue", []).append(
+            f"The check `{cmd}` failed (exit {run['rc']}, round {gs['rounds']}/{top}). "
+            f"Last lines:\n{tail}\n\nFix the root cause in the code. Do not skip, "
+            "weaken or delete the check or its tests. Stop when it passes.")
+        send(cfg, topic, f"🔁 goal round {gs['rounds']}/{top}: {cmd} failed "
+             f"(exit {run['rc']}) — sent back to {run['sess']}", mode="plain")
+
+
+def goal_cmd(cfg, lock, topic, arg):
+    goals = cfg.get("goals") or {}
+    if not arg:
+        g = goals.get(topic)
+        if not g:
+            return ("no goal here. !goal <check> runs it after every turn and sends "
+                    "failures back until it passes, e.g.\n!goal npm test\n!goal pytest -q"
+                    "\n!goal 8 npm run build   (8 rounds instead of %d)" % GOAL_ROUNDS)
+        gs = _goal.get(topic) or {}
+        return (f"🎯 goal: {g['cmd']} · round {gs.get('rounds', 0)}/{g.get('max') or GOAL_ROUNDS}"
+                + (" · paused, your next message resumes" if gs.get("paused") else ""))
+    with lock:
+        if arg == "off":
+            goals.pop(topic, None)
+            _goal.pop(topic, None)
+            _goal_due.pop(topic, None)
+            out = "goal off"
+        else:
+            m = re.match(r"(\d+)\s+(.+)", arg, re.S)
+            n, cmd = (int(m.group(1)), m.group(2)) if m else (None, arg)
+            goals[topic] = {"cmd": cmd.strip(), **({"max": n} if n else {})}
+            cfg["goals"] = goals
+            _goal.pop(topic, None)
+            out = (f"🎯 goal set: {cmd.strip()}\nruns after every finished turn here; "
+                   "failures go back to the agent until it passes")
+        save_cfg(cfg)
+    return out
+
+
 def send_prompt(cfg, state, topic, sess, text, mid=None):
     """The live-prompt path: hold behind a lockout, queue behind a busy or
     waiting pane, or type it now. This is what a topic's own live text always
@@ -4123,6 +4245,8 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
     drifting copy of this logic.
     """
     st = state.setdefault(sess, {})
+    if topic in _goal:       # you stepped in: the fix-round budget starts over
+        _goal[topic] = {"rounds": 0, "same": 0}
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -7376,6 +7500,41 @@ def selfcheck():
     assert "keyed(" in dash_ and "/api/metrics" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
+    # !goal: a red check goes back to the agent as its next prompt, the same
+    # failure three times stops and says so, green is reported once.
+    gsaid_ = []
+    with tempfile.TemporaryDirectory() as gd_, stubbed(
+            save_cfg=lambda c: None,
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: gsaid_.append(x)):
+        gcfg_, gst_, glk_ = {"topics": {"4": "g"}, "dirs": {"4": gd_}}, {"g": {"mode": "idle"}}, threading.Lock()
+
+        def goal_round():
+            gst_["g"]["queue"] = []             # the agent took the last fix prompt
+            goal_capture(gcfg_, "4", "g")
+            goal_tick(gcfg_, gst_)
+            for _ in range(200):
+                if "rc" in (_goal_run.get("4") or {}):
+                    break
+                time.sleep(0.02)
+            goal_tick(gcfg_, gst_)
+        assert "set" in goal_cmd(gcfg_, glk_, "4", "5 echo boom-$RANDOM-12; exit 3")
+        goal_round()
+        q_ = gst_["g"]["queue"]
+        assert len(q_) == 1 and "exit 3" in q_[0] and "boom" in q_[0] and "1/5" in q_[0], q_
+        gst_["g"]["queue"] = ["yours"]          # your queued prompt goes first
+        goal_capture(gcfg_, "4", "g")
+        goal_tick(gcfg_, gst_)
+        assert "4" not in _goal_run and "4" in _goal_due
+        gst_["g"]["queue"] = []
+        goal_round()
+        goal_round()
+        assert "same failure 3 times" in gsaid_[-1], gsaid_[-1]
+        goal_capture(gcfg_, "4", "g")           # paused: turns end, nothing runs
+        assert "4" not in _goal_due
+        goal_cmd(gcfg_, glk_, "4", "true")
+        goal_round()
+        assert gsaid_[-1] == "✅ goal green: true", gsaid_[-1]
+        assert goal_cmd(gcfg_, glk_, "4", "off") == "goal off" and not gcfg_["goals"]
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
