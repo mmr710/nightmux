@@ -3518,6 +3518,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!idea",     # creates a project and starts an agent
               "!loopguard",  # interrupts or switches the agent
               "!pair",     # starts a second agent and types to it
+              "!route",    # switches the topic's agent per prompt
               "!watch")    # can merge a pull request
 
 
@@ -3599,6 +3600,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!route":
+        return route_cmd(cfg, lock, topic, arg)
     if cmd == "!reel":
         return reel_cmd(cfg, lock, topic, arg)
     if cmd == "!pair":
@@ -3689,6 +3692,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
+                "!route auto|off = send each new task to the bench agent that fits it "
+                "(routine → light, design/debug → heavy), learning from !goal results\n"
                 "!reel [hours] | daily HH:MM | off = the night as a GIF of the office, "
                 "with what each agent did\n"
                 "!pair <agent> [rounds] | off = a second agent reviews every change "
@@ -4163,7 +4168,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if plugin is not None:
             return plugin
 
-    return send_prompt(cfg, state, topic, sess, text, mid)
+    note = ""
+    routed = route(cfg, state, lock, topic, sess, text)
+    if routed:
+        sess, note = routed
+    out = send_prompt(cfg, state, topic, sess, text, mid)
+    return "\n".join(x for x in (note, out) if x) or None
 
 
 # ---------- !preview / !shot: see the app from the phone ----------
@@ -4636,6 +4646,96 @@ def idea_cmd(cfg, state, lock, topic, arg):
     return (f"💡 {name}: {cwd}\n{key} is starting with the spec → build → check prompt "
             "queued.\n🎯 goal: sh ./check.sh after every turn — failures go back until "
             "green.\n!preview once it serves something · !goal off to stop the loop")
+
+
+# ---------- smart router: each new task to the agent that fits it ----------
+# Renames on the strongest model, design on the weakest: both waste something.
+# With !route auto, a prompt that starts a new task (the topic has been quiet a
+# while, no !goal loop running) is sorted light / normal / heavy and switched to
+# the best live agent on the bench for that class. Mid-task prompts never move:
+# the other agent has none of that conversation. !goal outcomes teach it which
+# agent actually finishes which class; "route_prefs" in the config seeds it.
+ROUTE_QUIET = 600
+ROUTE_PREFS = {"light": ["codex", "opencode", "agy", "claude"],
+               "heavy": ["claude", "codex", "agy", "opencode"]}
+LIGHT = re.compile(r"^\W*(?:rename|format|lint|fix (?:the |a )?typo|typo|add (?:a |some )?"
+                   r"(?:tests?|comments?|docstrings?|types?|logging)|bump|update (?:the )?"
+                   r"(?:readme|changelog|docs?|deps|dependencies)|remove unused|sort imports|"
+                   r"run (?:the )?tests|translate|reword)\b", re.I)
+HEAVY = re.compile(r"\b(?:design|architect\w*|refactor\w*|why\b|debug\w*|investigat\w*|"
+                   r"race condition|deadlock|security|vulnerab\w*|performance|optimi[sz]\w*|"
+                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*)", re.I)
+_route_last = {}  # topic -> (class, agent) of the last routed task, for learning
+
+
+def task_class(text):
+    if HEAVY.search(text) or len(text) > 600:
+        return "heavy"
+    if LIGHT.search(text) and len(text) < 300:
+        return "light"
+    return "normal"
+
+
+def route_pick(cfg, cls, live):
+    """Best agent for a class among the live ones: learned score, then prefs."""
+    prefs = (cfg.get("route_prefs") or {}).get(cls) or ROUTE_PREFS.get(cls) or []
+    score = (cfg.get("route_scores") or {}).get(cls) or {}
+    cand = [a for a in live if a in prefs] or list(live)
+    return max(cand, key=lambda a: (score.get(a, 0) if abs(score.get(a, 0)) >= 2 else 0,
+                                    -prefs.index(a) if a in prefs else -99))
+
+
+def route(cfg, state, lock, topic, sess, text):
+    """(session, note) when this prompt goes to another agent, else None."""
+    if (cfg.get("route") or {}).get(topic) != "auto" or text.startswith(("!", "/", "@")):
+        return None
+    st, now = state.get(sess) or {}, time.time()
+    if (now - st.get("changed", 0) < ROUTE_QUIET or st.get("mode") != "idle"
+            or st.get("queue") or topic in _goal_run or (_goal.get(topic) or {}).get("rounds")):
+        return None                                   # mid-task: stay
+    cls = task_class(text)
+    cur = (cfg.get("started") or {}).get(topic)
+    live = {k: s for k, s in bench_of(cfg, topic).items() if has_session(s)}
+    if cls == "normal" or len(live) < 2:
+        _route_last[topic] = (cls, cur)
+        return None
+    pick = route_pick(cfg, cls, live)
+    _route_last[topic] = (cls, pick)
+    if pick == cur:
+        return None
+    switch_agent(cfg, state, lock, topic, pick)
+    new = cfg.get("topics", {}).get(topic)
+    if not new or new == sess:
+        return None
+    return new, f"↪️ → {pick} ({cls} task) · @{cur} <prompt> to override, !route off to stop"
+
+
+def route_learn(cfg, topic, delta):
+    cls, agent_ = _route_last.get(topic) or (None, None)
+    if not cls or not agent_ or (cfg.get("route") or {}).get(topic) != "auto":
+        return
+    sc = cfg.setdefault("route_scores", {}).setdefault(cls, {})
+    sc[agent_] = max(-10, min(10, sc.get(agent_, 0) + delta))
+
+
+def route_cmd(cfg, lock, topic, arg):
+    if arg in ("auto", "off"):
+        with lock:
+            r = cfg.setdefault("route", {})
+            if arg == "auto":
+                r[topic] = "auto"
+            else:
+                r.pop(topic, None)
+            save_cfg(cfg)
+        return ("↪️ routing on: each new task goes to the best live agent on this topic's "
+                "bench — light → " + " / ".join(ROUTE_PREFS["light"][:2]) + ", heavy → "
+                + " / ".join(ROUTE_PREFS["heavy"][:2]) + ". Mid-task prompts stay put."
+                if arg == "auto" else "↪️ routing off")
+    sc = cfg.get("route_scores") or {}
+    return ((f"↪️ routing {(cfg.get('route') or {}).get(topic) or 'off'} here\n")
+            + ("learned: " + "; ".join(f"{c}: " + ", ".join(f"{a} {n:+d}" for a, n in v.items())
+                                       for c, v in sc.items()) if sc else "nothing learned yet")
+            + "\n!route auto|off")
 
 
 # ---------- night reel: the night as a GIF ----------
@@ -5260,6 +5360,7 @@ def goal_tick(cfg, state):
         if run["rc"] == 0:
             n = gs["rounds"]
             _goal[topic] = {"rounds": 0, "same": 0}
+            route_learn(cfg, topic, +1)
             send(cfg, topic, f"✅ goal green: {cmd}"
                  + (f" — after {n} fix round{'s' * (n != 1)}" if n else ""), mode="plain")
             continue
@@ -5271,6 +5372,7 @@ def goal_tick(cfg, state):
         gs["last"], gs["rounds"] = sig, gs["rounds"] + 1
         if gs["same"] >= 3 or gs["rounds"] > top:
             gs["paused"] = True
+            route_learn(cfg, topic, -1)
             why = ("the same failure 3 times in a row" if gs["same"] >= 3
                    else f"still red after {top} rounds")
             send(cfg, topic, f"🛑 goal stuck — {why}: {cmd} (exit {run['rc']})\n\n{tail[-1500:]}"
@@ -8723,6 +8825,29 @@ def selfcheck():
         assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
         assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
         icfg_["goals"].clear()
+    # Router: classes, mid-task prompts stay, a light task on a quiet topic moves
+    # to the light agent, learned scores outrank the preference list.
+    assert task_class("rename foo to bar in utils") == "light"
+    assert task_class("why does the websocket drop under load?") == "heavy"
+    assert task_class("add a dark mode toggle to settings") == "normal"
+    rcfg_ = {"topics": {"4": "r"}, "started": {"4": "claude"}, "route": {"4": "auto"},
+             "bench": {"4": {"claude": "r", "codex": "r-codex"}}}
+    rst_ = {"r": {"mode": "idle", "changed": time.time() - 3600}}
+    switched_ = []
+
+    def fake_switch(c, st, l, t, k):
+        switched_.append(k)
+        c["topics"][t], c["started"][t] = c["bench"][t][k], k
+    with stubbed(has_session=lambda n: True, switch_agent=fake_switch):
+        assert route(rcfg_, rst_, threading.Lock(), "4", "r", "add a settings page") is None
+        rst_["r"]["changed"] = time.time()
+        assert route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y") is None   # mid-task
+        rst_["r"]["changed"] = time.time() - 3600
+        ro_ = route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y")
+        assert ro_ and ro_[0] == "r-codex" and "light" in ro_[1] and switched_ == ["codex"], ro_
+        route_learn(rcfg_, "4", -1)
+        route_learn(rcfg_, "4", -1)
+        assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
     # Point and fix: a photo soon after a preview carries the page, its console
     # and DOM; one with no recent preview stays a plain image path.
     with stubbed(page_probe=lambda c, u: (['Uncaught TypeError: x is null  (app.js:12)'],

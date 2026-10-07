@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!route auto|off`: a prompt that starts a new task is classed light/normal/heavy and the topic switches to the best live bench agent for that class; mid-task prompts never move; `!goal` green/stuck results adjust per-class scores.
+
 - Point and fix: a photo sent within two hours of `!preview`/`!shot` reaches the agent with the page URL, that page's console errors and its rendered DOM (as a file), and an instruction to fix what is marked and recheck.
 
 - `!reel [hours]` / `!reel daily HH:MM`: the office's desks are recorded once a minute; the busiest room is replayed as a GIF (the office page draws each moment in headless Chromium, a stdlib PNG/GIF encoder stitches them) with captions and per-project commit stats.
