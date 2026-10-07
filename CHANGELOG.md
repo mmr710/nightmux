@@ -73,6 +73,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- A hand-broken `~/.nightmux.json` now stops the daemon with one line naming the line/column and the usual cause, instead of a traceback; `--join` keeps an unreadable config as `.broken` rather than replacing it silently. `install.sh` clones/updates `~/nightmux` from GitHub instead of installing the (lagging) PyPI release.
+
 - `!apk`: a build that runs past `apk_timeout` (default 60 min, was a fixed 30) now stops entirely — the Gradle client no longer keeps running after the wrapper shell is killed.
 
 - The daemon now adds your login shell's PATH (and common per-user bin dirs) at startup: under systemd/launchd, per-user installs like ~/.local/bin/agy and ~/.opencode/bin/opencode were "not installed" to the dashboard, failover buttons and `!update`, though tmux sessions ran them.
