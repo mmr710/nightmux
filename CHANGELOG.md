@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Deploy previews: `!watch` posts the preview URL a host attaches to the PR's commit (GitHub deployment, deploy-preview status, or a bot comment) with open/screenshot buttons; bot comments are no longer fed to the agent as reviews. `!errors`: a per-topic webhook for Sentry (or any JSON) — new errors become 🛠 fix buttons or, on `auto`, prompts; `!errors expose` publishes only /hook on :8443 via Tailscale Funnel.
+
 - `!desktop`: a virtual screen (Xvfb + openbox) with a password-protected noVNC link over the tailnet; `!tools add desktop` gives the agent nightmux's own computer-use MCP server (screenshot, click, type, key, scroll, open); `!desktop open|shot|off`.
 
 - Android: `!apk` builds the project's debug APK (Gradle wrapper at the root or under `android/`, or Flutter) and sends it to the topic; `!apk install` puts it on your phone over wireless debugging (`!android pair|connect <ip:port>`); `!shot android` sends the phone's screen, and a photo after it is a bug report with the activity on screen and recent logcat errors. A failed build offers "send to agent".
