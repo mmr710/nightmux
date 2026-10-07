@@ -8,6 +8,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!watch pr [n]`: polls the topic's pull request; a failed check's log and
+  new review comments (inline too) are queued to the agent once each, the gh
+  account's own comments skipped; green pings once per commit with a merge
+  button (`!watch merge`); a merged or closed PR ends the watch.
+
 - `!preview`: finds what the session's own processes serve over HTTP (by
   process tree, agents' own sockets excluded) and sends tap-to-open links on
   the tailnet — `tailscale serve` for loopback-only dev servers, never public.

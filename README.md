@@ -318,6 +318,15 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## Close the PR loop
+
+`!watch pr` (this branch's PR) or `!watch pr 12`: nightmux polls it with `gh`.
+A failed check's log goes to the agent — fix, commit, push. New review
+comments, inline ones included, go to the agent too; comments made by your
+own gh account are skipped so an agent replying on the PR never feeds itself.
+When every check is green you get one 🟢 with a **merge** button. Merged or
+closed ends the watch.
+
 ## See it on your phone
 
 `!preview` finds the dev server the agent started (from the session's own
