@@ -2481,6 +2481,7 @@ def watcher(cfg, state, lock):
             pair_tick(cfg, state, lock)
             mem_tick(cfg, state)
             forecast_tick(cfg, state)
+            deps_tick(cfg)
             reel_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
@@ -3558,6 +3559,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!idea",     # creates a project and starts an agent
               "!loopguard",  # interrupts or switches the agent
               "!memory",   # types a prompt
+              "!deps",     # runs the package managers, types a prompt
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
@@ -3646,6 +3648,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!deps":
+        return deps_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!forecast":
         return forecast_report(cfg, state)
     if cmd == "!memory":
@@ -3773,6 +3777,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
+                "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages "
+                "(npm, pip-audit, govulncheck), upgraded by the agent on a tap\n"
                 "!forecast = when each agent's usage window fills at the current pace "
                 "(you are warned ahead of time where it matters)\n"
                 "!memory [update|on|off] = the project's notes (.nightmux/memory.md) "
@@ -6705,6 +6711,147 @@ def agent_limits(cfg, state, home=None):
         for w in r["windows"]:
             w["eta"] = forecast(f"{r['agent']}:{w['label']}")
     return sorted(rows.values(), key=lambda r: r["agent"])
+
+
+# ---------- !deps: dependency health ----------
+# Known-vulnerable and badly outdated packages, from the project's own tools:
+# npm audit/outdated, pip-audit, govulncheck — whichever apply and are there.
+# Findings come with one button that hands the upgrade to the agent (its
+# !goal check, if set, keeps it honest). Nightly runs only speak when there
+# is something to say.
+SEV = ("critical", "high", "moderate", "low")
+_deps_busy, _deps_day, _deps_fix = set(), {}, {}
+
+
+def deps_scan(cwd):
+    """{"vulns": [(severity, package, title)], "outdated": [(pkg, current, latest)],
+    "notes": [...]} for whatever ecosystems the folder uses."""
+    out = {"vulns": [], "outdated": [], "notes": []}
+
+    def js(argv):
+        try:
+            p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=300,
+                               stdin=subprocess.DEVNULL)
+            return json.loads(p.stdout or "null")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+    if os.path.exists(os.path.join(cwd, "package.json")):
+        if not shutil.which("npm"):
+            out["notes"].append("package.json but no npm here")
+        elif not os.path.exists(os.path.join(cwd, "package-lock.json")):
+            out["notes"].append("npm: no package-lock.json, so no audit (npm install makes one)")
+        else:
+            for name, v in ((js(["npm", "audit", "--json"]) or {}).get("vulnerabilities") or {}).items():
+                via = [x for x in v.get("via") or [] if isinstance(x, dict)]
+                out["vulns"].append((v.get("severity", "?"), name,
+                                     (via[0].get("title") if via else "via " + ", ".join(
+                                         x for x in v.get("via") or [] if isinstance(x, str)))[:90]))
+            for name, v in (js(["npm", "outdated", "--json"]) or {}).items():
+                cur, new = str(v.get("current") or "?"), str(v.get("latest") or "?")
+                if cur.split(".")[0] != new.split(".")[0]:
+                    out["outdated"].append((name, cur, new))
+    py = [f for f in ("requirements.txt", "pyproject.toml") if os.path.exists(os.path.join(cwd, f))]
+    if py:
+        if shutil.which("pip-audit"):
+            got = js(["pip-audit", "-f", "json"] + (["-r", "requirements.txt"]
+                                                   if "requirements.txt" in py else ["."])) or {}
+            for d in got.get("dependencies") or []:
+                for v in d.get("vulns") or []:
+                    out["vulns"].append(("high", d.get("name"), f"{v.get('id')} → fix {', '.join(v.get('fix_versions') or []) or '?'}"))
+        else:
+            out["notes"].append("Python: pip install pip-audit to check it")
+    if os.path.exists(os.path.join(cwd, "go.mod")):
+        if shutil.which("govulncheck"):
+            try:
+                txt = subprocess.run(["govulncheck", "./..."], cwd=cwd, capture_output=True,
+                                     text=True, timeout=300).stdout
+                out["vulns"] += [("high", "go", l.split(":", 1)[-1].strip()[:90])
+                                 for l in txt.splitlines() if l.startswith("Vulnerability #")]
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        else:
+            out["notes"].append("Go: go install golang.org/x/vuln/cmd/govulncheck@latest")
+    out["vulns"].sort(key=lambda v: SEV.index(v[0]) if v[0] in SEV else 9)
+    return out
+
+
+def deps_report(r):
+    if not (r["vulns"] or r["outdated"]):
+        return "🩺 dependencies look healthy" + ("".join("\n· " + n for n in r["notes"]))
+    count = {}
+    for sev, _, _ in r["vulns"]:
+        count[sev] = count.get(sev, 0) + 1
+    lines = ["🩺 " + (", ".join(f"{n} {s}" for s, n in sorted(count.items(), key=lambda kv:
+             SEV.index(kv[0]) if kv[0] in SEV else 9)) + " vulnerabilit" + ("y" if len(r["vulns"]) == 1 else "ies")
+             if r["vulns"] else "no known vulnerabilities")]
+    lines += [f"  {s} · {p} — {t}" for s, p, t in r["vulns"][:8]]
+    if r["outdated"]:
+        lines.append(f"{len(r['outdated'])} a major version behind:")
+        lines += [f"  {p} {c} → {n}" for p, c, n in r["outdated"][:8]]
+    return "\n".join(lines + ["· " + n for n in r["notes"]])
+
+
+def deps_prompt(r):
+    return ("Dependency health check for this project:\n"
+            + "\n".join(f"- {s}: {p} ({t})" for s, p, t in r["vulns"][:20])
+            + ("\nA major version behind: " + ", ".join(f"{p} {c}→{n}" for p, c, n in r["outdated"][:20])
+               if r["outdated"] else "")
+            + "\n\nFix the vulnerabilities first (npm audit fix / upgrade the package that "
+              "pulls them in). Take major upgrades one at a time, reading their changelogs for "
+              "breaking changes. Run the tests after each step and commit each upgrade separately. "
+              "Skip anything that would need a large rewrite and list it at the end.")
+
+
+def deps_start(cfg, topic, quiet=False):
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    if not cwd or topic in _deps_busy:
+        return "no folder here" if not cwd else "already checking"
+    _deps_busy.add(topic)
+
+    def go():
+        try:
+            r = deps_scan(cwd)
+            if quiet and not (r["vulns"] or r["outdated"]):
+                return
+            buttons = None
+            if r["vulns"] or r["outdated"]:
+                _deps_fix[topic] = deps_prompt(r)
+                buttons = kb([[("🛠 upgrade with agent", "!deps fix")]])
+            send(cfg, topic, deps_report(r), mode="mono", buttons=buttons)
+        finally:
+            _deps_busy.discard(topic)
+    threading.Thread(target=go, daemon=True).start()
+    return None if quiet else "🩺 checking dependencies…"
+
+
+def deps_tick(cfg):
+    now = time.time()
+    for topic, at in (cfg.get("deps_at") or {}).items():
+        due = at_epoch(cfg, at, now - 86400)
+        day = time.strftime("%Y-%m-%d", time.gmtime(due))
+        if due <= now < due + 3600 and _deps_day.get(topic) != day and topic in cfg.get("topics", {}):
+            _deps_day[topic] = day
+            deps_start(cfg, topic, quiet=True)
+
+
+def deps_cmd(cfg, state, lock, topic, sess, arg):
+    if arg == "fix":
+        prompt = _deps_fix.pop(topic, None)
+        if not (prompt and sess):
+            return "nothing to upgrade — run !deps first"
+        return send_prompt(cfg, state, topic, sess, prompt)
+    m = re.match(r"nightly(?:\s+(\d{1,2}:\d{2}|off))?$", arg)
+    if m:
+        with lock:
+            d = cfg.setdefault("deps_at", {})
+            if m.group(1) == "off":
+                d.pop(topic, None)
+            else:
+                d[topic] = m.group(1) or "04:00"
+            save_cfg(cfg)
+        return ("🩺 nightly check off" if m.group(1) == "off" else
+                f"🩺 checked every night at {d[topic]}; you hear about it only when something is found")
+    return deps_start(cfg, topic)
 
 
 # ---------- limit forecast ----------
@@ -10891,6 +11038,24 @@ def selfcheck():
         forecast_tick(fcfg_, {"a": {"mode": "busy"}})
         assert len(fsaid_) == 1                                       # once per window
     _fc.clear(); _fc_told.clear()
+    # !deps: findings sorted worst first, reported with the fix button; a clean
+    # nightly run says nothing.
+    r_ = {"vulns": [("moderate", "a", "x"), ("critical", "b", "RCE")],
+          "outdated": [("phaser", "3.90.0", "4.2.1")], "notes": []}
+    r_["vulns"].sort(key=lambda v: SEV.index(v[0]))
+    rep_ = deps_report(r_)
+    assert rep_.startswith("🩺 1 critical, 1 moderate vulnerabilities") and "phaser 3.90.0 → 4.2.1" in rep_, rep_
+    assert "critical: b (RCE)" in deps_prompt(r_)
+    dsaid_ = []
+    with tempfile.TemporaryDirectory() as dd_, stubbed(
+            deps_scan=lambda cwd: {"vulns": [], "outdated": [], "notes": []},
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: dsaid_.append(x)):
+        deps_start({"dirs": {"4": dd_}}, "4", quiet=True)
+        for _ in range(100):
+            if "4" not in _deps_busy:
+                break
+            time.sleep(0.02)
+        assert dsaid_ == []
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24

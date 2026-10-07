@@ -467,6 +467,16 @@ buttons: 🧠 step back (list hypotheses before editing), 🔀 hand to another
 agent with a summary, ⏸ pause. `!loopguard auto` lets the first one step it
 back by itself; `!loopguard off` disables it.
 
+## Dependency health
+
+`!deps` runs the project's own tools — `npm audit` / `npm outdated`,
+`pip-audit`, `govulncheck`, whichever apply and are installed — and lists
+known vulnerabilities worst first and packages a major version behind, with
+one **🛠 upgrade with agent** button: fixes first, majors one at a time with
+their changelogs, tests after each, one commit each (your `!goal` check, if
+set, holds it to green). `!deps nightly 04:00` checks every night and only
+speaks when it finds something; `!deps nightly off` stops it.
+
 ## See the limit coming
 
 Every usage window an agent reports (Claude's 5h/7d, Codex's) is sampled
