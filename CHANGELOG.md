@@ -8,6 +8,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!preview`: finds what the session's own processes serve over HTTP (by
+  process tree, agents' own sockets excluded) and sends tap-to-open links on
+  the tailnet — `tailscale serve` for loopback-only dev servers, never public.
+  `!shot [:port][/path|url]` sends a phone-size screenshot (headless Chromium).
+
 - `!goal [rounds] <check>`: after every finished turn the check (tests, build,
   lint) runs in the project dir; a failure's tail goes back to the agent as
   its next prompt until it passes. Reports green once; stops and pings on the
