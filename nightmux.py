@@ -3506,6 +3506,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
+              "!p",        # types a prompt
               "!watch")    # can merge a pull request
 
 
@@ -3587,6 +3588,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!p":
+        return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
         return watch_cmd(cfg, lock, topic, arg)
     if cmd in ("!preview", "!shot") and sess:
@@ -3665,6 +3668,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
                 "!watch pr [n] | merge | off = feed this PR's CI failures and review "
                 "comments to the agent; ping with a merge button when green\n"
+                "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
+                "spec, explain, tidy, ship); !p save <name> <text>\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -4440,6 +4445,74 @@ def watch_cmd(cfg, lock, topic, arg):
     _watch_at.pop(topic, None)
     return (f"👁 watching PR #{pr}: failed checks and new review comments go to the "
             "agent; you get a merge button when it is green")
+
+
+# ---------- !p: saved prompts ----------
+# The long instructions you retype from a phone, kept once and sent with a tap.
+# {{args}} takes whatever follows the name; without it, args are appended.
+PROMPTS = {
+    "review": "Review the uncommitted changes (git diff) as a strict senior engineer. "
+              "List bugs, risks and missing tests as file:line, worst first. Change "
+              "nothing yet. {{args}}",
+    "fix-tests": "Run the test suite and fix the failures at their root cause — never by "
+                 "skipping, weakening or deleting tests. Rerun until green. {{args}}",
+    "spec": "Before writing any code, write a short plan for: {{args}}. Files to touch, "
+            "approach, risks, and how you will test it. Then wait for my go.",
+    "explain": "Explain {{args}}: what it does, how the data flows, and what would break "
+               "if it changed. Short, with file:line references.",
+    "tidy": "Simplify only what you changed this session: remove dead code and "
+            "duplication, keep behaviour identical, keep tests green. {{args}}",
+    "ship": "Get this ready to merge: run tests and lint and fix what fails, update "
+            "README/CHANGELOG if behaviour changed, commit with a clear message, push, "
+            "and open a pull request. {{args}}",
+}
+
+
+def prompts(cfg):
+    out = dict(PROMPTS)
+    out.update(cfg.get("prompts") or {})
+    return {k: v for k, v in out.items() if v}    # "" in the config hides a built-in
+
+
+def fill(template, args):
+    if "{{args}}" in template:
+        return re.sub(r"\s*\{\{args\}\}", (" " + args) if args else "", template).strip()
+    return f"{template} {args}".strip()
+
+
+def prompt_cmd(cfg, state, lock, topic, sess, arg):
+    lib = prompts(cfg)
+    name, _, rest = arg.partition(" ")
+    rest = rest.strip()
+    if name == "save":
+        key, _, text = rest.partition(" ")
+        if not (re.match(r"^[\w-]{1,30}$", key) and text.strip()):
+            return "usage: !p save <name> <prompt text, {{args}} where arguments go>"
+        with lock:
+            cfg.setdefault("prompts", {})[key] = text.strip()
+            save_cfg(cfg)
+        return f"💾 saved !p {key}"
+    if name == "rm":
+        if not rest:
+            return "usage: !p rm <name>"
+        with lock:
+            cfg.setdefault("prompts", {})[rest] = ""   # also hides a built-in
+            save_cfg(cfg)
+        return f"🗑 removed !p {rest}"
+    if name == "show":
+        return lib.get(rest) or f"no prompt '{rest}'"
+    if not name:
+        names = sorted(lib)
+        send(cfg, topic, "📝 saved prompts — tap to send, or !p <name> <args>\n"
+             "!p save <name> <text> · !p show <name> · !p rm <name>", mode="plain",
+             buttons=kb([[(n, f"!p {n}") for n in names[i:i + 3]]
+                         for i in range(0, len(names), 3)]))
+        return None
+    if name not in lib:
+        return f"no prompt '{name}' — have: {', '.join(sorted(lib))}"
+    if not sess:
+        return "no session bound here"
+    return send_prompt(cfg, state, topic, sess, fill(lib[name], rest))
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -7931,6 +8004,19 @@ def selfcheck():
         prv_["state"] = "MERGED"
         wround()
         assert "3" not in wcfg_["watch"] and "stopped watching" in wsaid_[-1], wsaid_
+    # !p: saved prompts, {{args}} filled, config overrides and hides built-ins.
+    assert fill("Explain {{args}}: short.", "auth.py") == "Explain auth.py: short."
+    assert fill("Review the diff. {{args}}", "") == "Review the diff."
+    assert fill("Do it", "now") == "Do it now"
+    psent2_ = []
+    with stubbed(save_cfg=lambda c: None,
+                 send_prompt=lambda c, st, t, ss, x, mid=None: psent2_.append(x) or "sent"):
+        pc_, plk_ = {"topics": {"8": "p"}}, threading.Lock()
+        assert "saved" in prompt_cmd(pc_, {}, plk_, "8", "p", "save hi Say hi to {{args}} please")
+        prompt_cmd(pc_, {}, plk_, "8", "p", "hi Bob")
+        assert psent2_[-1] == "Say hi to Bob please", psent2_
+        prompt_cmd(pc_, {}, plk_, "8", "p", "rm review")
+        assert "review" not in prompts(pc_) and "no prompt" in prompt_cmd(pc_, {}, plk_, "8", "p", "review")
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
