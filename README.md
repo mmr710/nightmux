@@ -318,6 +318,20 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## From idea to running project
+
+In a new topic: `!idea a habit tracker with streaks and a weekly chart`
+(`!idea @codex …` to pick the agent). nightmux makes a fresh folder under
+`projects_root`, runs `git init`, starts the agent with one queued brief —
+write SPEC.md, build the smallest useful version, add a `./check.sh` that
+runs the tests — and turns on `!goal sh ./check.sh`, so it keeps going until
+its own check passes. `!preview` when it serves something, `!p ship` when you
+like it.
+
+Saved prompts: `!p` shows `review`, `fix-tests`, `spec`, `explain`, `tidy`
+and `ship` as buttons; `!p save <name> <text>` adds yours (`{{args}}` marks
+where `!p <name> <args>` puts the rest).
+
 ## Close the PR loop
 
 `!watch pr` (this branch's PR) or `!watch pr 12`: nightmux polls it with `gh`.

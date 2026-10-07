@@ -3507,6 +3507,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
+              "!idea",     # creates a project and starts an agent
               "!watch")    # can merge a pull request
 
 
@@ -3668,6 +3669,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
                 "!watch pr [n] | merge | off = feed this PR's CI failures and review "
                 "comments to the agent; ping with a merge button when green\n"
+                "!idea [@agent] <what to build> = new folder + git + agent writing "
+                "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
@@ -3802,6 +3805,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         routed = address(cfg, state, topic, text)
         if routed is not None:
             return routed          # not addressed to anyone: falls through as text
+    if cmd == "!idea":
+        return idea_cmd(cfg, state, lock, topic, arg)
     if cmd == "!new" or cmd[1:] in agents(cfg):
         # Bare !<agent> in a topic that already knows its directory means "switch
         # this topic to that agent" -- same project, different agent, and the one
@@ -4513,6 +4518,57 @@ def prompt_cmd(cfg, state, lock, topic, sess, arg):
     if not sess:
         return "no session bound here"
     return send_prompt(cfg, state, topic, sess, fill(lib[name], rest))
+
+
+# ---------- !idea: one message to a running project ----------
+IDEA_PROMPT = (
+    "New project, from scratch, in this folder. The idea: {idea}\n\n"
+    "1. Write SPEC.md: the goal, who it is for, the smallest version worth using "
+    "(MVP only), the stack (simple, few dependencies), the file layout, and how to "
+    "run and test it.\n"
+    "2. Build that MVP. Commit as you go with clear messages.\n"
+    "3. Create ./check.sh that runs the tests (and the build, if there is one) and "
+    "exits non-zero on failure. It runs after every turn you take; failures come "
+    "back to you until it passes.\n"
+    "Keep it small and working over big and broken.")
+
+
+def slugify(text, n=4):
+    words = re.findall(r"[a-z0-9]+", text.lower())[:n]
+    return "-".join(words)[:30].strip("-") or "project"
+
+
+def idea_cmd(cfg, state, lock, topic, arg):
+    """!idea [@agent] <text>: a folder under projects_root, git, an agent with
+    the spec-build-check prompt queued, and !goal on ./check.sh."""
+    m = re.match(r"@(\S+)\s+(.+)", arg, re.S)
+    key, idea = (m.group(1).lower(), m.group(2)) if m else (default_agent(cfg), arg)
+    idea = idea.strip()
+    if not idea:
+        return ('usage: !idea [@agent] <what to build>\ne.g. !idea a habit tracker with '
+                'streaks and a weekly chart')
+    if key not in agents(cfg):
+        return f"no agent '{key}' — have: {', '.join(agents(cfg))}"
+    cur = cfg.get("topics", {}).get(topic)
+    if cur:
+        return (f"this topic already runs '{cur}' — start the idea in a new topic, so "
+                "each project keeps its own thread")
+    root = os.path.expanduser(cfg.get("projects_root") or "~/projects")
+    base = slugify((cfg.get("topic_names") or {}).get(topic) or idea)
+    name, n = base, 2
+    while os.path.exists(os.path.join(root, name)) or has_session(name):
+        name, n = f"{base}-{n}", n + 1
+    cwd = os.path.join(root, name)
+    os.makedirs(cwd)
+    run("git", "init", "-q", cwd)
+    out = start_session(cfg, state, lock, topic, f"{name} {cwd}", key)
+    if cfg.get("topics", {}).get(topic) != name:
+        return out
+    state.setdefault(name, {}).setdefault("queue", []).append(IDEA_PROMPT.format(idea=idea))
+    goal_cmd(cfg, lock, topic, "sh ./check.sh")
+    return (f"💡 {name}: {cwd}\n{key} is starting with the spec → build → check prompt "
+            "queued.\n🎯 goal: sh ./check.sh after every turn — failures go back until "
+            "green.\n!preview once it serves something · !goal off to stop the loop")
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -8017,6 +8073,22 @@ def selfcheck():
         assert psent2_[-1] == "Say hi to Bob please", psent2_
         prompt_cmd(pc_, {}, plk_, "8", "p", "rm review")
         assert "review" not in prompts(pc_) and "no prompt" in prompt_cmd(pc_, {}, plk_, "8", "p", "review")
+    # !idea: its own folder under projects_root (never on top of another), git,
+    # the agent started with the build prompt queued, and the check loop on.
+    assert slugify("A habit tracker, with streaks & charts!") == "a-habit-tracker-with"
+    with tempfile.TemporaryDirectory() as ir_, stubbed(
+            spawn=lambda *a: None, has_session=lambda n: False, save_cfg=lambda c: None):
+        os.makedirs(os.path.join(ir_, "habits"))          # taken: must not reuse it
+        icfg_, ist_ = {"topics": {}, "projects_root": ir_,
+                       "topic_names": {"12": "Habits"}}, {}
+        out_ = idea_cmd(icfg_, ist_, threading.Lock(), "12", "@codex a habit tracker")
+        idir_ = os.path.join(ir_, "habits-2")
+        assert icfg_["topics"]["12"] == "habits-2" and icfg_["started"]["12"] == "codex", out_
+        assert os.path.isdir(os.path.join(idir_, ".git")), out_
+        assert "a habit tracker" in ist_["habits-2"]["queue"][0]
+        assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
+        assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
+        icfg_["goals"].clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
