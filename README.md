@@ -331,7 +331,7 @@ On the second machine, `~/.nightmux.json` is a normal config (same `token`,
 `chat_id`, `allow_users`) plus:
 
 ```json
-"poll": false,
+"poll_telegram": false,
 "name": "vps2",
 "peer_listen": "100.x.y.z:9091",
 "peer_secret": "<python3 -c 'import secrets; print(secrets.token_urlsafe(32))'>"
