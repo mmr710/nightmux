@@ -8,6 +8,10 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!idea [@agent] <what to build>` in a fresh topic: a new folder under
+  `projects_root` (never reusing one), `git init`, the agent started with a
+  spec → MVP → `./check.sh` prompt queued, and `!goal sh ./check.sh` on.
+
 - `!p`: saved prompts as tap-to-send buttons — built-ins `review`,
   `fix-tests`, `spec`, `explain`, `tidy`, `ship`; `!p save <name> <text>`
   with `{{args}}` for what follows the name; config overrides and hides
