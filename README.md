@@ -357,6 +357,17 @@ treated as a bug report about that page. The agent gets the image, the page
 URL, that page's console errors and its rendered DOM (as a file), and is told
 to find the code behind what is marked, fix it, and load the page again.
 
+## The right agent for the task
+
+`!route auto` in a topic with several agents on its bench: a prompt that
+starts a new task (the topic has been quiet 10 minutes, no `!goal` loop
+running) is sorted light (rename, typo, add tests, docs), heavy (design,
+debug, why, refactor, performance, security) or normal, and the topic
+switches to the best live agent for it — `↪️ → codex (light task)`. Mid-task
+prompts never move. `!goal` results teach it which agent actually finishes
+which kind of task; `"route_prefs"` in the config sets the starting order.
+`@agent <prompt>` still overrides; `!route off` stops it.
+
 ## The night, as a GIF
 
 nightmux records the office's desks once a minute (only when something
