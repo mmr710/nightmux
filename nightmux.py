@@ -2287,13 +2287,27 @@ def track_cwd(cfg, lock, topic, sess):
     alive, which is exactly when nobody is asking.
     """
     cwd = _cwd.get(sess) or sess_cwd(sess)   # this tick already read it
+    if cwd and cwd.endswith(" (deleted)") and sess not in _ghost:
+        # The directory was removed and made again under the agent: it is
+        # working in the old, unlinked copy, where relative writes go nowhere.
+        _ghost.add(sess)
+        send(cfg, topic, f"⚠️ {sess} is running in a deleted folder "
+             f"({cwd[:-10]} was removed and recreated). What it writes is lost — "
+             "!kill then !resume restarts it in the real one", mode="plain")
     if not cwd or not os.path.isdir(cwd):
         return
+    # Only ever fill a missing or vanished dir, never move a recorded one: an
+    # agent cd-ing elsewhere used to drag the topic with it, and the next agent
+    # switched in then started a second copy of the project there.
+    known = (cfg.get("dirs") or {}).get(topic)
+    if known and os.path.isdir(known):
+        return
     with lock:
-        if (cfg.get("dirs") or {}).get(topic) == cwd:
-            return
         cfg.setdefault("dirs", {})[topic] = cwd
         save_cfg(cfg)
+
+
+_ghost = set()    # sessions already told their folder was deleted under them
 
 
 TMUX_MISSES = 5   # unanswered ticks before the daemon says tmux has gone quiet
@@ -3295,7 +3309,11 @@ def start_session(cfg, state, lock, topic, arg, key):
         cwd, _, flags = rest.partition(" ")
     else:
         cwd, flags = "", rest
-    cwd = os.path.expanduser(cwd or "~")
+    if not cwd:
+        # Bare $HOME as a project dir is how decks, READMEs and LICENSEs ended up
+        # loose in ~, and how a project later grew a second copy elsewhere.
+        cwd = os.path.join(cfg.get("projects_root") or "~/projects", name)
+    cwd = os.path.expanduser(cwd)
     if not os.path.isdir(cwd):
         try:
             os.makedirs(cwd, exist_ok=True)
@@ -5775,7 +5793,7 @@ draw();
 # ---------- peers: topics served by another machine ----------
 # Telegram lets one process poll a bot. The primary polls and forwards a remote
 # topic's updates, untouched, to the nightmux on the machine that runs it; that
-# one ("poll": false) replies to Telegram itself with the same token — sending
+# one ("poll_telegram": false) replies to Telegram itself with the same token — sending
 # is not exclusive, only polling is. Peers talk over the tailnet, on a listener
 # that serves /peer/ routes to the shared secret and nothing else.
 
@@ -6031,7 +6049,9 @@ def main():
         if not cfg.get(key):
             sys.exit(f"{CFG_PATH}: missing '{key}'  (run: {__file__} --setup)")
     cfg.setdefault("topics", {})
-    poll = cfg.get("poll", True)    # false: a peer — the primary polls and forwards
+    # false: a peer — the primary polls and forwards. Not "poll": that one is
+    # the watcher's tick in seconds.
+    poll = cfg.get("poll_telegram", True)
     if cfg.get("peer_listen") and len(cfg.get("peer_secret") or "") < 16:
         sys.exit(f"{CFG_PATH}: peer_listen needs a peer_secret of 16+ characters")
     autostart(cfg)
@@ -6358,6 +6378,19 @@ def selfcheck():
         assert c["dirs"]["1"] == FILE_DIR, c
         resume_session(c, {}, l, "1")
         assert spawned[0][1] == FILE_DIR, spawned  # and it comes back there
+        # A recorded dir is not moved by an agent cd-ing elsewhere: the next
+        # agent switched in would start a second copy of the project there.
+        _cwd["s"] = "/"
+        track_cwd(c, l, "1", "s")
+        assert c["dirs"]["1"] == FILE_DIR, c
+        _cwd["s"], ghost_said = "/gone/proj (deleted)", []
+        with stubbed(send=lambda cf, t, x, mode="mono", buttons=None, quiet=False:
+                     ghost_said.append(x)):
+            track_cwd(c, l, "1", "s")
+            track_cwd(c, l, "1", "s")
+        assert len(ghost_said) == 1 and "deleted folder" in ghost_said[0], ghost_said
+        _ghost.discard("s")
+        _cwd.pop("s", None)
 
     acks = Acks()                                  # parallel topics finish out of order
     for uid in (10, 11, 14):                       # 12, 13: types we filtered out
@@ -8183,6 +8216,13 @@ def selfcheck():
     assert worktree_path(repo, "feature-a") == wt        # already there: reused, not redone
 
     globals()["has_session"] = lambda s: False
+    # No dir: a folder of its own under projects_root, never loose in $HOME.
+    with tempfile.TemporaryDirectory() as pr_:
+        nodir_ = {"topics": {}, "projects_root": pr_}
+        with stubbed(spawn=lambda *a: None, has_session=lambda n: False,
+                     save_cfg=lambda c: None):
+            start_session(nodir_, {}, lk, "95", "fresh", "claude")
+            assert nodir_["dirs"]["95"] == os.path.join(pr_, "fresh"), nodir_
     out = start_session(cfg2, {}, lk, "92", f"wtses {repo} @feature-b", "claude")
     assert out.startswith("started claude") and "@feature-b" in out, out
     assert cfg2["dirs"]["92"] == os.path.join(f"{repo}-wt", "feature-b")

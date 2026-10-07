@@ -10,7 +10,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 - Two (or more) servers behind one bot: the primary forwards a topic's
   updates to the peer that runs it (`!server <peer>` / `!server local`), the
-  peer (`"poll": false`) replies to Telegram directly. Peers talk on a
+  peer (`"poll_telegram": false`) replies to Telegram directly. Peers talk on a
   secret-gated `/peer/` listener; the dashboard and office aggregate every
   machine's topics, metrics and limits.
 
@@ -24,6 +24,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
   change. Counts only; no prompt text leaves the function.
 
 ### Fixed
+
+- Projects splitting across two folders: `!<agent> name` with no dir now
+  starts in `projects_root/name` (default `~/projects/name`) instead of bare
+  `$HOME`, and the topic's recorded dir is only filled when missing — an
+  agent `cd`-ing elsewhere no longer drags the topic (and the next agent
+  switched in) with it.
+- A session whose folder was deleted and recreated under it is reported once
+  in its topic instead of silently writing into the unlinked copy.
+- Peers: the "don't poll Telegram" switch is `"poll_telegram": false`;
+  `"poll"` is already the watcher's tick interval.
 
 - `--setup` on a fresh machine crashed with `FileNotFoundError:
   ~/.claude/nightmux-statusline.sh` — the status-line script was written
