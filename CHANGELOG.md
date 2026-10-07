@@ -59,6 +59,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- selfcheck no longer fails when `tmux -V` gets no answer on a loaded CI runner; it skips that one check.
+
 - Projects splitting across two folders: `!<agent> name` with no dir now
   starts in `projects_root/name` (default `~/projects/name`) instead of bare
   `$HOME`, and the topic's recorded dir is only filled when missing — an
