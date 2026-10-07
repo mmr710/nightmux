@@ -7453,8 +7453,9 @@ function topics(rows) {
       set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + (r.server ? ' · ' + r.server : ''));
       set(el, '.info', (r.usage || r.mode) + (r.queued ? ' · ' + r.queued + ' queued' : '') +
           (r.held_until ? ' · held until ' + clock(r.held_until) : ''));
-      set(el, '.bench', '');
-      agentsRow(el.querySelector('.agents'), r);
+      set(el, '.bench', r.unreachable ? '⚠ ' + r.server + ' is not answering — dashboard → servers' : '');
+      el.querySelector('form').style.display = el.querySelector('.agents').style.display = r.unreachable ? 'none' : '';
+      if (!r.unreachable) agentsRow(el.querySelector('.agents'), r);
     });
 }
 
@@ -7553,6 +7554,9 @@ $('copyjoin').onclick = async () => {
               getSelection().removeAllRanges(); getSelection().addRange(r); toast('selected — copy it'); }
 };
 setupPanel(); servers2(); setInterval(servers2, 30000);
+// Deep links from the office: /#new opens the project form, /#servers the steps.
+if (location.hash === '#new') openNew();
+if (location.hash === '#servers') { $('addsrv').click(); $('addsrv').scrollIntoView(); }
 $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
@@ -7635,6 +7639,12 @@ OFFICE_HTML = r"""<!doctype html>
 body{margin:0;background:#07090f;color:#cdd6f4;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
 header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:2px solid #1b2133;position:sticky;top:0;background:#07090f;z-index:2}
 h1{font-size:14px;margin:0;letter-spacing:1px}
+.nav{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.nav a{font-size:12px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:6px;padding:4px 9px;background:#131722}
+.sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 8px}
+#offline:empty{display:none}
+#offline{margin:10px 16px 0;padding:10px 12px;border:1px solid #f8514955;border-radius:8px;background:#1a1012;font-size:12px;color:#f0a0a0}
+#offline a{color:#79c0ff}
 .meter{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7}
 .bar{display:inline-block;width:64px;height:8px;background:#1b2133}
 .bar i{display:block;height:100%;width:0;background:#7aa2f7}
@@ -7668,7 +7678,10 @@ body.demo #stage{display:block}
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
-<span class="meter" id="clock"></span></header>
+<span class="meter" id="clock"></span>
+<span class="meter" id="srvs"></span>
+<nav class="nav"><a href="/">⚙ dashboard</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
 <canvas id="stage"></canvas>
 <div id="sheet"></div><div id="toast"></div>
@@ -8091,7 +8104,20 @@ async function send(topic, text) {
 }
 
 async function poll() {
-  try { data = await (await fetch('/api/office', {cache: 'no-store'})).json(); render(); } catch (e) {}
+  try {
+    data = await (await fetch('/api/office', {cache: 'no-store'})).json();
+    const off = data.rooms.filter(r => r.offline);
+    data.rooms = data.rooms.filter(r => !r.offline);
+    const sv = data.servers || [];
+    document.getElementById('srvs').innerHTML = sv.length > 1 ? sv.map(x =>
+      '<span class="sdot" style="background:' + (x.ok ? '#3fb950' : '#f85149') + '"></span>' + esc(x.name)).join('') : '';
+    const down = sv.filter(x => !x.ok);
+    document.getElementById('offline').innerHTML = down.length ? down.map(x =>
+      '⚠ <b>' + esc(x.name) + '</b> is not answering — ' +
+      (off.filter(r => r.server === x.name).map(r => esc(r.name.split(' · ')[0])).join(', ') || 'no topics') +
+      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '';
+    render();
+  } catch (e) {}
   document.getElementById('clock').textContent = hhmm();
 }
 
@@ -8260,13 +8286,29 @@ def with_peers(cfg, path, data):
     rows = data["rooms"] if isinstance(data, dict) else data
     for r in rows:
         r["server"] = host_name(cfg)
+    seen = [{"name": host_name(cfg), "ok": True}]
+    names = cfg.get("topic_names") or {}
     for name in sorted(cfg["peers"]):
         got = peer_call(cfg, name, path.lstrip("/"), timeout=3)
+        seen.append({"name": name, "ok": got is not None})
+        if got is None:
+            # Down is not gone: its topics still show, marked, instead of
+            # vanishing from the page as if they had been closed.
+            for t in sorted((t for t, n in (cfg.get("remote") or {}).items() if n == name), key=int):
+                label = names.get(t) or f"topic {t}"
+                rows.append({"topic": t, "name": f"{label} · {name}", "desks": [], "server": name,
+                             "offline": True} if isinstance(data, dict) else
+                            {"topic": t, "session": label, "alive": False, "mode": "offline",
+                             "agent": None, "usage": "", "queued": 0, "held_until": None,
+                             "bench": {}, "server": name, "unreachable": True})
+            continue
         for r in (got.get("rooms") if isinstance(got, dict) else got) or []:
             r["server"] = name
             if isinstance(data, dict):
                 r["name"] = f"{r.get('name')} · {name}"
             rows.append(r)
+    if isinstance(data, dict):
+        data["servers"] = seen
     return data
 
 
@@ -10581,6 +10623,15 @@ def selfcheck():
     except json.JSONDecodeError as e:
         msg_ = bad_cfg(e)
     assert "line 3, column 2" in msg_ and "missing comma" in msg_, msg_
+    # A peer that is down keeps its topics on the page, marked, and is listed.
+    with stubbed(peer_call=lambda *a, **k: None, host_name=lambda c: "me"):
+        dcfg_ = {"peers": {"vps2": {"url": "u", "secret": "s"}}, "remote": {"2": "vps2"},
+                 "topic_names": {"2": "egx"}}
+        off_ = with_peers(dcfg_, "/api/office", {"rooms": []})
+        assert off_["rooms"] == [{"topic": "2", "name": "egx · vps2", "desks": [],
+                                  "server": "vps2", "offline": True}], off_
+        assert off_["servers"] == [{"name": "me", "ok": True}, {"name": "vps2", "ok": False}]
+        assert with_peers(dcfg_, "/api/topics", [])[0]["unreachable"]
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24

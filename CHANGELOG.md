@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Office: a server strip with status dots, ⚙ dashboard / + project / + server links (deep-linking to the form and the add-server steps), and a banner when a server is not answering. Topics on a peer that is down no longer vanish from the office and dashboard: they show, marked, with where to fix it.
+
 - Dashboard: **+ add server** gives the steps and a one-use, 30-minute `nightmux.py --join <code>` command; the new machine fetches the bot settings and a peer secret over the tailnet, configures itself as a peer and installs the service, and appears in the new **servers** section (status, agents, topics, remove). A **setup** panel lists what is missing on this machine with the fix — the same checks as `--doctor`, which gained bot topic rights, agents, projects folder, tailnet dashboard, gh and Chromium.
 
 - Deploy previews: `!watch` posts the preview URL a host attaches to the PR's commit (GitHub deployment, deploy-preview status, or a bot comment) with open/screenshot buttons; bot comments are no longer fed to the agent as reviews. `!errors`: a per-topic webhook for Sentry (or any JSON) — new errors become 🛠 fix buttons or, on `auto`, prompts; `!errors expose` publishes only /hook on :8443 via Tailscale Funnel.
