@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!briefing HH:MM|now|off`: one message each morning — done overnight, waiting for you (questions, open PRs with GitHub's merge verdict, production errors), usage windows with their forecast, and what is queued, held or stopped — with night reel and stats buttons.
+
 - Dashboard: **💬** on each topic opens it as a live chat — messages both ways, working menu buttons, a composer, a working indicator, in-page notifications — at `/chat?t=<topic>`, peers included; the dashboard is installable as an app (manifest, service worker, icon).
 
 - `!deps`: known vulnerabilities (npm audit, pip-audit, govulncheck) worst first and packages a major version behind, with an **upgrade with agent** button; `!deps nightly HH:MM` checks every night and reports only findings.

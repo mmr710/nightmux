@@ -2509,6 +2509,7 @@ def watcher(cfg, state, lock):
             mem_tick(cfg, state)
             forecast_tick(cfg, state)
             deps_tick(cfg)
+            briefing_tick(cfg, state, lock)
             reel_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
@@ -3675,6 +3676,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!briefing":
+        return briefing_cmd(cfg, state, lock, topic, arg)
     if cmd == "!deps":
         return deps_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!forecast":
@@ -3804,6 +3807,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
+                "!briefing [HH:MM|now|off] = one morning message: done overnight, "
+                "waiting for you (questions, green PRs, errors), limits, queued\n"
                 "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages "
                 "(npm, pip-audit, govulncheck), upgraded by the agent on a tap\n"
                 "!forecast = when each agent's usage window fills at the current pace "
@@ -6097,6 +6102,7 @@ def mcp_desktop(inp=None, out=None):
 # stays tailnet-only, and the hook answers nothing without the key.
 HOOK_PORT, ERR_COOL = 8443, 6 * 3600
 _err_seen, _err_fix = {}, {}      # fingerprint -> last time; topic -> {id: prompt}
+_err_log = []                     # (time, topic, title): what the morning briefing counts
 
 
 def hook_key(cfg):
@@ -6146,6 +6152,8 @@ def error_in(cfg, state, topic, body):
     if now - _err_seen.get(fp, 0) < ERR_COOL:
         return 200, "seen"
     _err_seen[fp] = now
+    _err_log.append((now, topic, e["title"]))
+    del _err_log[:-200]
     prompt = (f"A production error was reported ({e['level']}): {e['title']}\n"
               + (f"Where: {e['where']}\n" if e["where"] else "")
               + ("Stack, most recent last:\n" + "\n".join(e["frames"]) + "\n" if e["frames"] else "")
@@ -6879,6 +6887,119 @@ def deps_cmd(cfg, state, lock, topic, sess, arg):
         return ("🩺 nightly check off" if m.group(1) == "off" else
                 f"🩺 checked every night at {d[topic]}; you hear about it only when something is found")
     return deps_start(cfg, topic)
+
+
+# ---------- morning briefing ----------
+# One message, once a day: what got done overnight, what is waiting for you
+# (questions, green PRs, errors), the limits as they stand, and what is queued.
+# Built on a thread — it asks gh about open PRs — and sent to the topic that
+# set it up.
+_brief = {"day": None, "busy": False}
+
+
+def briefing_text(cfg, state, since):
+    now, lines = time.time(), [f"☀️ briefing · since {clock(cfg, since)}"]
+    done = reel_caption(cfg, since)
+    lines += ["", "done overnight:"] + [f"  {l}" for l in done] if done else ["", "no commits overnight"]
+    rows = topics_status(cfg, state)
+    names = cfg.get("topic_names") or {}
+    label = lambda r: names.get(r["topic"]) or r["session"]
+    asking = [label(r) for r in rows if r["mode"] == "waiting"]
+    held = [f"{label(r)} until {clock(cfg, r['held_until'])}" for r in rows if r.get("held_until")]
+    queued = [f"{label(r)} {r['queued']}" for r in rows if r["queued"]]
+    down = [label(r) for r in rows if r["mode"] in ("offline",) and not r.get("unreachable")]
+    prs, seen_pr = [], set()
+    for topic in sorted(cfg.get("topics", {}), key=int):
+        cwd = (cfg.get("dirs") or {}).get(topic)
+        if not cwd or not os.path.isdir(os.path.join(cwd, ".git")) or not shutil.which("gh"):
+            continue
+        try:
+            for pr in json.loads(gh(cwd, "pr", "list", "--state", "open", "-L", "5", "--json",
+                                    "number,title,url,mergeStateStatus,statusCheckRollup",
+                                    timeout=30)):
+                if pr.get("url") in seen_pr:      # two topics on one repo: list it once
+                    continue
+                seen_pr.add(pr.get("url"))
+                ok = all((c.get("conclusion") or c.get("state") or "").upper() in
+                         ("SUCCESS", "SKIPPED", "NEUTRAL") for c in pr.get("statusCheckRollup") or [])
+                # GitHub's own verdict when it has one; it computes lazily, so
+                # UNKNOWN only earns "checks green", never "ready to merge".
+                ms = pr.get("mergeStateStatus") or "UNKNOWN"
+                note = {"DIRTY": " — conflicts with main", "BEHIND": " — behind main, needs an update",
+                        "BLOCKED": " — blocked (checks or review)", "CLEAN": " — ready to merge",
+                        "UNSTABLE": " — some checks failing"}.get(ms, (
+                            " — checks green" if ok and pr.get("statusCheckRollup") else ""))
+                prs.append(f"  {names.get(topic) or topic} #{pr['number']} {pr['title'][:50]}{note}")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+    errs = [e for e in _err_log if e[0] >= since]
+    waiting = []
+    if asking:
+        waiting.append("  ✋ asking you: " + ", ".join(asking))
+    waiting += prs[:8]
+    if errs:
+        waiting.append(f"  🚨 {len(errs)} production error{'s' * (len(errs) != 1)}: "
+                       + "; ".join(t[:40] for _, _, t in errs[-3:]))
+    lines += ["", "waiting for you:"] + waiting if waiting else ["", "nothing waiting for you"]
+    lim = []
+    for key, (pct, resets) in sorted(windows_now(state).items()):
+        eta = forecast(key, now)
+        lim.append(f"  {key} {pct:.0f}%" + (f" (full ~{clock(cfg, eta)})" if eta else "")
+                   + (f", resets {clock(cfg, resets)}" if resets else ""))
+    if lim:
+        lines += ["", "limits:"] + lim
+    today = ([f"  📥 queued: {', '.join(queued)}"] if queued else []) + \
+            ([f"  💤 held: {', '.join(held)}"] if held else []) + \
+            ([f"  💀 stopped: {', '.join(down)}"] if down else [])
+    if today:
+        lines += ["", "today:"] + today
+    return "\n".join(lines)
+
+
+def briefing_send(cfg, state, topic, since):
+    if _brief["busy"]:
+        return
+    _brief["busy"] = True
+
+    def go():
+        try:
+            send(cfg, topic, briefing_text(cfg, state, since), mode="mono",
+                 buttons=kb([[("🎬 night reel", "!reel 12"), ("📊 stats", "!stats 1")]]))
+        finally:
+            _brief["busy"] = False
+    threading.Thread(target=go, daemon=True).start()
+
+
+def briefing_tick(cfg, state, lock):
+    b = cfg.get("briefing") or {}
+    if not b.get("at") or not b.get("topic") or _brief["busy"]:
+        return
+    now = time.time()
+    due = at_epoch(cfg, b["at"], now - 86400)
+    day = time.strftime("%Y-%m-%d", time.gmtime(due))
+    if due <= now < due + 3600 and _brief["day"] != day and b.get("last_day") != day:
+        _brief["day"] = day
+        with lock:
+            b["last_day"] = day
+            save_cfg(cfg)
+        briefing_send(cfg, state, b["topic"], due - 12 * 3600)
+
+
+def briefing_cmd(cfg, state, lock, topic, arg):
+    if arg == "off":
+        with lock:
+            cfg.pop("briefing", None)
+            save_cfg(cfg)
+        return "☀️ briefing off"
+    if re.match(r"^\d{1,2}:\d{2}$", arg):
+        with lock:
+            cfg["briefing"] = {"at": arg, "topic": str(topic)}
+            save_cfg(cfg)
+        return f"☀️ a briefing every morning at {arg}, here — !briefing now for one now"
+    briefing_send(cfg, state, topic, time.time() - 12 * 3600)
+    return None if arg == "now" else (
+        None if (cfg.get("briefing") or {}).get("at") else
+        "(daily: !briefing 07:30 · here, each morning)")
 
 
 # ---------- limit forecast ----------
@@ -11235,6 +11356,25 @@ def selfcheck():
         chat_log("5", "bot", "x")
     assert len(_chat["5"]) == CHAT_KEEP
     _chat.clear()
+    # Briefing: done / waiting / limits / today, from the pieces nightmux already
+    # tracks; nothing to say in a section says so in one line.
+    with stubbed(reel_caption=lambda c, s: ["game: 3 commits, +120 −14"],
+                 topics_status=lambda c, s: [
+                     {"topic": "1", "session": "g", "mode": "waiting", "queued": 2, "held_until": None},
+                     {"topic": "2", "session": "h", "mode": "idle", "queued": 0, "held_until": time.time() + 600}],
+                 windows_now=lambda st: {"claude:5h": (40, None)}, gh=lambda *a, **k: "[]"):
+        _err_log[:] = [(time.time(), "1", "TypeError: x")]
+        bt_ = briefing_text({"topic_names": {"1": "Game"}, "topics": {}}, {}, time.time() - 3600)
+    for part_ in ("game: 3 commits", "✋ asking you: Game", "1 production error", "claude:5h 40%",
+                  "📥 queued: Game 2", "💤 held: h until"):
+        assert part_ in bt_, (part_, bt_)
+    _err_log.clear()
+    with stubbed(save_cfg=lambda c: None):
+        bc_ = {}
+        assert "07:30" in briefing_cmd(bc_, {}, threading.Lock(), "4", "07:30")
+        assert bc_["briefing"] == {"at": "07:30", "topic": "4"}
+        briefing_cmd(bc_, {}, threading.Lock(), "4", "off")
+        assert "briefing" not in bc_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
