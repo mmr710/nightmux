@@ -467,6 +467,16 @@ buttons: 🧠 step back (list hypotheses before editing), 🔀 hand to another
 agent with a summary, ⏸ pause. `!loopguard auto` lets the first one step it
 back by itself; `!loopguard off` disables it.
 
+## Morning briefing
+
+`!briefing 07:30` in any topic: every morning at that time, one message
+there — what got done overnight (commits and lines per project), what is
+waiting for you (agents asking a question, open PRs with GitHub's verdict:
+ready, behind, conflicting; production errors from `!errors`), each usage
+window and when it fills at the current pace, and what is queued, held or
+stopped. Buttons open the night reel and yesterday's stats. `!briefing now`
+for one right away, `!briefing off` to stop.
+
 ## Dependency health
 
 `!deps` runs the project's own tools — `npm audit` / `npm outdated`,
