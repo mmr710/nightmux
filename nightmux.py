@@ -4283,6 +4283,45 @@ def screenshot(cfg, url):
             os.remove(out)
 
 
+_preview = {}     # topic -> {"url", "at"}: the page last previewed or shot there
+POINT_FOR = 7200  # a photo this long after a preview is taken to be of that page
+CONSOLE = re.compile(r'CONSOLE[^\]]*\] "(.*)", source: (\S*) \((\d+)\)')
+
+
+def page_probe(cfg, url):
+    """(console messages, rendered DOM) of a page, from headless Chromium."""
+    b = browser_bin(cfg)
+    if not b:
+        return [], ""
+    out = run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--enable-logging=stderr",
+              "--v=0", "--virtual-time-budget=5000", "--dump-dom", url, timeout=60)
+    msgs = [f"{m.group(1)}  ({m.group(2).rsplit('/', 1)[-1]}:{m.group(3)})"
+            for m in CONSOLE.finditer(out)]
+    a, z = out.find("<html"), out.rfind("</html>")
+    return msgs[-15:], out[a:z + 7] if a >= 0 and z > a else ""
+
+
+def point_fix(cfg, topic, caption, img):
+    """A photo sent soon after !preview/!shot is a bug report about that page:
+    the agent gets the picture, the URL, the console and the rendered DOM."""
+    pv = _preview.get(topic)
+    if not pv or time.time() - pv["at"] > POINT_FOR:
+        return None
+    errs, dom = page_probe(cfg, pv["url"])
+    dom_path = ""
+    if dom:
+        dom_path = os.path.join(FILE_DIR, f"{int(time.time())}-dom.html")
+        with open(dom_path, "w") as f:
+            f.write(dom)
+    return ((caption or "Fix what is marked in this screenshot.") + "\n\n"
+            f"Screenshot of the running app (I may have drawn on it to mark the problem): {img}\n"
+            f"Page: {pv['url']}\n"
+            "Console on that page:\n" + ("\n".join(redact(e)[:300] for e in errs) or "(nothing)")
+            + (f"\nRendered DOM: {dom_path}" if dom_path else "")
+            + "\n\nFind the code behind what is marked, fix it, then load the page again "
+              "to check.")
+
+
 def preview_cmd(cfg, topic, sess, cmd, arg):
     if cmd == "!shot" and re.match(r"https?://", arg):
         url = arg
@@ -4293,6 +4332,7 @@ def preview_cmd(cfg, topic, sess, cmd, arg):
                     "(e.g. `npm run dev`), then !preview again")
         want = re.match(r":?(\d+)(/.*)?$", arg) if cmd == "!shot" else None
         pick = [p for p in ports if want and p[0] == int(want.group(1))] or ports
+        _preview[topic] = {"url": f"http://127.0.0.1:{pick[0][0]}/", "at": time.time()}
         if cmd == "!shot":
             path = (want.group(2) if want else arg if arg.startswith("/") else "") or "/"
             url = f"http://127.0.0.1:{pick[0][0]}{path}"
@@ -4308,6 +4348,7 @@ def preview_cmd(cfg, topic, sess, cmd, arg):
                  mode="plain", buttons=json.dumps({"inline_keyboard": rows + [
                      [{"text": "📸 screenshot", "callback_data": "!shot"}]]}) if rows else None)
             return None
+    _preview[topic] = {"url": url, "at": time.time()}
     png, err = screenshot(cfg, url)
     if not png:
         return f"📸 {err}"
@@ -7362,7 +7403,8 @@ def process(cfg, state, lock, allow, upd):
         if not path:
             send(cfg, topic, "download failed")
             return
-        text = f"{text}\n{path}".strip()
+        image = att or (doc.get("mime_type") or "").startswith("image/")
+        text = (image and point_fix(cfg, topic, text, path)) or f"{text}\n{path}".strip()
     try:
         # cq: the tap already has its own feedback, so no reaction on the button
         reply = handle(cfg, state, lock, topic, text,
@@ -8681,6 +8723,22 @@ def selfcheck():
         assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
         assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
         icfg_["goals"].clear()
+    # Point and fix: a photo soon after a preview carries the page, its console
+    # and DOM; one with no recent preview stays a plain image path.
+    with stubbed(page_probe=lambda c, u: (['Uncaught TypeError: x is null  (app.js:12)'],
+                                         "<html><body>hi</body></html>")):
+        _preview.clear()
+        assert point_fix({}, "3", "this", "/i.jpg") is None
+        _preview["3"] = {"url": "http://127.0.0.1:5173/cart", "at": time.time()}
+        pf_ = point_fix({}, "3", "button overlaps", "/i.jpg")
+        assert pf_.startswith("button overlaps") and "/i.jpg" in pf_ and "/cart" in pf_, pf_
+        assert "x is null  (app.js:12)" in pf_ and "-dom.html" in pf_, pf_
+        os.remove(re.search(r"Rendered DOM: (\S+)", pf_).group(1))
+        _preview["3"]["at"] -= POINT_FOR + 1
+        assert point_fix({}, "3", "", "/i.jpg") is None
+        _preview.clear()
+    cm_ = CONSOLE.search('[1:2:INFO:CONSOLE(7)] "Uncaught ReferenceError: foo", source: http://h/a.js (7)')
+    assert cm_ and cm_.group(1) == "Uncaught ReferenceError: foo" and cm_.group(3) == "7"
     # Night reel: the busiest room is told as a story, PNG frames decode, and the
     # GIF is well formed — one image block per frame, a loop, a trailer.
     t0_ = 1_700_000_000

@@ -351,6 +351,12 @@ interfaces is linked on your tailnet directly; one on `127.0.0.1` gets a
 URL) — uses Playwright's Chromium if present, else the system's, or
 `"browser"` in the config.
 
+**Point and fix:** within two hours of a `!preview` or `!shot`, a photo you
+send to the topic — a screenshot with the bug circled, captioned or not — is
+treated as a bug report about that page. The agent gets the image, the page
+URL, that page's console errors and its rendered DOM (as a file), and is told
+to find the code behind what is marked, fix it, and load the page again.
+
 ## The night, as a GIF
 
 nightmux records the office's desks once a minute (only when something
