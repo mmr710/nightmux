@@ -61,6 +61,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Fixed
 
+- The daemon now adds your login shell's PATH (and common per-user bin dirs) at startup: under systemd/launchd, per-user installs like ~/.local/bin/agy and ~/.opencode/bin/opencode were "not installed" to the dashboard, failover buttons and `!update`, though tmux sessions ran them.
+
 - selfcheck no longer fails when `tmux -V` gets no answer on a loaded CI runner; it skips that one check.
 
 - Projects splitting across two folders: `!<agent> name` with no dir now

@@ -1191,6 +1191,33 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
          buttons=failover_buttons(cfg, topic, sess))
 
 
+USER_BINS = ("~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.opencode/bin", "~/.bun/bin",
+             "~/.cargo/bin", "~/.deno/bin", "~/go/bin", "/opt/homebrew/bin", "/usr/local/bin")
+
+
+def widen_path(env=None):
+    """Give the daemon the PATH your shell has.
+
+    systemd and launchd start it with a bare one, so agents installed per user
+    (~/.local/bin/agy, ~/.opencode/bin/opencode, npm -g) were "not installed"
+    to the daemon while every tmux session — a login shell — ran them fine:
+    the dashboard, failover and !update all looked at the wrong list.
+    """
+    env = os.environ if env is None else env
+    have = env.get("PATH", "").split(os.pathsep)
+    sh = env.get("SHELL") or "/bin/bash"
+    try:
+        p = subprocess.run([sh, "-lic", 'printf "%s" "$PATH"'], capture_output=True,
+                           text=True, timeout=10, stdin=subprocess.DEVNULL)
+        shell = p.stdout.strip().splitlines()[-1].split(os.pathsep) if p.stdout.strip() else []
+    except (OSError, subprocess.TimeoutExpired):
+        shell = []
+    extra = [d for d in shell + [os.path.expanduser(b) for b in USER_BINS]
+             if d and d not in have and os.path.isdir(d)]
+    env["PATH"] = os.pathsep.join(have + list(dict.fromkeys(extra)))
+    return extra
+
+
 def installed_agents(cfg):
     """Agent keys whose command is on PATH."""
     return [k for k, v in agents(cfg).items() if shutil.which(v[0])]
@@ -7587,6 +7614,9 @@ def restore_held(cfg, state):
 
 
 def main():
+    added = widen_path()
+    if added:
+        print(f"PATH += {os.pathsep.join(added)}", flush=True)
     migrate()
     cfg = load_cfg()
     for key in ("token", "chat_id", "allow_users"):
@@ -9227,6 +9257,20 @@ def selfcheck():
         assert False, "accepted without the header"
     except urllib.error.HTTPError as e:
         assert e.code == 403
+    # The daemon's PATH grows by the user bin dirs that exist, never duplicates.
+    with tempfile.TemporaryDirectory() as hp_:
+        os.makedirs(os.path.join(hp_, ".local", "bin"))
+        env_ = {"PATH": "/usr/bin", "SHELL": "/nonexistent-shell", "HOME": hp_}
+        old_home_ = os.environ.get("HOME")
+        os.environ["HOME"] = hp_
+        try:
+            widen_path(env_)
+            widen_path(env_)
+        finally:
+            os.environ["HOME"] = old_home_
+        parts_ = env_["PATH"].split(os.pathsep)
+        assert parts_[0] == "/usr/bin" and os.path.join(hp_, ".local", "bin") in parts_
+        assert len(parts_) == len(set(parts_)), parts_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
