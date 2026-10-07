@@ -2435,6 +2435,7 @@ def watcher(cfg, state, lock):
             auto_update_tick(cfg)
             failover_tick(cfg, state, lock)
             goal_tick(cfg, state)
+            watch_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3504,7 +3505,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!failover",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
-              "!preview")  # opens a port to the tailnet
+              "!preview",  # opens a port to the tailnet
+              "!watch")    # can merge a pull request
 
 
 def writes(cfg, cmd, arg=""):
@@ -3585,6 +3587,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!watch":
+        return watch_cmd(cfg, lock, topic, arg)
     if cmd in ("!preview", "!shot") and sess:
         return preview_cmd(cfg, topic, sess, cmd, arg)
     if cmd == "!server":
@@ -3659,6 +3663,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "this machine's transcripts, with what to change\n"
                 "!preview = open the app this session is serving on your phone "
                 "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
+                "!watch pr [n] | merge | off = feed this PR's CI failures and review "
+                "comments to the agent; ping with a merge button when green\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -4276,6 +4282,164 @@ def preview_cmd(cfg, topic, sess, cmd, arg):
     send_file(cfg, topic, "shot.png", png, caption=f"📸 {url}", kind="photo",
               buttons=kb([[("📸 again", "!shot " + (arg or "")), ("👀 preview", "!preview")]]))
     return None
+
+
+# ---------- !watch pr: CI and review comments come back to the agent ----------
+# The loop used to break at push: red CI and review comments waited for you to
+# paste them in by hand. The topic's PR is polled (gh, on its own thread); a
+# failed check's log and new comments are queued to the agent, green gets a
+# merge button. Comments by the gh account itself are skipped, or an agent
+# answering on the PR would feed its own replies back to itself.
+WATCH_EVERY = 90
+FAILED = ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE", "ACTION_REQUIRED")
+_watch_run, _watch_at, _gh_me = {}, {}, []
+
+
+def gh(cwd, *args, timeout=60):
+    p = subprocess.run(("gh",) + args, cwd=cwd, capture_output=True, text=True,
+                       timeout=timeout, stdin=subprocess.DEVNULL)
+    if p.returncode:
+        raise OSError((p.stderr or p.stdout).strip()[-300:])
+    return p.stdout
+
+
+def pr_events(cwd, pr, seen):
+    """What is new on PR `pr`: [(kind, key, text)], kind fail|comment|green|closed."""
+    if not _gh_me:
+        _gh_me.append(gh(cwd, "api", "user", "-q", ".login").strip())
+    me = _gh_me[0]
+    d = json.loads(gh(cwd, "pr", "view", str(pr), "--json",
+                      "state,url,headRefOid,statusCheckRollup,reviews,comments"))
+    if d["state"] != "OPEN":
+        return [("closed", "closed", d["state"].lower())]
+    sha, checks, ev = d["headRefOid"], d.get("statusCheckRollup") or [], []
+    verdict = lambda c: (c.get("conclusion") or c.get("state") or "").upper()
+    for c in checks:
+        name = c.get("name") or c.get("context") or "check"
+        key = f"fail:{sha[:12]}:{name}"
+        if verdict(c) in FAILED and key not in seen:
+            m, log = re.search(r"/runs/(\d+)", c.get("detailsUrl") or c.get("targetUrl") or ""), ""
+            if m:
+                try:
+                    log = "\n".join(gh(cwd, "run", "view", m.group(1), "--log-failed")
+                                    .splitlines()[-60:])
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            ev.append(("fail", key, f"{name}\n{log}".strip()))
+    if checks and all(verdict(c) in ("SUCCESS", "SKIPPED", "NEUTRAL") for c in checks) \
+            and f"green:{sha[:12]}" not in seen:
+        ev.append(("green", f"green:{sha[:12]}", d["url"]))
+    talk = [(f"rev:{r.get('id')}", (r.get("author") or {}).get("login"),
+             f"review ({(r.get('state') or '').lower()})", r.get("body"))
+            for r in d.get("reviews") or []]
+    talk += [(f"com:{c.get('id')}", (c.get("author") or {}).get("login"), "comment", c.get("body"))
+             for c in d.get("comments") or []]
+    try:
+        talk += [(f"inl:{c['id']}", c["user"]["login"],
+                  f"on {c.get('path')}:{c.get('line') or c.get('original_line')}", c.get("body"))
+                 for c in json.loads(gh(cwd, "api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/comments"))]
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        pass
+    ev += [("comment", k, f"@{who} {what}:\n{body}") for k, who, what, body in talk
+           if body and who != me and k not in seen]
+    return ev
+
+
+def watch_poll(cwd, pr, seen, out):
+    try:
+        out["events"] = pr_events(cwd, pr, seen)
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        out["err"] = str(e)
+
+
+def watch_tick(cfg, state, lock):
+    now, watches = time.time(), cfg.get("watch") or {}
+    for topic, w in watches.items():
+        if topic in _watch_run or now - _watch_at.get(topic, 0) < WATCH_EVERY:
+            continue
+        _watch_at[topic] = now
+        run = _watch_run[topic] = {}
+        cwd = (cfg.get("dirs") or {}).get(topic)
+        threading.Thread(target=watch_poll, daemon=True,
+                         args=(cwd, w["pr"], set(w.get("seen") or []), run)).start()
+    for topic, run in list(_watch_run.items()):
+        if not run:
+            continue
+        _watch_run.pop(topic, None)
+        w, sess = watches.get(topic), cfg.get("topics", {}).get(topic)
+        if not w:
+            continue
+        if "err" in run:
+            if not w.get("err"):
+                send(cfg, topic, f"👁 PR #{w['pr']}: gh failed — {run['err']}", mode="plain")
+            w["err"] = run["err"]
+            continue
+        w.pop("err", None)
+        primed, ev = w.get("primed"), run["events"]
+        fails = [t for k, _, t in ev if k == "fail"]
+        talk = [t for k, _, t in ev if k == "comment"]
+        st = state.setdefault(sess, {}) if sess else {}
+        if fails and sess:
+            st.setdefault("queue", []).append(
+                f"CI failed on PR #{w['pr']}:\n\n" + redact("\n\n".join(fails))[-4000:]
+                + "\n\nFix the cause, commit, and push to the PR branch. Do not "
+                  "disable or skip the failing check.")
+            send(cfg, topic, f"🔴 PR #{w['pr']}: {len(fails)} check(s) failed — sent to {sess}",
+                 mode="plain")
+        if talk and primed and sess:
+            st.setdefault("queue", []).append(
+                f"New review feedback on PR #{w['pr']}:\n\n" + redact("\n\n".join(talk))[-4000:]
+                + "\n\nAddress it, commit, and push. Explain on the PR only where you disagree.")
+            send(cfg, topic, f"💬 PR #{w['pr']}: {len(talk)} new comment(s) — sent to {sess}",
+                 mode="plain")
+        for k, _, url in ev:
+            if k == "green":
+                send(cfg, topic, f"🟢 PR #{w['pr']} — every check green\n{url}", mode="plain",
+                     buttons=kb([[("✅ merge", "!watch merge"), ("stop watching", "!watch off")]]))
+            elif k == "closed":
+                send(cfg, topic, f"👁 PR #{w['pr']} is {url} — stopped watching", mode="plain")
+        with lock:
+            if any(k == "closed" for k, _, _ in ev):
+                watches.pop(topic, None)
+            else:
+                w["seen"] = (w.get("seen") or []) + [key for _, key, _ in ev]
+                w["seen"], w["primed"] = w["seen"][-400:], True
+            save_cfg(cfg)
+
+
+def watch_cmd(cfg, lock, topic, arg):
+    watches, cwd = cfg.get("watch") or {}, (cfg.get("dirs") or {}).get(topic)
+    w = watches.get(topic)
+    if arg == "off":
+        with lock:
+            watches.pop(topic, None)
+            save_cfg(cfg)
+        return "stopped watching" if w else "nothing watched here"
+    if arg == "merge":
+        if not w:
+            return "no PR watched here"
+        try:
+            out = gh(cwd, "pr", "merge", str(w["pr"]), "--merge", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"merge failed: {e}"
+        return f"✅ merged PR #{w['pr']}\n{out.strip()[-500:]}"
+    m = re.match(r"pr(?:\s+#?(\d+))?$", arg)
+    if not m:
+        return (f"👁 watching PR #{w['pr']}" if w else "nothing watched here") + \
+            "\n!watch pr [n] — no n: this branch's PR · !watch off · !watch merge"
+    pr = m.group(1)
+    if not pr:
+        try:
+            pr = json.loads(gh(cwd, "pr", "view", "--json", "number"))["number"]
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+            return f"no PR for this branch in {cwd}: {e}"
+    with lock:
+        cfg["watch"] = watches
+        watches[topic] = {"pr": int(pr)}
+        save_cfg(cfg)
+    _watch_at.pop(topic, None)
+    return (f"👁 watching PR #{pr}: failed checks and new review comments go to the "
+            "agent; you get a merge button when it is green")
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -7717,6 +7881,56 @@ def selfcheck():
         assert served_[-1][:4] == ("tailscale", "serve", "--bg", "--https=5173"), served_
         assert preview_link(pcfg2_, 3000, False) == ("http://box.ts.net:3000/", "")
         assert len(served_) == 1                  # already on the tailnet: no serve
+    # !watch pr: a failed check's log and new review comments are queued to the
+    # agent once each; the gh account's own comments and pre-existing ones are
+    # not; green pings once per commit; merged stops the watch.
+    prv_ = {"state": "OPEN", "url": "u", "headRefOid": "abc123def4567",
+            "statusCheckRollup": [{"name": "selfcheck", "conclusion": "FAILURE",
+                                   "detailsUrl": "https://github.com/o/r/actions/runs/42/job/1"}],
+            "reviews": [], "comments": [{"id": "c1", "author": {"login": "rev"}, "body": "old"}]}
+    inl_, wsaid_ = [], []
+
+    def fake_gh(cwd, *a, timeout=60):
+        if a[:2] == ("api", "user"):
+            return "me\n"
+        if a[:2] == ("pr", "view"):
+            return json.dumps(prv_)
+        if a[:2] == ("run", "view"):
+            return "setup\nE   assert 1 == 2\n"
+        return json.dumps(inl_)
+    _gh_me.clear()
+    with stubbed(gh=fake_gh, save_cfg=lambda c: None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: wsaid_.append(x)):
+        wcfg_, wst_, wlk_ = {"topics": {"3": "w"}, "dirs": {"3": "/"},
+                             "watch": {"3": {"pr": 7}}}, {}, threading.Lock()
+
+        def wround():
+            _watch_at.clear()
+            watch_tick(wcfg_, wst_, wlk_)
+            for _ in range(200):
+                if _watch_run.get("3"):
+                    break
+                time.sleep(0.02)
+            watch_tick(wcfg_, wst_, wlk_)
+        wround()
+        wq_ = wst_["w"]["queue"]
+        assert len(wq_) == 1 and "assert 1 == 2" in wq_[0] and "old" not in wq_[0], wq_
+        wround()
+        assert len(wq_) == 1                                   # not resent
+        prv_["comments"] += [{"id": "c2", "author": {"login": "rev"}, "body": "rename foo"},
+                             {"id": "c3", "author": {"login": "me"}, "body": "agent reply"}]
+        inl_.append({"id": 5, "user": {"login": "rev"}, "path": "a.py", "line": 3,
+                     "body": "off by one"})
+        wround()
+        assert len(wq_) == 2 and "rename foo" in wq_[1] and "a.py:3" in wq_[1], wq_
+        assert "agent reply" not in wq_[1]
+        prv_["statusCheckRollup"][0]["conclusion"], prv_["headRefOid"] = "SUCCESS", "fff000111222"
+        wround()
+        wround()
+        assert sum("every check green" in x for x in wsaid_) == 1, wsaid_
+        prv_["state"] = "MERGED"
+        wround()
+        assert "3" not in wcfg_["watch"] and "stopped watching" in wsaid_[-1], wsaid_
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
