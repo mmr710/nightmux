@@ -10,6 +10,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 - `!desktop`: a virtual screen (Xvfb + openbox) with a password-protected noVNC link over the tailnet; `!tools add desktop` gives the agent nightmux's own computer-use MCP server (screenshot, click, type, key, scroll, open); `!desktop open|shot|off`.
 
+- Android: `!apk` builds the project's debug APK (Gradle wrapper at the root or under `android/`, or Flutter) and sends it to the topic; `!apk install` puts it on your phone over wireless debugging (`!android pair|connect <ip:port>`); `!shot android` sends the phone's screen, and a photo after it is a bug report with the activity on screen and recent logcat errors. A failed build offers "send to agent".
+
 - `!issues` / `!issue <n>`: open issues as buttons; the agent gets the issue, a branch and the PR recipe, nightmux finds the branch's PR and watches it (CI failures, reviews, merge button). `!issues auto [label]` takes labelled issues one at a time while the topic is quiet.
 
 - `!tools add browser [all]`: registers Playwright's MCP server with the topic's agent(s) via each CLI's own `mcp add` (Claude Code at local scope), tells the agent to verify UI changes with it, and offers a restart to load it; `!tools rm browser`, `!tools restart`.

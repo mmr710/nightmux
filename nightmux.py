@@ -3547,6 +3547,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
+              "!desktop",  # starts programs, opens a VNC port to the tailnet
               "!issues", "!issue",   # sets the agent to work on an issue
               "!apk", "!android",    # builds, installs on a phone
               "!watch")    # can merge a pull request
@@ -3632,6 +3633,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return goal_cmd(cfg, lock, topic, arg)
     if cmd in ("!issues", "!issue"):
         return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
+    if cmd == "!desktop":
+        return desktop_cmd(cfg, topic, arg)
     if cmd == "!tools":
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
@@ -3743,6 +3746,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "your phone over wireless debugging · !shot android\n"
                 "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
                 "one and the agent branches, fixes, opens a PR that nightmux watches\n"
+                "!desktop [open <app>|shot|off] = a virtual desktop agents can drive "
+                "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
@@ -5554,6 +5559,13 @@ TOOLS = {
                 "hint": "You now have a browser (Playwright MCP tools). After UI changes, "
                         "open the running app with it, click through what you changed and "
                         "check the console before saying it is done."},
+    "desktop": {"server": "desktop",
+                "about": "a Linux desktop it sees and drives (screenshot, click, type, keys, "
+                         "open apps) — you watch it with !desktop",
+                "hint": "You now have a desktop (the `desktop` MCP tools: screenshot, click, "
+                        "type, key, scroll, open). Use it for anything with a GUI: open an "
+                        "app with `open`, take a screenshot before each action, act on what "
+                        "you see, and screenshot again to confirm."},
 }
 
 
@@ -5563,6 +5575,8 @@ def tool_cmd(cfg, tool):
         return (["npx", "-y", "@playwright/mcp@latest", "--headless", "--isolated",
                  "--no-sandbox", "--output-dir", os.path.join(FILE_DIR, "playwright")]
                 + (["--executable-path", b] if b else []))
+    if tool == "desktop":
+        return [sys.executable, os.path.abspath(__file__), "--mcp-desktop"]
     return None
 
 
@@ -5629,6 +5643,8 @@ def tools_cmd(cfg, state, lock, topic, sess, arg):
             tl.remove(tool)
         save_cfg(cfg)
     if verb == "add":
+        if tool == "desktop":
+            desktop_up(cfg)
         state.setdefault(sess, {}).setdefault("queue", []).append(TOOLS[tool]["hint"])
     send(cfg, topic, f"🧰 {tool} {'added' if verb == 'add' else 'removed'}:\n" + "\n".join(out)
          + "\nAgents load tools when they start.", mode="plain",
@@ -5750,6 +5766,204 @@ def issues_cmd(cfg, state, lock, topic, sess, cmd, arg):
          buttons=kb([[(f"{'✓ ' if i['number'] in done else ''}#{i['number']} {i['title'][:40]}",
                        f"!issue {i['number']}")] for i in got]))
     return None
+
+
+# ---------- !desktop: a screen for agents, a window for you ----------
+# Some work only exists on a screen: GUI apps, sites behind a real login, an
+# emulator. A virtual display (Xvfb + openbox) is the agents' screen, driven
+# through nightmux's own MCP server (--mcp-desktop: screenshot, click, type,
+# key, scroll, open). You watch — or take over — with noVNC over the tailnet,
+# behind a VNC password, from the phone.
+DESK, DESK_VNC, DESK_WEB, DESK_SIZE = ":77", 5977, 6080, "1280x800"
+
+
+def port_open(port):
+    with contextlib.closing(__import__("socket").socket()) as sk:
+        sk.settimeout(0.5)
+        return sk.connect_ex(("127.0.0.1", port)) == 0
+
+
+def desk_env():
+    return dict(os.environ, DISPLAY=DESK)
+
+
+def desktop_alive():
+    try:
+        with open(f"/tmp/.X{DESK[1:]}-lock") as f:
+            os.kill(int(f.read().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def desktop_up(cfg):
+    """Start whatever part of the desktop is not running. (url, error)."""
+    missing = [b for b in ("Xvfb", "openbox", "x11vnc", "websockify", "xdotool", "import")
+               if not shutil.which(b)]
+    if missing:
+        return None, ("missing " + ", ".join(missing) + " — on Debian/Ubuntu: sudo apt install "
+                      "xvfb openbox x11vnc novnc websockify xdotool imagemagick")
+    pw = cfg.get("desktop_pw")
+    if not pw:
+        pw = cfg["desktop_pw"] = __import__("secrets").token_urlsafe(6)[:8]  # VNC: 8 max
+        save_cfg(cfg)
+    spawn_ = lambda argv: subprocess.Popen(argv, env=desk_env(), stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           start_new_session=True)
+    if not desktop_alive():
+        spawn_(["Xvfb", DESK, "-screen", "0", DESK_SIZE + "x24", "-nolisten", "tcp"])
+        for _ in range(50):
+            if desktop_alive():
+                break
+            time.sleep(0.1)
+        spawn_(["openbox"])
+    if not port_open(DESK_VNC):
+        pwfile = os.path.join(STATE_DIR, "desktop.vncpw")
+        os.makedirs(STATE_DIR, exist_ok=True)
+        run("x11vnc", "-storepasswd", pw, pwfile)
+        spawn_(["x11vnc", "-display", DESK, "-rfbport", str(DESK_VNC), "-localhost", "-forever",
+                "-shared", "-rfbauth", pwfile, "-quiet"])
+    if not port_open(DESK_WEB):
+        web = "/usr/share/novnc" if os.path.isdir("/usr/share/novnc") else None
+        spawn_(["websockify"] + (["--web", web] if web else [])
+               + [f"127.0.0.1:{DESK_WEB}", f"127.0.0.1:{DESK_VNC}"])
+    for _ in range(50):
+        if port_open(DESK_VNC) and port_open(DESK_WEB):
+            break
+        time.sleep(0.1)
+    link, err = preview_link(cfg, DESK_WEB, True)
+    if not link:
+        return None, err
+    return f"{link}vnc.html?autoconnect=1&resize=scale&password={urllib.parse.quote(pw)}", ""
+
+
+def desktop_down():
+    for pat in (f"websockify.*{DESK_WEB}", f"x11vnc -display {DESK}", "openbox", f"Xvfb {DESK}"):
+        run("pkill", "-f", pat)
+    with contextlib.suppress(OSError):
+        run("tailscale", "serve", f"--https={DESK_WEB}", "off")
+
+
+def desktop_shot():
+    p = subprocess.run(["import", "-display", DESK, "-window", "root", "png:-"],
+                       capture_output=True, timeout=30)
+    return p.stdout if p.returncode == 0 and p.stdout else None
+
+
+def desktop_cmd(cfg, topic, arg):
+    verb, _, rest = arg.partition(" ")
+    if verb == "off":
+        desktop_down()
+        return "🖥 desktop off"
+    if verb == "shot":
+        png = desktop_shot() if desktop_alive() else None
+        if not png:
+            return "the desktop is not running — !desktop"
+        send_file(cfg, topic, "desktop.png", png, caption="🖥 desktop", kind="photo")
+        return None
+    if verb == "open" and rest:
+        if not desktop_alive():
+            desktop_up(cfg)
+        subprocess.Popen(rest, shell=True, env=desk_env(), start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return f"🖥 started on the desktop: {rest}"
+    url, err = desktop_up(cfg)
+    if not url:
+        return f"🖥 {err}"
+    send(cfg, topic, f"🖥 desktop {DESK} ({DESK_SIZE}) — watch or take over from here.\n"
+         "!tools add desktop lets the agent drive it · !desktop open <app> · "
+         "!desktop shot · !desktop off", mode="plain",
+         buttons=json.dumps({"inline_keyboard": [[{"text": "🖥 open desktop", "url": url}],
+                                                 [{"text": "📸 screenshot",
+                                                   "callback_data": "!desktop shot"}]]}))
+    return None
+
+
+DESK_TOOLS = [
+    {"name": "screenshot", "description": "Screenshot of the whole desktop (PNG).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "click", "description": "Click at pixel x,y (button 1 left, 3 right).",
+     "inputSchema": {"type": "object", "required": ["x", "y"], "properties": {
+         "x": {"type": "integer"}, "y": {"type": "integer"},
+         "button": {"type": "integer", "default": 1}, "double": {"type": "boolean"}}}},
+    {"name": "type", "description": "Type text at the focused element.",
+     "inputSchema": {"type": "object", "required": ["text"],
+                     "properties": {"text": {"type": "string"}}}},
+    {"name": "key", "description": "Press keys, xdotool names: Return, ctrl+l, alt+F4, Tab.",
+     "inputSchema": {"type": "object", "required": ["keys"],
+                     "properties": {"keys": {"type": "string"}}}},
+    {"name": "scroll", "description": "Scroll at x,y.",
+     "inputSchema": {"type": "object", "required": ["x", "y", "direction"], "properties": {
+         "x": {"type": "integer"}, "y": {"type": "integer"},
+         "direction": {"type": "string", "enum": ["up", "down"]},
+         "amount": {"type": "integer", "default": 3}}}},
+    {"name": "open", "description": "Start a program on the desktop, e.g. "
+                                    "`chromium --no-sandbox http://localhost:3000`.",
+     "inputSchema": {"type": "object", "required": ["command"],
+                     "properties": {"command": {"type": "string"}}}},
+]
+
+
+def desk_call(name, a):
+    """One tool call -> MCP content list. Raises on failure."""
+    xdo = lambda *args: subprocess.run(("xdotool",) + args, env=desk_env(), check=True,
+                                       capture_output=True, timeout=30)
+    if name == "screenshot":
+        png = desktop_shot()
+        if not png:
+            raise OSError(f"no desktop on {DESK} — ask the user to run !desktop")
+        return [{"type": "image", "data": __import__("base64").b64encode(png).decode(),
+                 "mimeType": "image/png"}, {"type": "text", "text": f"desktop {DESK_SIZE}"}]
+    if name == "click":
+        xdo("mousemove", str(a["x"]), str(a["y"]), "click", "--repeat",
+            "2" if a.get("double") else "1", str(a.get("button", 1)))
+    elif name == "type":
+        xdo("type", "--delay", "15", "--", a["text"])
+    elif name == "key":
+        xdo("key", "--", *a["keys"].split())
+    elif name == "scroll":
+        xdo("mousemove", str(a["x"]), str(a["y"]), "click", "--repeat",
+            str(a.get("amount", 3)), "4" if a["direction"] == "up" else "5")
+    elif name == "open":
+        subprocess.Popen(a["command"], shell=True, env=desk_env(), start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        time.sleep(2)
+    else:
+        raise ValueError(f"no tool {name}")
+    return [{"type": "text", "text": "done"}]
+
+
+def mcp_desktop(inp=None, out=None):
+    """--mcp-desktop: a stdio MCP server, JSON-RPC per line, for the desktop."""
+    inp, out = inp or sys.stdin, out or sys.stdout
+    for line in inp:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if "id" not in msg:
+            continue                        # notifications need no answer
+        m, params, res = msg.get("method"), msg.get("params") or {}, None
+        if m == "initialize":
+            res = {"protocolVersion": params.get("protocolVersion") or "2024-11-05",
+                   "capabilities": {"tools": {}},
+                   "serverInfo": {"name": "nightmux-desktop", "version": VERSION}}
+        elif m == "tools/list":
+            res = {"tools": DESK_TOOLS}
+        elif m == "tools/call":
+            try:
+                res = {"content": desk_call(params.get("name"), params.get("arguments") or {})}
+            except Exception as e:
+                res = {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True}
+        elif m == "ping":
+            res = {}
+        reply = ({"jsonrpc": "2.0", "id": msg["id"], "result": res} if res is not None else
+                 {"jsonrpc": "2.0", "id": msg["id"],
+                  "error": {"code": -32601, "message": f"no method {m}"}})
+        out.write(json.dumps(reply) + "\n")
+        out.flush()
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -9790,6 +10004,24 @@ def selfcheck():
                                      if "dumpsys" in a else "E/Cart: NullPointerException")):
         af_ = android_fix("cart overlaps", "/i.jpg", "100.1.2.3:5555")
         assert "com.x/.CartActivity" in af_ and "NullPointerException" in af_ and "/i.jpg" in af_
+    # Desktop MCP: initialize, list, a failing call is an error result (not a
+    # crash), notifications get no reply.
+    import io
+    mout_ = io.StringIO()
+    with stubbed(desktop_shot=lambda: None):
+        mcp_desktop(io.StringIO("\n".join(json.dumps(x) for x in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "screenshot"}},
+            {"jsonrpc": "2.0", "id": 4, "method": "nope"}))), mout_)
+    mr_ = [json.loads(l) for l in mout_.getvalue().splitlines()]
+    assert [r["id"] for r in mr_] == [1, 2, 3, 4], mr_
+    assert mr_[0]["result"]["protocolVersion"] == "2025-03-26"
+    assert {t["name"] for t in mr_[1]["result"]["tools"]} >= {"screenshot", "click", "type", "key"}
+    assert mr_[2]["result"]["isError"] and "!desktop" in mr_[2]["result"]["content"][0]["text"]
+    assert mr_[3]["error"]["code"] == -32601
+    assert tool_cmd({}, "desktop")[-1] == "--mcp-desktop"
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
@@ -10796,6 +11028,8 @@ def cli():
         sys.exit(0 if doctor() else 1)
     elif "--version" in sys.argv:
         print(version_report())
+    elif "--mcp-desktop" in sys.argv:
+        mcp_desktop()
     elif "--demo" in sys.argv:
         print("\033[1mTo experience the nightmux auto-resume magic instantly:\033[0m\n")
         print("1. Open your Telegram bot")

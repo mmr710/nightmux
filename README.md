@@ -353,6 +353,30 @@ own gh account are skipped so an agent replying on the PR never feeds itself.
 When every check is green you get one 🟢 with a **merge** button. Merged or
 closed ends the watch.
 
+## Android, on your phone
+
+`!apk` builds the project's debug APK — a Gradle wrapper at the root or
+under `android/` (React Native, Capacitor), or Flutter — and sends it to the
+topic: tap to install. With your phone on wireless debugging (Developer
+options → Wireless debugging, reachable over the tailnet or Wi-Fi):
+`!android pair <ip:port> <code>` once, `!android connect <ip:port>`, then
+`!apk install` builds and installs in one go, and `!shot android` sends the
+phone's screen. A photo sent after that is a bug report: the agent gets it
+with the activity on screen and recent logcat errors. A failed build has a
+**send to agent** button. nightmux uses the first `adb` on PATH that actually
+runs (an SDK's x86 adb on an ARM server does not; `apt install adb`).
+
+## A desktop for agents
+
+`!desktop` starts a virtual screen on the server (Xvfb + openbox), and gives
+you a 🖥 button: noVNC over your tailnet, behind a VNC password, to watch or
+take over from the phone. `!tools add desktop` gives the topic's agent
+nightmux's own MCP server for it — `screenshot`, `click`, `type`, `key`,
+`scroll`, `open` — so it can drive GUI apps, a real browser with a login, an
+emulator. `!desktop open <app>` starts something yourself, `!desktop shot`
+sends a screenshot, `!desktop off` stops it all. Needs `xvfb openbox x11vnc
+novnc websockify xdotool imagemagick` (apt).
+
 ## Give the agent a browser
 
 `!tools add browser` registers Playwright's MCP server with the topic's
