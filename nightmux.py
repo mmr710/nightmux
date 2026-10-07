@@ -5091,7 +5091,7 @@ def pair_reviewer(cfg, topic, key):
     spawn(sess, cwd, agent(cfg, key)[0])
     cfg.setdefault("bench", {}).setdefault(str(topic), {})[key] = sess
     save_cfg(cfg)
-    return sess, f"started {key} as '{sess}' to review"
+    return sess, f"started {key} as '{sess}' on the bench"
 
 
 def pair_tick(cfg, state, lock):
@@ -6436,6 +6436,21 @@ th { color: #8b949e; font-weight: 500; }
 .scroll { overflow-x: auto; background: #131722; border: 1px solid #232838; border-radius: 10px; }
 ul.tips { margin: 12px 0 0; padding-left: 18px; } ul.tips li { margin-bottom: 8px; }
 ul.tips b { color: #79c0ff; }
+.chipsrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.chip { font-size: 12px; padding: 3px 9px; border-radius: 12px; }
+.chip.live { background: #1f6feb33; border-color: #1f6feb; color: #79c0ff; cursor: default; }
+select.add { font-size: 12px; padding: 3px 6px; }
+button.close { margin-left: auto; font-size: 12px; padding: 3px 9px; color: #f85149; border-color: #f8514955; }
+button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+#newp { display: none; margin-bottom: 14px; }
+#newp.open { display: block; }
+#newp .f { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); }
+#newp label { font-size: 12px; color: #8b949e; display: grid; gap: 4px; }
+textarea { background: #0b0e14; border: 1px solid #232838; color: #d8dee9; border-radius: 6px;
+           padding: 7px 8px; font: inherit; font-size: 16px; min-height: 60px; width: 100%; }
+#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 92vw;
+         background: #131722; border: 1px solid #2d3346; border-radius: 8px; padding: 8px 14px;
+         font-size: 13px; display: none; z-index: 9; }
 .srv + .srv { margin-top: 14px; } .sname { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
 .sname:empty { display: none; }
 </style></head>
@@ -6443,7 +6458,21 @@ ul.tips b { color: #79c0ff; }
 <header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a></span></header>
 <h2>server</h2><div id="server"></div>
 <h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
-<h2>topics</h2><div class="grid" id="grid"><p class="empty">loading…</p></div>
+<h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
+<div id="newp" class="card"><form id="newf">
+  <div class="f">
+    <label>project name<input name="title" required placeholder="habit tracker" autocomplete="off"></label>
+    <label>agent<select name="agent"></select></label>
+    <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
+    <label id="srvl">server<select name="server"></select></label>
+  </div>
+  <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
+    <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
+  <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
+    <span class="meta">creates the Telegram topic, the folder and the session</span></div>
+</form></div>
+<div class="grid" id="grid"><p class="empty">loading…</p></div>
+<div id="toast"></div>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
   <button id="run">analyze</button></h2>
@@ -6526,6 +6555,7 @@ function topics(rows) {
     r => {
       const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
         '<span class="meta tid"></span></div><div class="meta info"></div><div class="bench"></div>' +
+        '<div class="chipsrow agents"></div>' +
         '<form><input placeholder="send a prompt…" autocomplete="off" enterkeyhint="send">' +
         '<button type="submit">send</button></form><div class="ok"></div>');
       c.querySelector('form').addEventListener('submit', ev => send(ev, r.topic, c));
@@ -6537,10 +6567,66 @@ function topics(rows) {
       set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + (r.server ? ' · ' + r.server : ''));
       set(el, '.info', (r.usage || r.mode) + (r.queued ? ' · ' + r.queued + ' queued' : '') +
           (r.held_until ? ' · held until ' + clock(r.held_until) : ''));
-      const bench = Object.entries(r.bench || {}).map(([a, s]) => a + ' (' + s + ')').join(', ');
-      set(el, '.bench', bench ? 'also on this tree: ' + bench : '');
+      set(el, '.bench', '');
+      agentsRow(el.querySelector('.agents'), r);
     });
 }
+
+let AG = null;
+async function agentsInfo() { return AG || (AG = await (await fetch('/api/agents')).json()); }
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', 5000);
+}
+async function act(path, body) {
+  try {
+    const r = await fetch(path, {method: 'POST', headers: {'X-Nightmux': '1', 'Content-Type': 'application/json'},
+                                 body: JSON.stringify(body || {})});
+    return r.ok ? await r.json() : {ok: false, msg: 'HTTP ' + r.status};
+  } catch (e) { return {ok: false, msg: e.message}; }
+}
+// Bench chips: the live agent, the others (tap to make live), + to add one,
+// close. Rebuilt only when the bench changes, so an open <select> survives polls.
+function agentsRow(box, r) {
+  const sig = JSON.stringify([r.agent, Object.keys(r.bench || {}).sort()]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig; box.innerHTML = '';
+  const chip = (txt, cls, fn) => { const b = document.createElement('button'); b.type = 'button';
+    b.className = 'chip ' + cls; b.textContent = txt; if (fn) b.onclick = fn; box.appendChild(b); return b; };
+  if (r.agent) chip('● ' + r.agent, 'live');
+  Object.keys(r.bench || {}).sort().forEach(a => chip('○ ' + a, '', async () => {
+    toast('switching to ' + a + '…'); const o = await act('/api/topic/' + r.topic + '/agent', {agent: a, live: true}); toast(o.msg); tick(); }));
+  const sel = document.createElement('select'); sel.className = 'add';
+  sel.innerHTML = '<option value="">+ agent</option>'; box.appendChild(sel);
+  agentsInfo().then(ag => { const have = new Set([r.agent].concat(Object.keys(r.bench || {})));
+    ag.installed.filter(a => !have.has(a)).forEach(a => { const o = document.createElement('option'); o.value = o.textContent = a; sel.appendChild(o); }); });
+  sel.onchange = async () => { const a = sel.value; if (!a) return; sel.disabled = true; toast('starting ' + a + '…');
+    const o = await act('/api/topic/' + r.topic + '/agent', {agent: a, live: false}); toast(o.msg); sel.disabled = false; box.dataset.sig = ''; tick(); };
+  const c = chip('close', 'close', async () => {
+    if (!confirm('Close topic ' + r.topic + ' (' + r.session + ')?\nIts agents stop and the Telegram topic is closed. The folder and its files are kept.')) return;
+    const o = await act('/api/topic/' + r.topic + '/close', {kill: true}); toast(o.msg); tick(); });
+  c.classList.remove('chip'); c.classList.add('close');
+}
+async function openNew() {
+  const p = $('newp'); p.classList.toggle('open'); if (!p.classList.contains('open')) return;
+  const ag = await agentsInfo(), f = $('newf');
+  f.agent.innerHTML = ag.installed.map(a => '<option>' + esc(a) + '</option>').join('');
+  f.server.innerHTML = ag.servers.map((s, i) => '<option value="' + (i ? esc(s) : '') + '">' + esc(s) + '</option>').join('');
+  $('srvl').style.display = ag.servers.length > 1 ? '' : 'none';
+  const slug = () => (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
+  f.title.oninput = () => { f.folder.placeholder = ag.projects_root + '/' + (slug() || '<name>'); };
+  f.title.oninput(); f.title.focus();
+}
+$('newbtn').onclick = openNew;
+$('newf').onsubmit = async ev => {
+  ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
+  const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
+  b.disabled = true; toast('creating ' + f.title.value + '…');
+  const o = await act('/api/topic/new', {title: f.title.value, name: slug, folder: f.folder.value.trim(),
+                                          agent: f.agent.value, idea: f.idea.value.trim(), server: f.server.value});
+  b.disabled = false; toast(o.msg);
+  if (o.ok) { f.reset(); $('newp').classList.remove('open'); tick(); }
+};
 
 async function send(ev, topic, card) {
   ev.preventDefault();
@@ -7098,6 +7184,97 @@ draw();
 </body></html>"""
 
 
+# ---------- managing topics from the dashboard ----------
+# The dashboard can open a project (a Telegram topic, its folder, an agent in
+# it), put another agent on a topic's bench or make one live, and close a topic
+# (its sessions stop, the Telegram topic is closed, the folder is kept — the UI
+# never deletes files). Each is the same code the chat commands run.
+NAME_OK = re.compile(r"^[\w.-]{1,40}$")
+
+
+def topic_start(cfg, state, lock, topic, name, folder, key, idea=""):
+    """Start `key` as session `name` in `folder`, bound to `topic` — on this
+    machine. With an idea, the !idea brief is queued and its check loop set."""
+    if not NAME_OK.match(name or ""):
+        return False, "name: letters, digits, . _ - only"
+    if key not in agents(cfg):
+        return False, f"no agent '{key}'"
+    root = os.path.expanduser(cfg.get("projects_root") or "~/projects")
+    folder = os.path.expanduser(folder or os.path.join(root, name))
+    if " " in folder or not os.path.isabs(folder):
+        return False, "folder: an absolute path without spaces"
+    fresh = not os.path.exists(folder)
+    os.makedirs(folder, exist_ok=True)
+    if fresh and idea:
+        run("git", "init", "-q", folder)
+    out = start_session(cfg, state, lock, topic, f"{name} {folder}", key)
+    if cfg.get("topics", {}).get(topic) != name:
+        return False, out
+    if idea:
+        state.setdefault(name, {}).setdefault("queue", []).append(IDEA_PROMPT.format(idea=idea))
+        goal_cmd(cfg, lock, topic, "sh ./check.sh")
+    send(cfg, topic, f"🆕 opened from the dashboard: {key} in {folder}"
+         + (f"\n💡 {idea}" if idea else ""), mode="plain")
+    return True, out
+
+
+def topic_new(cfg, state, lock, title, name, folder, key, idea="", server=""):
+    """A new Telegram topic, then its session here or on a peer."""
+    title = (title or name or "").strip()[:128]
+    if not title:
+        return False, "a name is needed"
+    if server and server not in (cfg.get("peers") or {}):
+        return False, f"no server '{server}'"
+    r = api(cfg, "createForumTopic", chat_id=cfg["chat_id"], name=title)
+    topic = str(((r or {}).get("result") or {}).get("message_thread_id") or "")
+    if not topic:
+        return False, ("Telegram refused to create the topic — the bot needs the "
+                       "'Manage topics' admin right: " + str((r or {}).get("description", "")))
+    with lock:
+        cfg.setdefault("topic_names", {})[topic] = title
+        if server:
+            cfg.setdefault("remote", {})[topic] = server
+        save_cfg(cfg)
+    body = {"name": name or slugify(title), "folder": folder, "agent": key, "idea": idea}
+    if server:
+        got = peer_call(cfg, server, f"api/topic/{topic}/start", body)
+        return (bool(got and got.get("ok")),
+                (got or {}).get("msg") or f"{server} did not answer") + (topic,)
+    ok, msg = topic_start(cfg, state, lock, topic, body["name"], folder, key, idea)
+    return ok, msg, topic
+
+
+def topic_agent(cfg, state, lock, topic, key, live):
+    """Put `key` on this topic's bench; live=True also makes it the live one."""
+    if not cfg.get("topics", {}).get(topic):
+        return False, "no session in this topic"
+    if key not in agents(cfg):
+        return False, f"no agent '{key}'"
+    if live:
+        return True, switch_agent(cfg, state, lock, topic, key)
+    sess, note = pair_reviewer(cfg, topic, key)     # started beside, not switched to
+    return bool(sess), note or f"{key} is already on the bench as '{sess}'"
+
+
+def topic_close(cfg, state, lock, topic, kill=True):
+    """Stop the topic's sessions, unbind it, close the Telegram topic. Files stay."""
+    sessions = sorted(set(bench_of(cfg, topic).values()))
+    if kill:
+        for sess in sessions:
+            tmux("kill-session", "-t", sess)
+            state.pop(sess, None)
+    with lock:
+        for k in ("topics", "bench", "started", "goals", "watch", "pair", "route",
+                  "remote", "dirs"):
+            (cfg.get(k) or {}).pop(topic, None)
+        save_cfg(cfg)
+    for d in (_goal, _goal_due, _pair, _loop, _preview):
+        d.pop(topic, None)
+    api(cfg, "closeForumTopic", chat_id=cfg["chat_id"], message_thread_id=topic)
+    return True, (f"closed · stopped {', '.join(sessions)}" if kill and sessions
+                  else "closed") + " · files kept"
+
+
 # ---------- peers: topics served by another machine ----------
 # Telegram lets one process poll a bot. The primary polls and forwards a remote
 # topic's updates, untouched, to the nightmux on the machine that runs it; that
@@ -7219,6 +7396,13 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps(analyze_chats(days)), "application/json")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
+        if self.path == "/api/agents":
+            cfg = self.server.cfg
+            return self.reply(json.dumps({
+                "installed": installed_agents(cfg), "agents": sorted(agents(cfg)),
+                "projects_root": os.path.expanduser(cfg.get("projects_root") or "~/projects"),
+                "servers": [host_name(cfg)] + sorted(cfg.get("peers") or {})}),
+                "application/json")
         if self.path in ("/api/topics", "/api/office"):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
@@ -7274,6 +7458,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             dispatch(cfg, self.server.state, self.server.lock, self.server.allow,
                      upd, NoAcks())
             return self.reply('{"ok": true}', "application/json")
+        if self.path.startswith("/api/topic"):
+            return self.manage(cfg, body)
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
@@ -7309,6 +7495,56 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"Accepted\n")
+
+    def manage(self, cfg, body):
+        """POST /api/topic/new · /api/topic/<id>/{start,agent,close}, JSON in and out.
+
+        Pages from other sites cannot set a custom header without a CORS
+        preflight this server never grants, so X-Nightmux keeps a page you
+        happen to visit from opening sessions on your tailnet dashboard.
+        """
+        if not self.peer and self.headers.get("X-Nightmux") != "1":
+            self.send_response(403)
+            self.end_headers()
+            return
+        try:
+            req = json.loads(body or "{}")
+        except ValueError:
+            req = {}
+        st, lk = self.server.state, self.server.lock
+        parts = self.path.strip("/").split("/")          # api topic <id|new> [verb]
+        try:
+            if parts[2:] == ["new"]:
+                ok, msg, topic = topic_new(cfg, st, lk, req.get("title"), req.get("name"),
+                                           req.get("folder"), req.get("agent"),
+                                           req.get("idea", ""), req.get("server", ""))
+                out = {"ok": ok, "msg": msg, "topic": topic}
+            elif len(parts) == 4:
+                topic, verb = parts[2], parts[3]
+                peer = peer_of(cfg, topic)
+                if peer and not self.peer and verb != "close":
+                    out = peer_call(cfg, peer, f"api/topic/{topic}/{verb}", req) or {
+                        "ok": False, "msg": f"{peer} did not answer"}
+                elif verb == "start":
+                    ok, msg = topic_start(cfg, st, lk, topic, req.get("name"),
+                                          req.get("folder"), req.get("agent"), req.get("idea", ""))
+                    out = {"ok": ok, "msg": msg}
+                elif verb == "agent":
+                    ok, msg = topic_agent(cfg, st, lk, topic, req.get("agent"),
+                                          bool(req.get("live")))
+                    out = {"ok": ok, "msg": msg}
+                elif verb == "close":
+                    if peer and not self.peer:   # its sessions live there; the topic here
+                        peer_call(cfg, peer, f"api/topic/{topic}/close", req)
+                    ok, msg = topic_close(cfg, st, lk, topic, req.get("kill", True))
+                    out = {"ok": ok, "msg": msg}
+                else:
+                    out = {"ok": False, "msg": "unknown action"}
+            else:
+                out = {"ok": False, "msg": "unknown action"}
+        except Exception as e:      # the page shows it; the daemon keeps running
+            out = {"ok": False, "msg": f"error: {e}"}
+        return self.reply(json.dumps(out), "application/json")
 
     def log_message(self, format, *args):
         pass
@@ -8957,6 +9193,40 @@ def selfcheck():
         assert len(lsaid_) == 1                  # cooldown
         _loop.clear()
         shutil.rmtree(lgit_)
+    # Dashboard management: a new project is a Telegram topic + folder + session;
+    # an agent joins the bench without switching; close stops its sessions,
+    # unbinds and closes the Telegram topic, and leaves the files.
+    mcalls_, killed_, up_ = [], [], set()
+
+    def fake_api(c, method, **kw):
+        mcalls_.append((method, kw))
+        return {"ok": True, "result": {"message_thread_id": 321}} if method == "createForumTopic" else {"ok": True}
+    with tempfile.TemporaryDirectory() as mr_, stubbed(
+            api=fake_api, spawn=lambda n, *a: up_.add(n), save_cfg=lambda c: None,
+            has_session=lambda n: n in up_,
+            send=lambda *a, **k: None, tmux=lambda *a: killed_.append(a)):
+        mcfg_, mst_, mlk_ = {"chat_id": -9, "topics": {}, "projects_root": mr_}, {}, threading.Lock()
+        ok_, msg_, t_ = topic_new(mcfg_, mst_, mlk_, "Habit tracker", "habit-tracker", "", "claude",
+                                  idea="streaks")
+        assert ok_ and t_ == "321" and mcfg_["topics"]["321"] == "habit-tracker", msg_
+        assert os.path.isdir(os.path.join(mr_, "habit-tracker", ".git"))
+        assert mcfg_["topic_names"]["321"] == "Habit tracker" and mcfg_["goals"]["321"]
+        assert "streaks" in mst_["habit-tracker"]["queue"][0]
+        assert not topic_start(mcfg_, mst_, mlk_, "9", "bad name", "", "claude")[0]
+        ok_, msg_ = topic_agent(mcfg_, mst_, mlk_, "321", "codex", False)
+        assert ok_ and mcfg_["topics"]["321"] == "habit-tracker" \
+            and mcfg_["bench"]["321"]["codex"] == "habit-tracker-codex", msg_
+        ok_, msg_ = topic_close(mcfg_, mst_, mlk_, "321")
+        assert ok_ and "321" not in mcfg_["topics"] and "321" not in (mcfg_.get("goals") or {})
+        assert {a[2] for a in killed_ if a[0] == "kill-session"} == {"habit-tracker", "habit-tracker-codex"}
+        assert mcalls_[-1][0] == "closeForumTopic" and os.path.isdir(os.path.join(mr_, "habit-tracker"))
+    # ...and a page from another site cannot drive it: no X-Nightmux header, 403.
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port_}/api/topic/new", data=b"{}", method="POST"))
+        assert False, "accepted without the header"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
