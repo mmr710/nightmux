@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Project memory: `.nightmux/memory.md` per project (what it is, how to run/test, decisions, gotchas, in progress), rewritten by the live agent after 6 turns and 15 quiet minutes and read first by every session nightmux starts or switches to; `!memory [update|on|off]`.
+
 - Office: a server strip with status dots, ⚙ dashboard / + project / + server links (deep-linking to the form and the add-server steps), and a banner when a server is not answering. Topics on a peer that is down no longer vanish from the office and dashboard: they show, marked, with where to fix it.
 
 - Dashboard: **+ add server** gives the steps and a one-use, 30-minute `nightmux.py --join <code>` command; the new machine fetches the bot settings and a peer secret over the tailnet, configures itself as a peer and installs the service, and appears in the new **servers** section (status, agents, topics, remove). A **setup** panel lists what is missing on this machine with the fix — the same checks as `--doctor`, which gained bot topic rights, agents, projects folder, tailnet dashboard, gh and Chromium.

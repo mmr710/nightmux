@@ -467,6 +467,17 @@ buttons: 🧠 step back (list hypotheses before editing), 🔀 hand to another
 agent with a summary, ⏸ pause. `!loopguard auto` lets the first one step it
 back by itself; `!loopguard off` disables it.
 
+## Project memory
+
+Each project keeps `.nightmux/memory.md` — what it is, how to run and test
+it, decisions and why, gotchas, what is in progress. After six finished
+turns and 15 quiet minutes the live agent rewrites it (that exchange is not
+posted, just a quiet 🧠), and every session nightmux starts or switches to in
+the topic is told to read it first — so a fresh agent, a failover or a switch
+does not start from zero, and you stop re-explaining. It is kept out of git
+through `.git/info/exclude`. `!memory` shows it, `!memory update` refreshes
+it now, `!memory off` stops it for the topic.
+
 ## Keep going until it passes
 
 `!goal npm test` (or `pytest -q`, `npm run build`, anything with an exit code)

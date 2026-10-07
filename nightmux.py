@@ -2113,10 +2113,12 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
             return
     elif body:
         if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body) \
-                and not pair_review_capture(topic, sess, body):
+                and not pair_review_capture(topic, sess, body) \
+                and not mem_reply_capture(cfg, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
+            mem_capture(cfg, topic, sess)
             pair_capture(cfg, topic, sess, body)
     else:
         return
@@ -2477,6 +2479,7 @@ def watcher(cfg, state, lock):
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
+            mem_tick(cfg, state)
             reel_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
@@ -3321,6 +3324,7 @@ def switch_agent(cfg, state, lock, topic, key):
             cfg.setdefault("bench", {})[str(topic)] = bench
             save_cfg(cfg)
         state.pop(name, None)   # rebaseline: nothing watched this pane meanwhile
+        mem_greet(cfg, state, topic, name, cwd)
         out = "\u2192 %s ('%s')" % (key, name)
     else:
         out = start_session(cfg, state, lock, topic, "%s %s" % (name, cwd), key)
@@ -3390,6 +3394,7 @@ def start_session(cfg, state, lock, topic, arg, key):
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
+    mem_greet(cfg, state, topic, name, cwd)
     return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
             "topic bound").replace("  ", " ")
 
@@ -3551,6 +3556,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
               "!loopguard",  # interrupts or switches the agent
+              "!memory",   # types a prompt
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
@@ -3639,6 +3645,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!memory":
+        return memory_cmd(cfg, state, lock, topic, sess, arg)
     if cmd in ("!issues", "!issue"):
         return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
     if cmd == "!errors":
@@ -3762,6 +3770,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
+                "!memory [update|on|off] = the project's notes (.nightmux/memory.md) "
+                "that every agent reads when it starts here; kept up to date after quiet spells\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -6170,6 +6180,112 @@ GOAL_ROUNDS = 6
 _goal_due = {}    # topic -> session whose turn just ended
 _goal_run = {}    # topic -> {"sess", and "rc"/"out" once the check is done}
 _goal = {}        # topic -> {"rounds", "same", "last", "paused"}: in memory
+
+
+# ---------- project memory ----------
+# Every agent that starts on a project begins from zero, and you re-explain:
+# how to run it, what was decided, what broke. .nightmux/memory.md keeps that.
+# After a few turns and a quiet spell the live agent rewrites it (its reply is
+# swallowed, not posted); every session nightmux starts or switches to here
+# is told to read it first. Kept out of git via .git/info/exclude.
+MEM_REL, MEM_TURNS, MEM_QUIET = os.path.join(".nightmux", "memory.md"), 6, 900
+MEM_UPDATE = (
+    "Update the project memory file .nightmux/memory.md (create it if missing). Every "
+    "agent that starts on this project reads it first, so write for a newcomer:\n"
+    "## What this is (2-3 lines)\n## How to run and test (exact commands)\n"
+    "## Decisions (what was chosen, and why)\n## Gotchas (what broke or surprised)\n"
+    "## In progress / next\n"
+    "Rewrite it rather than appending; under 120 lines; no secrets, tokens or personal "
+    "data. Reply with one line: memory updated.")
+MEM_READ = ("Before anything else, read .nightmux/memory.md — notes left by earlier sessions "
+            "on this project: how to run it, decisions, gotchas, what is in progress. "
+            "Reply with one line: ready.")
+_mem = {}          # topic -> {"turns": n, "wait": session}
+
+
+def mem_on(cfg, topic):
+    return (cfg.get("memory") or {}).get(str(topic)) != "off"
+
+
+def mem_exclude(cwd):
+    """Keep .nightmux/ out of `git status` without touching the repo's .gitignore."""
+    ex = os.path.join(cwd, ".git", "info", "exclude")
+    if os.path.isdir(os.path.dirname(ex)):
+        try:
+            have = open(ex).read() if os.path.exists(ex) else ""
+            if ".nightmux/" not in have.split():
+                with open(ex, "a") as f:
+                    f.write(("\n" if have and not have.endswith("\n") else "") + ".nightmux/\n")
+        except OSError:
+            pass
+
+
+def mem_greet(cfg, state, topic, sess, cwd):
+    if cwd and mem_on(cfg, topic) and os.path.exists(os.path.join(cwd, MEM_REL)):
+        state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+
+
+def mem_capture(cfg, topic, sess):
+    if mem_on(cfg, topic) and sess == cfg.get("topics", {}).get(topic):
+        m = _mem.setdefault(topic, {"turns": 0})
+        if not m.get("wait"):
+            m["turns"] += 1
+
+
+def mem_reply_capture(cfg, topic, sess, body):
+    m = _mem.get(topic)
+    if not m or m.get("wait") != sess:
+        return False
+    m.pop("wait")
+    send(cfg, topic, "🧠 project memory updated", mode="plain", quiet=True)
+    return True
+
+
+def mem_ask(cfg, state, topic, sess):
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    if cwd:
+        os.makedirs(os.path.join(cwd, ".nightmux"), exist_ok=True)
+        mem_exclude(cwd)
+    _mem[topic] = {"turns": 0, "wait": sess}
+    state.setdefault(sess, {}).setdefault("queue", []).append(MEM_UPDATE)
+
+
+def mem_tick(cfg, state):
+    now = time.time()
+    for topic, m in list(_mem.items()):
+        sess = cfg.get("topics", {}).get(topic)
+        st = state.get(sess) or {}
+        if (not sess or m.get("wait") or m["turns"] < MEM_TURNS or not mem_on(cfg, topic)
+                or st.get("mode") != "idle" or st.get("queue")
+                or now - st.get("changed", now) < MEM_QUIET
+                or topic in _goal_run or (_pair.get(topic) or {}).get("wait")):
+            continue
+        mem_ask(cfg, state, topic, sess)
+
+
+def memory_cmd(cfg, state, lock, topic, sess, arg):
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    if arg in ("on", "off"):
+        with lock:
+            mm = cfg.setdefault("memory", {})
+            if arg == "off":
+                mm[str(topic)] = "off"
+            else:
+                mm.pop(str(topic), None)
+            save_cfg(cfg)
+        return f"🧠 project memory {arg}"
+    if arg == "update":
+        if not sess:
+            return "no session here"
+        mem_ask(cfg, state, topic, sess)
+        return f"🧠 asked {sess} to update .nightmux/memory.md"
+    path = os.path.join(cwd or "", MEM_REL)
+    if not cwd or not os.path.exists(path):
+        return ("🧠 no project memory yet — it is written after a few turns and a quiet "
+                "spell, or now with !memory update" + ("" if mem_on(cfg, topic) else " (off here)"))
+    with open(path, errors="replace") as f:
+        text = f.read()
+    return f"🧠 {path}{'' if mem_on(cfg, topic) else ' (updates off)'}\n\n{text[-3500:]}"
 
 
 def goal_capture(cfg, topic, sess):
@@ -10632,6 +10748,32 @@ def selfcheck():
                                   "server": "vps2", "offline": True}], off_
         assert off_["servers"] == [{"name": "me", "ok": True}, {"name": "vps2", "ok": False}]
         assert with_peers(dcfg_, "/api/topics", [])[0]["unreachable"]
+    # Project memory: enough turns and a quiet spell ask the agent to rewrite the
+    # notes; its reply is swallowed; a session started where notes exist reads them.
+    msaid_ = []
+    with tempfile.TemporaryDirectory() as md_, stubbed(
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: msaid_.append(x),
+            save_cfg=lambda c: None):
+        os.makedirs(os.path.join(md_, ".git", "info"))
+        mcfg2_, mst2_ = {"topics": {"3": "m"}, "dirs": {"3": md_}}, {"m": {"mode": "idle", "changed": 0}}
+        _mem.clear()
+        for _ in range(MEM_TURNS):
+            mem_capture(mcfg2_, "3", "m")
+        mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [MEM_UPDATE] and _mem["3"]["wait"] == "m"
+        assert ".nightmux/" in open(os.path.join(md_, ".git", "info", "exclude")).read()
+        assert mem_reply_capture(mcfg2_, "3", "m", "memory updated") and "updated" in msaid_[-1]
+        assert not mem_reply_capture(mcfg2_, "3", "m", "a normal answer")
+        st3_ = {}
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)
+        assert not st3_                                       # no notes yet: nothing to read
+        open(os.path.join(md_, MEM_REL), "w").write("## What this is\nx")
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)
+        assert st3_["m2"]["queue"] == [MEM_READ]
+        mcfg2_["memory"] = {"3": "off"}
+        mem_capture(mcfg2_, "3", "m")
+        assert _mem["3"]["turns"] == 0
+        _mem.clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
