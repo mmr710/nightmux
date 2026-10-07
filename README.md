@@ -341,6 +341,17 @@ own gh account are skipped so an agent replying on the PR never feeds itself.
 When every check is green you get one 🟢 with a **merge** button. Merged or
 closed ends the watch.
 
+## Give the agent a browser
+
+`!tools add browser` registers Playwright's MCP server with the topic's
+live agent through its own CLI (`claude mcp add -s local` — this project
+only — or `codex` / `agy` / `opencode mcp add`); `!tools add browser all`
+does every agent on the bench. Tap **restart** (or `!tools restart`) so the
+agent loads it, and it is told to use it: open the running app, click
+through what it changed, read the console, before it says done. Headless,
+sandbox-off for servers, and it reuses the Chromium nightmux already found
+(Playwright's, or `"browser"` in the config). `!tools rm browser` removes it.
+
 ## See it on your phone
 
 `!preview` finds the dev server the agent started (from the session's own

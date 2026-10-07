@@ -3546,6 +3546,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!loopguard",  # interrupts or switches the agent
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
+              "!tools",    # changes agent config, restarts the agent
               "!watch")    # can merge a pull request
 
 
@@ -3627,6 +3628,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!tools":
+        return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
         return route_cmd(cfg, lock, topic, arg)
     if cmd == "!reel":
@@ -3727,6 +3730,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "this one makes; real issues go back to the coder, LGTM stays quiet\n"
                 "!loopguard [ping|auto|off] = notice an agent going in circles (same "
                 "error, same file churned, apologies) and ping you, or step it back\n"
+                "!tools [add|rm browser [all] | restart] = give the agent a headless "
+                "browser it drives itself (Playwright MCP)\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -5323,6 +5328,100 @@ def loopguard_cmd(cfg, state, lock, topic, sess, arg):
         return out
     return (f"🌀 loop guard: {cfg.get('loopguard', 'ping')}\n!loopguard ping|auto|off — "
             "auto first tells the agent to step back on its own")
+
+
+# ---------- !tools: give the agent tools (MCP servers) ----------
+# Agents write UI they never see. `!tools add browser` registers Playwright's
+# MCP server with the topic's agent through that agent's own `mcp add` — Claude
+# Code at local scope (this project only), the others in their own config — so
+# it can open the running app, click through it and read its console itself.
+TOOLS = {
+    "browser": {"server": "playwright",
+                "about": "a headless browser it drives itself: open the app, click, "
+                         "type, read console errors, take screenshots",
+                "hint": "You now have a browser (Playwright MCP tools). After UI changes, "
+                        "open the running app with it, click through what you changed and "
+                        "check the console before saying it is done."},
+}
+
+
+def tool_cmd(cfg, tool):
+    if tool == "browser":
+        b = browser_bin(cfg)
+        return (["npx", "-y", "@playwright/mcp@latest", "--headless", "--isolated",
+                 "--no-sandbox", "--output-dir", os.path.join(FILE_DIR, "playwright")]
+                + (["--executable-path", b] if b else []))
+    return None
+
+
+def mcp_argv(key, verb, name, cmd=()):
+    """The agent CLI's own command to add/remove an MCP server, or None."""
+    scope = ["-s", "local"] if key == "claude" else []
+    if verb == "remove":
+        return [key, "mcp", "remove"] + scope + [name] if key in ("claude", "codex", "agy") else None
+    sep = [] if key == "agy" else ["--"]          # agy takes the command positionally
+    return [key, "mcp", "add"] + scope + [name] + sep + list(cmd) \
+        if key in ("claude", "codex", "opencode", "agy") else None
+
+
+def tools_cmd(cfg, state, lock, topic, sess, arg):
+    words = arg.split()
+    verb, tool = (words + ["", ""])[:2]
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    on = (cfg.get("tools") or {}).get(topic) or []
+    if verb == "restart":
+        live = cfg.get("topics", {}).get(topic)
+        if not live:
+            return "no session here"
+        tmux("kill-session", "-t", live)
+        state.pop(live, None)
+        return "🔄 " + resume_session(cfg, state, lock, topic)
+    if verb not in ("add", "rm") or tool not in TOOLS:
+        return ("🧰 tools: " + "; ".join(f"{k}{' ✓' if k in on else ''} — {v['about']}"
+                                        for k, v in TOOLS.items())
+                + "\n!tools add browser [all] · !tools rm browser · !tools restart")
+    if not sess or not cwd:
+        return "bind a session with a folder here first"
+    live_key = (cfg.get("started") or {}).get(topic)
+    keys = sorted(bench_of(cfg, topic)) if "all" in words[2:] else [live_key]
+    name, out = TOOLS[tool]["server"], []
+    for key in keys:
+        if key == "opencode" and verb == "rm":     # no `opencode mcp remove`: edit its file
+            oc = os.path.join(cwd, "opencode.json")
+            try:
+                with open(oc) as f:
+                    conf = json.load(f)
+                (conf.get("mcp") or {}).pop(name, None)
+                with open(oc, "w") as f:
+                    json.dump(conf, f, indent=2)
+                out.append("opencode: ✓")
+            except (OSError, ValueError) as e:
+                out.append(f"opencode: ✗ {e}")
+            continue
+        argv = mcp_argv(key, "add" if verb == "add" else "remove", name, tool_cmd(cfg, tool))
+        if not argv:
+            out.append(f"{key}: no MCP support known")
+            continue
+        try:
+            p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=90,
+                               stdin=subprocess.DEVNULL)
+            ok = p.returncode == 0
+            out.append(f"{key}: {'✓' if ok else '✗ ' + (p.stderr or p.stdout).strip()[-200:]}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out.append(f"{key}: ✗ {e}")
+    with lock:
+        tl = cfg.setdefault("tools", {}).setdefault(topic, [])
+        if verb == "add" and tool not in tl:
+            tl.append(tool)
+        elif verb == "rm" and tool in tl:
+            tl.remove(tool)
+        save_cfg(cfg)
+    if verb == "add":
+        state.setdefault(sess, {}).setdefault("queue", []).append(TOOLS[tool]["hint"])
+    send(cfg, topic, f"🧰 {tool} {'added' if verb == 'add' else 'removed'}:\n" + "\n".join(out)
+         + "\nAgents load tools when they start.", mode="plain",
+         buttons=kb([[(f"🔄 restart {live_key} now", "!tools restart")]]))
+    return None
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -9271,6 +9370,32 @@ def selfcheck():
         parts_ = env_["PATH"].split(os.pathsep)
         assert parts_[0] == "/usr/bin" and os.path.join(hp_, ".local", "bin") in parts_
         assert len(parts_) == len(set(parts_)), parts_
+    # !tools: each agent's own `mcp add`, project-local for Claude; opencode's
+    # missing remove edits its project file; the agent is told it has the tool.
+    assert mcp_argv("claude", "add", "pw", ["npx", "x"]) == \
+        ["claude", "mcp", "add", "-s", "local", "pw", "--", "npx", "x"]
+    assert mcp_argv("agy", "add", "pw", ["npx", "x"]) == ["agy", "mcp", "add", "pw", "npx", "x"]
+    assert mcp_argv("opencode", "remove", "pw") is None and mcp_argv("aider", "add", "pw") is None
+    assert "--no-sandbox" in tool_cmd({}, "browser")
+    ran_ = []
+    with tempfile.TemporaryDirectory() as td_, stubbed(
+            save_cfg=lambda c: None, send=lambda *a, **k: None,
+            subprocess=type("S", (), {"run": staticmethod(lambda a, **k: ran_.append(a) or
+                                       type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+                                       "DEVNULL": subprocess.DEVNULL,
+                                       "TimeoutExpired": subprocess.TimeoutExpired})):
+        tc_ = {"topics": {"5": "t"}, "dirs": {"5": td_}, "started": {"5": "claude"},
+               "bench": {"5": {"claude": "t", "opencode": "t-oc"}}}
+        tst_ = {}
+        tools_cmd(tc_, tst_, threading.Lock(), "5", "t", "add browser all")
+        assert [a[0] for a in ran_] == ["claude", "opencode"] and tc_["tools"]["5"] == ["browser"]
+        assert "browser" in tst_["t"]["queue"][0]
+        with open(os.path.join(td_, "opencode.json"), "w") as f:
+            json.dump({"mcp": {"playwright": {}, "other": {}}}, f)
+        tools_cmd(tc_, tst_, threading.Lock(), "5", "t", "rm browser all")
+        with open(os.path.join(td_, "opencode.json")) as f:
+            assert json.load(f)["mcp"] == {"other": {}}
+        assert ran_[-1][:3] == ["claude", "mcp", "remove"] and tc_["tools"]["5"] == []
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
