@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Loop guard: two independent signs of an agent circling (same error 3×, one file churned while the diff stays flat, repeated apologies, `!goal` failing the same way) ping the topic with step back / hand to another agent / pause buttons; `!loopguard auto|ping|off`.
+
 - `!idea [@agent] <what to build>` in a fresh topic: a new folder under
   `projects_root` (never reusing one), `git init`, the agent started with a
   spec → MVP → `./check.sh` prompt queued, and `!goal sh ./check.sh` on.

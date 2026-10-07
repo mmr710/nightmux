@@ -2079,6 +2079,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         if not consult_capture(topic, sess, body) and not plan_capture(cfg, state, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
             goal_capture(cfg, topic, sess)
+            loop_capture(cfg, topic, sess, body)
     else:
         return
     if st.get("react"):
@@ -2436,6 +2437,7 @@ def watcher(cfg, state, lock):
             failover_tick(cfg, state, lock)
             goal_tick(cfg, state)
             watch_tick(cfg, state, lock)
+            loop_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3508,6 +3510,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
+              "!loopguard",  # interrupts or switches the agent
               "!watch")    # can merge a pull request
 
 
@@ -3589,6 +3592,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!loopguard":
+        return loopguard_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!p":
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
@@ -3673,6 +3678,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
                 "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
                 "spec, explain, tidy, ship); !p save <name> <text>\n"
+                "!loopguard [ping|auto|off] = notice an agent going in circles (same "
+                "error, same file churned, apologies) and ping you, or step it back\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
                 "turn and send failures back until it passes\n"
                 "!server [peer|local] = which machine this topic runs on; move it "
@@ -4467,6 +4474,10 @@ PROMPTS = {
                "if it changed. Short, with file:line references.",
     "tidy": "Simplify only what you changed this session: remove dead code and "
             "duplication, keep behaviour identical, keep tests green. {{args}}",
+    "step-back": "Stop. You have been circling: the same failure keeps coming back. "
+                 "Do not edit anything yet. List 3 genuinely different hypotheses for "
+                 "the root cause, what evidence would confirm each, and test the "
+                 "cheapest one first. Then fix only what the evidence points to.",
     "ship": "Get this ready to merge: run tests and lint and fix what fails, update "
             "README/CHANGELOG if behaviour changed, commit with a clear message, push, "
             "and open a pull request. {{args}}",
@@ -4569,6 +4580,125 @@ def idea_cmd(cfg, state, lock, topic, arg):
     return (f"💡 {name}: {cwd}\n{key} is starting with the spec → build → check prompt "
             "queued.\n🎯 goal: sh ./check.sh after every turn — failures go back until "
             "green.\n!preview once it serves something · !goal off to stop the loop")
+
+
+# ---------- loop guard: notice an agent going in circles ----------
+# Left alone — and !goal / !watch leave it alone for hours — an agent can burn a
+# whole usage window re-applying one fix. Every finished turn leaves a few cheap
+# readings; two independent signs of circling in the recent turns is a loop.
+# "ping" (default) asks you; "auto" first tells the agent to step back itself.
+LOOP_WINDOW, LOOP_TURNS, LOOP_COOL = 2400, 8, 1200
+ERR_LINE = re.compile(r"(?:\b(?:Error|Exception|FAILED|FAIL|Traceback|panic)\b|error:"
+                      r"|AssertionError|not found|undefined|cannot )")
+SORRY = re.compile(r"I apologi[sz]e|let me try (?:a different|another) approach|you'?re right,"
+                   r"|still (?:failing|not working|broken)|same (?:error|issue) (?:again|persists)",
+                   re.I)
+_loop_due = {}    # topic -> (session, the turn's answer text)
+_loop = {}        # topic -> {"turns": [...], "fired": n, "at": t}
+
+
+def loop_capture(cfg, topic, sess, body):
+    if cfg.get("loopguard", "ping") != "off":
+        _loop_due[topic] = (sess, body or "")
+
+
+def numstat(cwd):
+    """{path: lines changed} against HEAD — what the agent has touched so far."""
+    out = {}
+    for line in run("git", "-C", cwd or ".", "diff", "--numstat", "HEAD").splitlines():
+        f = line.split("\t")
+        if len(f) == 3 and f[0].isdigit() and f[1].isdigit():
+            out[f[2]] = int(f[0]) + int(f[1])
+    return out
+
+
+def loop_signals(turns, goal_same=0):
+    """Why these turns look like circling — [] when they do not."""
+    why, recent = [], turns[-LOOP_TURNS:]
+    errs = {}
+    for t in recent:
+        for e in t["errs"]:
+            errs[e] = errs.get(e, 0) + 1
+    worst = max(errs.items(), key=lambda kv: kv[1], default=(None, 0))
+    if worst[1] >= 3:
+        why.append(f"the same error in {worst[1]} turns: {worst[0][:80]}")
+    touched = {}
+    for prev, t in zip(recent, recent[1:]):
+        for f, n in t["files"].items():
+            if prev["files"].get(f) != n:
+                touched[f] = touched.get(f, 0) + 1
+    if touched and len(recent) >= 5:
+        f, n = max(touched.items(), key=lambda kv: kv[1])
+        grew = recent[-1]["size"] - recent[0]["size"]
+        if n >= 4 and grew < 30:
+            why.append(f"{f} edited in {n} turns while the diff grew {grew:+d} lines")
+    if sum(t["sorry"] for t in recent[-4:]) >= 3:
+        why.append("it keeps apologising / retrying the same approach")
+    if goal_same >= 2:
+        why.append(f"the !goal check fails the same way {goal_same}× in a row")
+    return why
+
+
+def loop_tick(cfg, state, lock):
+    now = time.time()
+    for topic, (sess, body) in list(_loop_due.items()):
+        _loop_due.pop(topic, None)
+        cwd = (cfg.get("dirs") or {}).get(topic)
+        files = numstat(cwd) if cwd and os.path.isdir(os.path.join(cwd, ".git")) else {}
+        lp = _loop.setdefault(topic, {"turns": [], "fired": 0, "at": 0})
+        errs = {re.sub(r"\d+", "#", l.strip())[:120]
+                for l in body.split("\n") if ERR_LINE.search(l)}
+        lp["turns"] = [t for t in lp["turns"] if now - t["t"] < LOOP_WINDOW][-LOOP_TURNS:] + [
+            {"t": now, "errs": set(sorted(errs)[:5]), "sorry": len(SORRY.findall(body)),
+             "files": files, "size": sum(files.values())}]
+        why = loop_signals(lp["turns"], (_goal.get(topic) or {}).get("same", 0))
+        if len(why) < 2 or now - lp["at"] < LOOP_COOL:
+            continue
+        lp["at"], lp["fired"] = now, lp["fired"] + 1
+        auto = cfg.get("loopguard") == "auto" and lp["fired"] == 1
+        if auto:
+            state.setdefault(sess, {}).setdefault("queue", []).append(prompts(cfg)["step-back"])
+        cur = (cfg.get("started") or {}).get(topic)
+        other = next((k for k in list(bench_of(cfg, topic)) + ["codex", "claude", "agy", "opencode"]
+                      if k != cur and k in agents(cfg)), None)
+        rows = [[("🧠 step back", "!p step-back")]] + (
+            [[(f"🔀 hand to {other}", f"!loopguard hand {other}")]] if other else []) + [
+            [("⏸ pause", "!loopguard pause"), ("ignore", "!cancel")]]
+        send(cfg, topic, f"🌀 {sess} looks stuck:\n• " + "\n• ".join(why)
+             + ("\n\n→ told it to step back and list hypotheses first" if auto else ""),
+             mode="plain", buttons=kb(rows))
+
+
+def loopguard_cmd(cfg, state, lock, topic, sess, arg):
+    if arg in ("ping", "auto", "off"):
+        with lock:
+            cfg["loopguard"] = arg
+            save_cfg(cfg)
+        return f"🌀 loop guard: {arg}"
+    if arg == "pause":
+        if not sess:
+            return "no session here"
+        st = state.setdefault(sess, {})
+        n = len(st.get("queue") or [])
+        st["queue"] = []
+        if topic in _goal:
+            _goal[topic]["paused"] = True
+        tmux("send-keys", "-t", tgt(sess), "Escape")
+        return f"⏸ interrupted {sess}, dropped {n} queued, goal paused · your next message resumes"
+    m = re.match(r"hand (\S+)$", arg)
+    if m and sess:
+        why = loop_signals((_loop.get(topic) or {}).get("turns") or [])
+        out = switch_agent(cfg, state, lock, topic, m.group(1))
+        new = cfg.get("topics", {}).get(topic)
+        if new and new != sess:
+            state.setdefault(new, {}).setdefault("queue", []).append(
+                "Another agent got stuck on the current task in this folder"
+                + (": " + "; ".join(why) if why else "") + ". Read `git diff` and "
+                "`git log -5` to see where it is, find the real cause, and finish the task. "
+                "Do not repeat its approach.")
+        return out
+    return (f"🌀 loop guard: {cfg.get('loopguard', 'ping')}\n!loopguard ping|auto|off — "
+            "auto first tells the agent to step back on its own")
 
 
 # ---------- !goal: keep going until a check passes ----------
@@ -4696,6 +4826,7 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
     st = state.setdefault(sess, {})
     if topic in _goal:       # you stepped in: the fix-round budget starts over
         _goal[topic] = {"rounds": 0, "same": 0}
+    _loop.pop(topic, None)   # ...and whatever looked like a loop was before you
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -8089,6 +8220,34 @@ def selfcheck():
         assert icfg_["goals"]["12"]["cmd"] == "sh ./check.sh"
         assert "already runs" in idea_cmd(icfg_, ist_, threading.Lock(), "12", "more")
         icfg_["goals"].clear()
+    # Loop guard: two independent signs of circling ping once, with a cooldown;
+    # one sign alone (a long refactor of one file) does not.
+    lsaid_ = []
+    with stubbed(numstat=lambda cwd: dict(lfiles_), save_cfg=lambda c: None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: lsaid_.append((x, buttons))):
+        lgit_ = tempfile.mkdtemp()
+        os.makedirs(os.path.join(lgit_, ".git"))
+        lcfg_, lst_ = {"topics": {"6": "l"}, "dirs": {"6": lgit_}, "started": {"6": "claude"},
+                       "loopguard": "auto"}, {"l": {}}
+        _loop.clear()
+        lfiles_ = {"a.py": 10}
+        for i_ in range(5):                      # one file churned, diff flat: one sign
+            lfiles_["a.py"] = 10 + (i_ % 2)
+            loop_capture(lcfg_, "6", "l", "refactored a.py")
+            loop_tick(lcfg_, lst_, threading.Lock())
+        assert not lsaid_
+        for i_ in range(3):                      # plus the same error every turn: two
+            lfiles_["a.py"] = 10 + (i_ % 2) + 2
+            loop_capture(lcfg_, "6", "l", f"Ran tests\nE   AssertionError: got {i_}")
+            loop_tick(lcfg_, lst_, threading.Lock())
+        assert len(lsaid_) == 1 and "looks stuck" in lsaid_[0][0], lsaid_
+        assert "same error" in lsaid_[0][0] and "a.py edited" in lsaid_[0][0], lsaid_[0][0]
+        assert "circling" in lst_["l"]["queue"][0] and "hand to codex" in lsaid_[0][1]
+        loop_capture(lcfg_, "6", "l", "E   AssertionError: got 9")
+        loop_tick(lcfg_, lst_, threading.Lock())
+        assert len(lsaid_) == 1                  # cooldown
+        _loop.clear()
+        shutil.rmtree(lgit_)
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24

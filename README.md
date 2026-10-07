@@ -351,6 +351,17 @@ interfaces is linked on your tailnet directly; one on `127.0.0.1` gets a
 URL) — uses Playwright's Chromium if present, else the system's, or
 `"browser"` in the config.
 
+## When an agent goes in circles
+
+Every finished turn leaves a few cheap readings: error lines, which files
+changed against HEAD, apologies. Two independent signs of circling in the
+recent turns — the same error 3×, one file edited 4+ turns while the diff
+does not grow, repeated "I apologize / let me try another approach", the
+`!goal` check failing the same way — and you get **🌀 looks stuck** with
+buttons: 🧠 step back (list hypotheses before editing), 🔀 hand to another
+agent with a summary, ⏸ pause. `!loopguard auto` lets the first one step it
+back by itself; `!loopguard off` disables it.
+
 ## Keep going until it passes
 
 `!goal npm test` (or `pytest -q`, `npm run build`, anything with an exit code)
