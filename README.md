@@ -538,6 +538,15 @@ with the command that fixes it (the same checks as `nightmux --doctor`).
 
 ## The dashboard
 
+**💬 on every topic card** opens that topic as a chat: your messages, the
+agents' answers, their menus as buttons that work, a box to type in, and a
+"working…" line while the agent is busy. It reads new messages only, so the
+page never jumps. Add the dashboard to your phone's home screen and it opens
+like an app; 🔔 turns on notifications while it is open (closed-app push stays
+Telegram's job). The chat keeps the last 300 messages per topic in memory —
+Telegram keeps the full record.
+
+
 **+ new project** opens a form: a name, an agent, a folder (defaults to
 `projects_root/<name>`), a server when you have peers, and an optional idea.
 It creates the Telegram topic, the folder and the session — with an idea, the

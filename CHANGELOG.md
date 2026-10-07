@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Dashboard: **💬** on each topic opens it as a live chat — messages both ways, working menu buttons, a composer, a working indicator, in-page notifications — at `/chat?t=<topic>`, peers included; the dashboard is installable as an app (manifest, service worker, icon).
+
 - `!deps`: known vulnerabilities (npm audit, pip-audit, govulncheck) worst first and packages a major version behind, with an **upgrade with agent** button; `!deps nightly HH:MM` checks every night and reports only findings.
 
 - Limit forecast: usage windows are sampled every minute; when one will fill before it resets (within 90 min) at the last hour's pace, topics working on that agent get one ⏳ warning with a switch button; `!forecast`, and the dashboard limit cards show the projected time.
