@@ -351,6 +351,15 @@ interfaces is linked on your tailnet directly; one on `127.0.0.1` gets a
 URL) — uses Playwright's Chromium if present, else the system's, or
 `"browser"` in the config.
 
+## The night, as a GIF
+
+nightmux records the office's desks once a minute (only when something
+changes). `!reel` (last 12h; `!reel 8` for 8) replays the busiest room as a
+GIF — drawn by the office page itself in headless Chromium, stitched by a
+small stdlib GIF encoder — captioned with what happened ("claude hits its
+limit, codex gets to work") and each project's commits and lines changed.
+`!reel daily 07:30` sends it every morning; `!reel off` stops that.
+
 ## A second pair of eyes
 
 `!pair codex` in a Claude topic (any two agents): after every turn that
