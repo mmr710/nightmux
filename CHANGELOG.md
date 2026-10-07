@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!tools add browser [all]`: registers Playwright's MCP server with the topic's agent(s) via each CLI's own `mcp add` (Claude Code at local scope), tells the agent to verify UI changes with it, and offers a restart to load it; `!tools rm browser`, `!tools restart`.
+
 - Dashboard: **+ new project** creates the Telegram topic, folder and session (optionally with an idea brief and check loop, on a peer if chosen); topic cards gain agent chips (tap to make live), **+ agent** and **close** (stops agents, unbinds, closes the Telegram topic, keeps files).
 
 - `!route auto|off`: a prompt that starts a new task is classed light/normal/heavy and the topic switches to the best live bench agent for that class; mid-task prompts never move; `!goal` green/stuck results adjust per-class scores.
