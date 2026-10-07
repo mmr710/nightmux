@@ -1212,9 +1212,9 @@ def widen_path(env=None):
         shell = p.stdout.strip().splitlines()[-1].split(os.pathsep) if p.stdout.strip() else []
     except (OSError, subprocess.TimeoutExpired):
         shell = []
-    extra = [d for d in shell + [os.path.expanduser(b) for b in USER_BINS]
-             if d and d not in have and os.path.isdir(d)]
-    env["PATH"] = os.pathsep.join(have + list(dict.fromkeys(extra)))
+    extra = list(dict.fromkeys(d for d in shell + [os.path.expanduser(b) for b in USER_BINS]
+                               if d and d not in have and os.path.isdir(d)))
+    env["PATH"] = os.pathsep.join(have + extra)
     return extra
 
 
@@ -3547,6 +3547,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
               "!tools",    # changes agent config, restarts the agent
+              "!issues", "!issue",   # sets the agent to work on an issue
               "!watch")    # can merge a pull request
 
 
@@ -3628,6 +3629,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd in ("!issues", "!issue"):
+        return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
     if cmd == "!tools":
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
@@ -3730,6 +3733,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "this one makes; real issues go back to the coder, LGTM stays quiet\n"
                 "!loopguard [ping|auto|off] = notice an agent going in circles (same "
                 "error, same file churned, apologies) and ping you, or step it back\n"
+                "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
+                "one and the agent branches, fixes, opens a PR that nightmux watches\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
@@ -4460,8 +4465,13 @@ def pr_events(cwd, pr, seen):
     return ev
 
 
-def watch_poll(cwd, pr, seen, out):
+def watch_poll(cwd, pr, seen, out, branch=None):
     try:
+        if not pr:     # an issue in progress: has the agent opened its PR yet?
+            got = json.loads(gh(cwd, "pr", "list", "--head", branch, "--state", "all",
+                                "--json", "number", "-L", "1"))
+            out["found"] = got[0]["number"] if got else 0
+            return
         out["events"] = pr_events(cwd, pr, seen)
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
         out["err"] = str(e)
@@ -4476,7 +4486,9 @@ def watch_tick(cfg, state, lock):
         run = _watch_run[topic] = {}
         cwd = (cfg.get("dirs") or {}).get(topic)
         threading.Thread(target=watch_poll, daemon=True,
-                         args=(cwd, w["pr"], set(w.get("seen") or []), run)).start()
+                         args=(cwd, w.get("pr"), set(w.get("seen") or []), run,
+                               w.get("branch"))).start()
+    issues_tick(cfg, state, lock, now)
     for topic, run in list(_watch_run.items()):
         if not run:
             continue
@@ -4484,9 +4496,19 @@ def watch_tick(cfg, state, lock):
         w, sess = watches.get(topic), cfg.get("topics", {}).get(topic)
         if not w:
             continue
+        if "found" in run:
+            if run["found"]:
+                with lock:
+                    w["pr"] = run["found"]
+                    save_cfg(cfg)
+                _watch_at.pop(topic, None)
+                send(cfg, topic, f"👁 PR #{w['pr']} opened for issue #{w.get('issue')} — "
+                     "watching its CI and reviews", mode="plain")
+            continue
         if "err" in run:
             if not w.get("err"):
-                send(cfg, topic, f"👁 PR #{w['pr']}: gh failed — {run['err']}", mode="plain")
+                send(cfg, topic, f"👁 PR #{w.get('pr') or '?'}: gh failed — {run['err']}",
+                     mode="plain")
             w["err"] = run["err"]
             continue
         w.pop("err", None)
@@ -4531,7 +4553,7 @@ def watch_cmd(cfg, lock, topic, arg):
             save_cfg(cfg)
         return "stopped watching" if w else "nothing watched here"
     if arg == "merge":
-        if not w:
+        if not w or not w.get("pr"):
             return "no PR watched here"
         try:
             out = gh(cwd, "pr", "merge", str(w["pr"]), "--merge", timeout=120)
@@ -4540,7 +4562,9 @@ def watch_cmd(cfg, lock, topic, arg):
         return f"✅ merged PR #{w['pr']}\n{out.strip()[-500:]}"
     m = re.match(r"pr(?:\s+#?(\d+))?$", arg)
     if not m:
-        return (f"👁 watching PR #{w['pr']}" if w else "nothing watched here") + \
+        return ((f"👁 watching PR #{w['pr']}" if w.get("pr") else
+                 f"👁 waiting for the PR of issue #{w.get('issue')} (branch {w.get('branch')})")
+                if w else "nothing watched here") + \
             "\n!watch pr [n] — no n: this branch's PR · !watch off · !watch merge"
     pr = m.group(1)
     if not pr:
@@ -5421,6 +5445,122 @@ def tools_cmd(cfg, state, lock, topic, sess, arg):
     send(cfg, topic, f"🧰 {tool} {'added' if verb == 'add' else 'removed'}:\n" + "\n".join(out)
          + "\nAgents load tools when they start.", mode="plain",
          buttons=kb([[(f"🔄 restart {live_key} now", "!tools restart")]]))
+    return None
+
+
+# ---------- !issues: GitHub issues become pull requests ----------
+# Tap an open issue (or label it and let the night pick it up): the agent gets
+# the issue, a branch name and the PR recipe; nightmux watches for that branch's
+# PR and from then on !watch feeds it CI failures and review comments.
+ISSUE_EVERY, ISSUE_LABEL = 900, "nightmux"
+ISSUE_PROMPT = (
+    "Work on GitHub issue #{n}: {title}\n{url}\n\n{body}\n{comments}\n"
+    "Steps:\n1. `git fetch`, then create branch `{branch}` from the default branch.\n"
+    "2. Fix it, with a test that fails before your change and passes after.\n"
+    "3. Commit, push, and open a pull request with `gh pr create`; end its body with "
+    "`Fixes #{n}`.\nnightmux watches that PR and sends you CI failures and review comments.")
+_issue_run, _issue_at = {}, {}
+
+
+def issue_prompt(issue):
+    n, title = issue["number"], issue.get("title") or ""
+    talk = "".join(f"\n@{(c.get('author') or {}).get('login')}: {c.get('body', '')[:800]}"
+                   for c in (issue.get("comments") or [])[-5:])
+    branch = f"issue-{n}-{slugify(title, 5)}"
+    return branch, ISSUE_PROMPT.format(
+        n=n, title=title, url=issue.get("url", ""), branch=branch,
+        body=redact(issue.get("body") or "(no description)")[:3000],
+        comments=("\nComments:" + redact(talk) + "\n") if talk else "")
+
+
+def issue_begin(cfg, state, lock, topic, sess, issue):
+    branch, prompt = issue_prompt(issue)
+    state.setdefault(sess, {}).setdefault("queue", []).append(prompt)
+    with lock:
+        cfg.setdefault("watch", {})[topic] = {"branch": branch, "issue": issue["number"]}
+        done = cfg.setdefault("issues_done", {}).setdefault(topic, [])
+        if issue["number"] not in done:
+            done.append(issue["number"])
+        save_cfg(cfg)
+    _watch_at.pop(topic, None)
+    return (f"🎫 #{issue['number']} {issue.get('title', '')} → {sess} on `{branch}`; "
+            "watching for its PR")
+
+
+def issues_poll(cwd, label, done, out):
+    try:
+        got = json.loads(gh(cwd, "issue", "list", "--state", "open", "--label", label,
+                            "--json", "number", "-L", "50"))
+        todo = sorted(i["number"] for i in got if i["number"] not in done)
+        out["issue"] = json.loads(gh(cwd, "issue", "view", str(todo[0]), "--json",
+                                     "number,title,body,comments,url")) if todo else None
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        out["err"] = str(e)
+
+
+def issues_tick(cfg, state, lock, now):
+    """!issues auto: a quiet topic with nothing in flight takes the next labelled issue."""
+    for topic, label in (cfg.get("issues_auto") or {}).items():
+        sess = cfg.get("topics", {}).get(topic)
+        st = state.get(sess) or {}
+        busy = ((cfg.get("watch") or {}).get(topic) or st.get("queue") or st.get("mode") != "idle"
+                or now - st.get("changed", 0) < ROUTE_QUIET or topic in _goal_run)
+        if not sess or busy or topic in _issue_run or now - _issue_at.get(topic, 0) < ISSUE_EVERY:
+            continue
+        _issue_at[topic] = now
+        run = _issue_run[topic] = {}
+        threading.Thread(target=issues_poll, daemon=True, args=(
+            (cfg.get("dirs") or {}).get(topic), label,
+            set((cfg.get("issues_done") or {}).get(topic) or []), run)).start()
+    for topic, run in list(_issue_run.items()):
+        if not run:
+            continue
+        _issue_run.pop(topic, None)
+        sess = cfg.get("topics", {}).get(topic)
+        if run.get("issue") and sess:
+            send(cfg, topic, "🌙 " + issue_begin(cfg, state, lock, topic, sess, run["issue"]),
+                 mode="plain")
+
+
+def issues_cmd(cfg, state, lock, topic, sess, cmd, arg):
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    if cmd == "!issue":
+        if not arg.lstrip("#").isdigit():
+            return "usage: !issue <number>"
+        if not sess:
+            return "bind a session here first"
+        try:
+            issue = json.loads(gh(cwd, "issue", "view", arg.lstrip("#"), "--json",
+                                  "number,title,body,comments,url,state"))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return f"gh: {e}"
+        if issue.get("state") != "OPEN":
+            return f"#{issue['number']} is {issue.get('state', '?').lower()}"
+        return issue_begin(cfg, state, lock, topic, sess, issue)
+    m = re.match(r"auto(?:\s+(\S+))?$", arg)
+    if m:
+        with lock:
+            auto = cfg.setdefault("issues_auto", {})
+            if m.group(1) == "off":
+                auto.pop(topic, None)
+            else:
+                auto[topic] = m.group(1) or ISSUE_LABEL
+            save_cfg(cfg)
+        return ("🌙 auto issues off" if m.group(1) == "off" else
+                f"🌙 when this topic is quiet, it takes the next open issue labelled "
+                f"`{auto[topic]}`, one at a time")
+    try:
+        got = json.loads(gh(cwd, "issue", "list", "--state", "open", "-L", "12", "--json",
+                            "number,title,labels"))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return f"gh: {e}"
+    if not got:
+        return "no open issues"
+    done = set((cfg.get("issues_done") or {}).get(topic) or [])
+    send(cfg, topic, "🎫 open issues — tap one to have the agent fix it and open a PR\n"
+         "!issues auto [label] works through labelled ones while you sleep", mode="plain",
+         buttons=kb([[(f"{'✓ ' if i['number'] in done else ''}#{i['number']} {i['title'][:40]}",
+                       f"!issue {i['number']}")] for i in got]))
     return None
 
 
@@ -9396,6 +9536,55 @@ def selfcheck():
         with open(os.path.join(td_, "opencode.json")) as f:
             assert json.load(f)["mcp"] == {"other": {}}
         assert ran_[-1][:3] == ["claude", "mcp", "remove"] and tc_["tools"]["5"] == []
+    # !issues: an issue becomes a prompt + branch; the watch finds the branch's PR
+    # and from then on is a normal PR watch; auto takes the next labelled issue.
+    br_, ip_ = issue_prompt({"number": 12, "title": "Crash on empty cart!", "url": "u",
+                             "body": "steps", "comments": [{"author": {"login": "bo"}, "body": "me too"}]})
+    assert br_ == "issue-12-crash-on-empty-cart" and "Fixes #12" in ip_ and "@bo: me too" in ip_
+    isaid_, iprs_ = [], []
+
+    def fake_gh2(cwd, *a, timeout=60):
+        if a[:2] == ("pr", "list"):
+            return json.dumps(iprs_)
+        if a[:2] == ("issue", "list"):
+            return json.dumps([{"number": 3}, {"number": 5}])
+        if a[:2] == ("issue", "view"):
+            return json.dumps({"number": int(a[2]), "title": "t" + a[2], "body": "", "url": "u",
+                               "comments": [], "state": "OPEN"})
+        return "[]"
+    with stubbed(gh=fake_gh2, save_cfg=lambda c: None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: isaid_.append(x)):
+        icfg2_, ist2_, ilk_ = {"topics": {"7": "s"}, "dirs": {"7": "/"}}, {"s": {"mode": "idle"}}, threading.Lock()
+        assert "watching for its PR" in issues_cmd(icfg2_, ist2_, ilk_, "7", "s", "!issue", "#5")
+        assert icfg2_["watch"]["7"] == {"branch": "issue-5-t5", "issue": 5}
+        assert "issue-5-t5" in ist2_["s"]["queue"][0]
+
+        def tick_watch():
+            _watch_at.clear()
+            watch_tick(icfg2_, ist2_, ilk_)
+            for _ in range(200):
+                if _watch_run.get("7"):
+                    break
+                time.sleep(0.02)
+            watch_tick(icfg2_, ist2_, ilk_)
+        tick_watch()
+        assert "pr" not in icfg2_["watch"]["7"]            # not opened yet
+        iprs_.append({"number": 44})
+        tick_watch()
+        assert icfg2_["watch"]["7"]["pr"] == 44 and "PR #44 opened for issue #5" in isaid_[-1]
+        # auto: the topic is quiet and nothing is watched -> next labelled, not done
+        icfg2_["watch"] = {}
+        ist2_["s"] = {"mode": "idle", "changed": 0}
+        icfg2_["issues_auto"] = {"7": "nightmux"}
+        _issue_at.clear()
+        issues_tick(icfg2_, ist2_, ilk_, time.time())
+        for _ in range(200):
+            if _issue_run.get("7"):
+                break
+            time.sleep(0.02)
+        issues_tick(icfg2_, ist2_, ilk_, time.time())
+        assert icfg2_["watch"]["7"]["issue"] == 3 and "#3" in isaid_[-1], isaid_[-1]
+        _watch_run.clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
