@@ -467,6 +467,16 @@ buttons: 🧠 step back (list hypotheses before editing), 🔀 hand to another
 agent with a summary, ⏸ pause. `!loopguard auto` lets the first one step it
 back by itself; `!loopguard off` disables it.
 
+## See the limit coming
+
+Every usage window an agent reports (Claude's 5h/7d, Codex's) is sampled
+once a minute. At the last hour's pace, if one will be full before it
+resets — and within 90 minutes — the topics working on that agent get one
+⏳ warning ("claude will hit its 5h limit around 03:10 at this pace, 82% now,
++14%/h") with a button to switch to another agent while there is still time.
+`!forecast` shows every window; the dashboard's limit cards show the
+projected time too.
+
 ## Project memory
 
 Each project keeps `.nightmux/memory.md` — what it is, how to run and test

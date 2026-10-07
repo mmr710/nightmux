@@ -2480,6 +2480,7 @@ def watcher(cfg, state, lock):
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
             mem_tick(cfg, state)
+            forecast_tick(cfg, state)
             reel_tick(cfg, state, lock)
             save_queue(state)
         except Exception as e:
@@ -3645,6 +3646,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(analyze_chats(days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!forecast":
+        return forecast_report(cfg, state)
     if cmd == "!memory":
         return memory_cmd(cfg, state, lock, topic, sess, arg)
     if cmd in ("!issues", "!issue"):
@@ -3770,6 +3773,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "(!tools add desktop) and you can watch from the phone\n"
                 "!tools [add|rm browser [all] | restart] = give the agent a headless "
                 "browser it drives itself (Playwright MCP)\n"
+                "!forecast = when each agent's usage window fills at the current pace "
+                "(you are warned ahead of time where it matters)\n"
                 "!memory [update|on|off] = the project's notes (.nightmux/memory.md) "
                 "that every agent reads when it starts here; kept up to date after quiet spells\n"
                 "!goal [n] <check> | off = run a check (tests, build) after every "
@@ -6696,7 +6701,96 @@ def agent_limits(cfg, state, home=None):
             rows.setdefault("codex", dict(blank, agent="codex", windows=[]))["windows"].append(
                 {"label": _win_label(w.get("window_minutes") or 0),
                  "pct": w["used_percent"], "resets_at": w.get("resets_at")})
+    for r in rows.values():
+        for w in r["windows"]:
+            w["eta"] = forecast(f"{r['agent']}:{w['label']}")
     return sorted(rows.values(), key=lambda r: r["agent"])
+
+
+# ---------- limit forecast ----------
+# A limit is not news once it has hit: the queue is already stuck behind it.
+# Each window's percentage is sampled every minute; at the pace of the last
+# hour, the time it reaches 100% — if that comes before it resets and within
+# FC_WARN — is said once per window to the topics working on that agent, with
+# a button to switch them while there is still something to switch with.
+FC_EVERY, FC_SPAN, FC_WARN = 60, 3600, 5400
+_fc, _fc_at, _fc_told = {}, [0], set()     # key -> {"resets", "pts"}; told: (key, resets)
+
+
+def windows_now(state):
+    """{"claude:5h": (pct, resets_at), ...} — every window an agent reports."""
+    out = {}
+    snaps = [s["snap"] for s in state.values() if isinstance(s, dict) and s.get("snap")]
+    fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})
+    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = window(fresh, k)
+        if w:
+            out[f"claude:{label}"] = (w["used_percentage"], w.get("resets_at"))
+    rl = codex_limits() or {}
+    for k in ("primary", "secondary"):
+        w = rl.get(k)
+        if w and w.get("used_percent") is not None:
+            out[f"codex:{_win_label(w.get('window_minutes') or 0)}"] = (w["used_percent"], w.get("resets_at"))
+    return out
+
+
+def forecast(key, now=None):
+    """When this window reaches 100% at the last hour's pace, or None."""
+    f, now = _fc.get(key), now or time.time()
+    if not f or len(f["pts"]) < 2:
+        return None
+    (t0, p0), (t1, p1) = f["pts"][0], f["pts"][-1]
+    if t1 - t0 < 600 or p1 <= p0 or p1 >= 100:
+        return None
+    eta = t1 + (100 - p1) / ((p1 - p0) / (t1 - t0))
+    return round(eta) if not f["resets"] or eta < f["resets"] else None
+
+
+def fc_sample(readings, now):
+    for key, (pct, resets) in readings.items():
+        f = _fc.get(key)
+        if not f or f["resets"] != resets:             # a new window: a new line
+            f = _fc[key] = {"resets": resets, "pts": []}
+        f["pts"] = [p for p in f["pts"] if now - p[0] <= FC_SPAN] + [(now, pct)]
+
+
+def forecast_tick(cfg, state):
+    now = time.time()
+    if now - _fc_at[0] < FC_EVERY:
+        return
+    _fc_at[0] = now
+    fc_sample(windows_now(state), now)
+    for key, f in _fc.items():
+        eta = forecast(key, now)
+        if not eta or eta - now > FC_WARN or (key, f["resets"]) in _fc_told:
+            continue
+        _fc_told.add((key, f["resets"]))
+        agent_, label = key.split(":")
+        pct = f["pts"][-1][1]
+        pace = (pct - f["pts"][0][1]) / ((f["pts"][-1][0] - f["pts"][0][0]) / 3600)
+        for topic, sess in cfg.get("topics", {}).items():
+            st = state.get(sess) or {}
+            if (cfg.get("started") or {}).get(topic) != agent_ or not (
+                    st.get("mode") == "busy" or st.get("queue") or topic in _goal):
+                continue
+            alt = next((k for k in list(bench_of(cfg, topic)) + installed_agents(cfg)
+                        if k != agent_ and k in agents(cfg)), None)
+            send(cfg, topic, f"⏳ {agent_} will hit its {label} limit around {clock(cfg, eta)} "
+                 f"at this pace ({pct:.0f}% now, +{pace:.0f}%/h)"
+                 + (f"; it resets {clock(cfg, f['resets'])}" if f["resets"] else ""),
+                 mode="plain", buttons=kb([[(f"⏭ switch to {alt} now", f"!{alt}")]]) if alt else None)
+
+
+def forecast_report(cfg, state):
+    fc_sample(windows_now(state), time.time())
+    rows = []
+    for key, f in sorted(_fc.items()):
+        pct, eta = f["pts"][-1][1], forecast(key)
+        rows.append(f"{key}  {pct:.0f}%" + (f" → full ~{clock(cfg, eta)}" if eta else
+                                             " · fine at this pace" if len(f["pts"]) > 1 else
+                                             " · pace needs 10+ min of readings")
+                    + (f" · resets {clock(cfg, f['resets'])}" if f["resets"] else ""))
+    return "⏳ usage windows\n" + ("\n".join(rows) or "no agent reports usage yet")
 
 
 # One-word nudges: each re-sends the whole context for very little instruction.
@@ -7544,6 +7638,7 @@ function limits(rows) {
         w.dataset.sig = sig;
         w.innerHTML = r.windows.length ? r.windows.map(x =>
           '<div class="win"><span>' + esc(x.label) + ' window</span><span>' + pct(x.pct) +
+          (x.eta ? ' · ⏳ full ~' + esc(clock(x.eta)) : '') +
           (x.resets_at ? ' · resets ' + esc(clock(x.resets_at)) : '') + '</span></div><div class="bar"><i></i></div>').join('')
           : '<div class="win"><span>no usage figure reported by this agent</span></div>';
         w.querySelectorAll('.bar i').forEach((b, i) => bar(b, r.windows[i].pct));
@@ -10774,6 +10869,28 @@ def selfcheck():
         mem_capture(mcfg2_, "3", "m")
         assert _mem["3"]["turns"] == 0
         _mem.clear()
+    # Forecast: a rising window is projected to 100% before it resets; a new
+    # window starts a new line; warned once, to topics actually on that agent.
+    _fc.clear(); _fc_told.clear()
+    t0_ = 1_700_000_000
+    fc_sample({"claude:5h": (40, t0_ + 18000)}, t0_)
+    fc_sample({"claude:5h": (60, t0_ + 18000)}, t0_ + 1800)          # +40%/h
+    assert forecast("claude:5h", t0_ + 1800) == t0_ + 1800 + 3600     # 40% more: an hour
+    fc_sample({"claude:5h": (5, t0_ + 36000)}, t0_ + 1900)            # reset: new window
+    assert len(_fc["claude:5h"]["pts"]) == 1 and forecast("claude:5h") is None
+    fsaid_ = []
+    with stubbed(windows_now=lambda st: {"claude:5h": (80, None)}, installed_agents=lambda c: ["claude", "codex"],
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: fsaid_.append((t, x, buttons))):
+        _fc.clear()
+        _fc["claude:5h"] = {"resets": None, "pts": [(time.time() - 1800, 60)]}
+        fcfg_ = {"topics": {"1": "a", "2": "b"}, "started": {"1": "claude", "2": "codex"}}
+        _fc_at[0] = 0
+        forecast_tick(fcfg_, {"a": {"mode": "busy"}, "b": {"mode": "busy"}})
+        assert [t for t, _, _ in fsaid_] == ["1"] and "+40%/h" in fsaid_[0][1] and "!codex" in fsaid_[0][2]
+        _fc_at[0] = 0
+        forecast_tick(fcfg_, {"a": {"mode": "busy"}})
+        assert len(fsaid_) == 1                                       # once per window
+    _fc.clear(); _fc_told.clear()
     # Two servers: the primary forwards a remote topic's update, untouched, to
     # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
     sec_ = "k" * 24
