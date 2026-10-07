@@ -318,6 +318,16 @@ you want to build your own view instead.
 
 Check out the [Cookbook](cookbook/README.md) for copy-paste recipes for GitHub Actions and editor integrations.
 
+## Keep going until it passes
+
+`!goal npm test` (or `pytest -q`, `npm run build`, anything with an exit code)
+makes the topic's agent prove it is done: after every finished turn nightmux
+runs the check in the project folder. Red, and the last 40 lines go back to
+the agent as its next prompt — fix the cause, don't touch the test. Green, and
+you get one ✅. The same failure three times in a row, or 6 rounds
+(`!goal 10 npm test` for more), and it stops and shows you instead of burning
+the night. Your next message resumes it; `!goal off` ends it.
+
 ## Two servers
 
 One bot, one group, topics spread over several machines. Telegram lets only

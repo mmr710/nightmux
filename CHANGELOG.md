@@ -8,6 +8,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!goal [rounds] <check>`: after every finished turn the check (tests, build,
+  lint) runs in the project dir; a failure's tail goes back to the agent as
+  its next prompt until it passes. Reports green once; stops and pings on the
+  same failure three times or when out of rounds; your next message resumes.
+
 - Two (or more) servers behind one bot: the primary forwards a topic's
   updates to the peer that runs it (`!server <peer>` / `!server local`), the
   peer (`"poll_telegram": false`) replies to Telegram directly. Peers talk on a
