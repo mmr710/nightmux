@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!deps`: known vulnerabilities (npm audit, pip-audit, govulncheck) worst first and packages a major version behind, with an **upgrade with agent** button; `!deps nightly HH:MM` checks every night and reports only findings.
+
 - Limit forecast: usage windows are sampled every minute; when one will fill before it resets (within 90 min) at the last hour's pace, topics working on that agent get one ⏳ warning with a switch button; `!forecast`, and the dashboard limit cards show the projected time.
 
 - Project memory: `.nightmux/memory.md` per project (what it is, how to run/test, decisions, gotchas, in progress), rewritten by the live agent after 6 turns and 15 quiet minutes and read first by every session nightmux starts or switches to; `!memory [update|on|off]`.
