@@ -1,12 +1,47 @@
-# nightmux
+<div align="center">
 
+# 🌙 nightmux
+
+**Your AI coding agents keep working while you sleep.**
+
+Drive Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose and Qwen Code
+from your phone. Usage limit at 2am? Your queue waits and resumes the moment the
+window resets — or hands the work to another agent.
+
+[![GitHub stars](https://img.shields.io/github/stars/mmr710/nightmux?style=social)](https://github.com/mmr710/nightmux/stargazers)
 [![tests](https://github.com/mmr710/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr710/nightmux/actions/workflows/test.yml)
-[![Telegram](https://img.shields.io/badge/Telegram-Community-blue.svg?logo=telegram)](https://t.me/+SGmmExdMHTQ3OWVk)
 [![PyPI](https://img.shields.io/pypi/v/nightmux.svg)](https://pypi.org/project/nightmux/)
+[![license](https://img.shields.io/github/license/mmr710/nightmux)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-Community-blue.svg?logo=telegram)](https://t.me/+SGmmExdMHTQ3OWVk)
 
-![nightmux — unified Telegram control for multi-agent AI workflows, quota monitoring, and automated recovery](docs/hero.jpg)
+[Website](https://mmr710.github.io/nightmux/) · [Live demo](https://mmr710.github.io/nightmux/office.html?demo) · [Leaderboard](https://mmr710.github.io/nightmux/leaderboard.html) · [Install](#install)
 
-**Your night crew, on Telegram.**
+![The night shift in the office: claude hits its limit at 02:14 and hands the work to codex, agy asks and gets a yes from your phone, and at 04:11 the window resets and claude is back](docs/office-demo.gif)
+
+</div>
+
+## Quickstart
+
+1. `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh`
+2. Paste a bot token from [@BotFather](https://t.me/BotFather) — or press Enter to run dashboard-only.
+3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type.
+
+Just looking? `python3 nightmux.py --demo` and open http://127.0.0.1:8099/office — no bot, no keys.
+Docker, a fresh VPS and the rest: [Install →](#install)
+
+## How it compares
+
+| | nightmux | hosted / relay mobile apps | tmux + SSH from a phone |
+|---|:-:|:-:|:-:|
+| Resumes by itself after a usage limit, or hands off to another agent | ✅ | — | — |
+| Any agent CLI (Claude Code, Codex, Gemini, opencode, Cursor…) | ✅ | usually one | ✅ |
+| Phone UI: menus as buttons, photos, voice notes | ✅ | ✅ | — |
+| Runs on your machine; no relay sees your code | ✅ | — | ✅ |
+| Overnight: schedules, `!goal` test loops, morning briefing | ✅ | — | — |
+| Attaches to the tmux session you can still SSH into | ✅ | — | ✅ |
+| One file, Python stdlib, no account | ✅ | — | ✅ |
+
+## The night shift
 
 ```
 02:14  ⏸ api hit the usage limit
@@ -30,16 +65,9 @@ to the topic. Approvals arrive as tap buttons.
 
 No container, no DNS, no certificates, no ports open, no relay service. It
 attaches to tmux sessions you already have, on the machine you already use.
-Python stdlib only — one file, ~5,400 lines you can read in an afternoon.
+Python stdlib only — one file you can read.
 
 ![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
-
-![The night shift in the office: claude hits its limit at 02:14 and hands the work to codex, agy asks and gets a yes from your phone, and at 04:11 the window resets and claude is back](docs/office-demo.gif)
-
-Try it without a bot or keys: `python3 nightmux.py --demo`, then open http://127.0.0.1:8099/office — a made-up night across three projects.
-
-**Try it:** `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash` — five minutes, no
-dependencies, no server. [Full install →](#install)
 
 ```
    Telegram group (Topics on)          your machine
@@ -116,13 +144,25 @@ box, their own agents.
 
 The fastest way to install is using the one-line installer:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh
 ```
 *(Clones — or updates — `~/nightmux` from GitHub and runs setup. Adding a
 second server? Use the command its dashboard gives you instead: servers →
 **+ add server**.)*
 
-**To test the rate limit auto-recovery instantly:** run `python3 nightmux.py --demo` after installing.
+**Just looking?** `python3 nightmux.py --demo` serves the office with a made-up night — no bot, no keys.
+
+**Docker** (tmux, Claude Code and Codex inside; your code mounted at `/code`):
+```bash
+docker run -it --name nightmux -v nightmux-home:/root -v ~/code:/code \
+  -p 127.0.0.1:9090:9090 ghcr.io/mmr710/nightmux
+docker exec -it nightmux claude      # log the agent in once
+```
+The dashboard has no login of its own — keep the port on `127.0.0.1` (or your tailnet).
+
+**A fresh VPS** (Hetzner, DigitalOcean, Vultr…): paste
+[`deploy/cloud-init.yaml`](deploy/cloud-init.yaml) into the provider's user-data
+box, then SSH in, log the agents in and run the one-liner above.
 
 Or from PyPI (may lag behind GitHub — the peer and dashboard features need
 the current version):
@@ -621,6 +661,22 @@ fewer tokens. The same report is `!stats [days]` in Telegram.
   no screen text, prompts or buttons. Tailnet-only until `!public expose`,
   which puts just that path on the internet with Tailscale Funnel.
   `!public off` kills the link.
+
+## Night QA
+
+`!qa 03:00 http://localhost:3000` — every night the agent opens the app with
+the browser tool (added for you), uses it like a new user, and files each real
+bug as a GitHub issue labelled `qa`, with steps to reproduce. It does not touch
+the code; `!issues` picks the fixes up in the morning. `!qa now`, `!qa off`.
+
+## Leaderboard
+
+`!leaderboard` shows the counts it would share — turns, night turns, limits
+survived, green checks, tokens saved, which agents; no project names, prompts
+or code. `!leaderboard post` adds them as a comment on the
+[leaderboard issue](https://github.com/mmr710/nightmux/issues/54) with your own
+`gh` login, and [the board](https://mmr710.github.io/nightmux/leaderboard.html)
+ranks the crews. Nothing is sent without the `post`.
 
 ## Race agents on one task
 

@@ -1,0 +1,21 @@
+name: Bug
+description: Something nightmux did wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to make it happen
+      description: The commands you sent, the agent (claude, codex…), and what the pane showed.
+  - type: textarea
+    id: env
+    attributes:
+      label: Version and system
+      description: Output of `nightmux --version` and `nightmux --doctor`. Remove anything private.
+      render: text

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux leaderboard</title>
+<style>
+body{margin:0;background:#07090f;color:#cdd6f4;font:15px/1.5 ui-monospace,Menlo,Consolas,monospace}
+.wrap{max-width:980px;margin:0 auto;padding:16px}
+a{color:#7aa2f7}h1{color:#e0af68;font-size:28px}
+.dim{color:#8b93a7}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:640px}
+td,th{border-bottom:1px solid #1b2133;padding:8px;text-align:right}
+td:nth-child(2),th:nth-child(2),td:last-child,th:last-child{text-align:left}
+th{color:#8b93a7;font-weight:normal;cursor:pointer}
+img{width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:6px}
+</style></head><body><div class="wrap">
+<p><a href="./">← nightmux</a></p>
+<h1>🏆 the night crews</h1>
+<p class="dim">Opt-in entries from nightmux installs: counts only. Join with <code>!leaderboard</code>
+(preview) then <code>!leaderboard post</code>. Entries live on
+<a href="https://github.com/mmr710/nightmux/issues/54">issue #54</a>; the newest per user counts.</p>
+<div class="tbl"><table><thead><tr><th>#</th><th>crew</th><th data-k="turns">turns</th>
+<th data-k="night_turns">night turns</th><th data-k="resumes">limits survived</th>
+<th data-k="greens">green checks</th><th data-k="tokens_saved">tokens saved</th><th>agents</th></tr></thead>
+<tbody id="b"><tr><td colspan="8" class="dim">loading…</td></tr></tbody></table></div>
+</div><script>
+const k = n => n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+let rows = [], key = 'night_turns';
+function draw() {
+  rows.sort((a, b) => (b[key] || 0) - (a[key] || 0));
+  document.getElementById('b').innerHTML = rows.length ? rows.map((r, i) => '<tr><td>' + (i + 1) + '</td><td><img src="'
+    + esc(r.avatar) + '&s=44" alt="">' + esc(r.login) + '</td>' + ['turns', 'night_turns', 'resumes', 'greens', 'tokens_saved']
+    .map(c => '<td>' + k(+r[c] || 0) + '</td>').join('') + '<td>' + esc((r.agents || []).join(', ')) + '</td></tr>').join('')
+    : '<tr><td colspan="8" class="dim">no entries yet — be the first</td></tr>';
+}
+document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => { key = th.dataset.k; draw(); });
+(async () => {
+  const by = {};
+  for (let page = 1; page <= 10; page++) {
+    const r = await fetch('https://api.github.com/repos/mmr710/nightmux/issues/54/comments?per_page=100&page=' + page);
+    if (!r.ok) break;
+    const items = await r.json();
+    for (const c of items) {
+      const m = /```json\s*([\s\S]*?)```/.exec(c.body || '');
+      if (!m) continue;
+      try { const e = JSON.parse(m[1]); if (typeof e !== 'object' || !e) continue;
+        by[c.user.login] = Object.assign(e, {login: c.user.login, avatar: c.user.avatar_url + (c.user.avatar_url.includes('?') ? '' : '?')}); } catch (e) {}
+    }
+    if (items.length < 100) break;
+  }
+  rows = Object.values(by); draw();
+})().catch(() => { document.getElementById('b').innerHTML = '<tr><td colspan="8" class="dim">GitHub did not answer — try again in a minute</td></tr>'; });
+</script></body></html>
