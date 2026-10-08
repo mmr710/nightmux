@@ -33,6 +33,7 @@ public class AlertService extends Service {
     volatile boolean running;
     final Map<String, String> last = new HashMap<>();
     boolean primed;
+    String watching = "";
 
     static void sync(Context c) {
         SharedPreferences p = c.getSharedPreferences("nightmux", MODE_PRIVATE);
@@ -87,6 +88,7 @@ public class AlertService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         while (running) {
             String base = getSharedPreferences("nightmux", MODE_PRIVATE).getString("url", "");
+            if (!base.equals(watching)) { watching = base; last.clear(); primed = false; }   // switched servers
             try {
                 JSONObject o = Office.fetch(base);
                 nm.notify(ONGOING, ongoing(Office.summary(o)));
