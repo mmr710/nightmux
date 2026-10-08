@@ -531,6 +531,12 @@ never happen and contexts that stay small.
   on sonnet, heavy on opus, and steps up one model when `!goal` fails the
   same way twice, the loop guard fires, or you correct it twice. It never
   drops to haiku on a context over 120k.
+- **Switches only when they are cheap** — the prompt cache belongs to one
+  model and one agent, so a switch re-reads the whole thread uncached. The
+  ladder and `!route auto` change model or agent only when the thread is under
+  30k tokens (a new task, after `!fresh`); the one exception is a step up when
+  the agent is struggling, at most once per task. `!route stats` shows what
+  the switches cost.
 
 ## Keep going until it passes
 
