@@ -5115,7 +5115,11 @@ def route(cfg, state, lock, topic, sess, text):
     _route_last[topic] = (cls, pick)
     if pick == cur:
         return None
+    tok = st.get("ctx_tok")
+    if tok and tok > SWITCH_FREE:
+        return None       # the thread is the task's context: moving it costs more than it saves
     switch_agent(cfg, state, lock, topic, pick)
+    coach_log({"t": int(now), "topic": topic, "switch": "agent", "to": pick, "ctx": tok or 0})
     new = cfg.get("topics", {}).get(topic)
     if not new or new == sess:
         return None
@@ -5154,7 +5158,8 @@ def route_cmd(cfg, lock, topic, arg):
                 for a, (ok, n) in sorted(v.items(), key=lambda kv: -kv[1][1]) if n]
         return ("↪️ learned routing — a task counts as first-try when !goal goes green or "
                 "your next prompt is not a correction\n" + ("\n".join(rows) or "nothing yet")
-                + f"\nauto routing uses a rate once an agent has {ROUTE_MIN_N}+ tasks in a class")
+                + f"\nauto routing uses a rate once an agent has {ROUTE_MIN_N}+ tasks in a class"
+                + switch_cost())
     sc = cfg.get("route_scores") or {}
     return ((f"↪️ routing {(cfg.get('route') or {}).get(topic) or 'off'} here\n")
             + ("learned: " + "; ".join(f"{c}: " + ", ".join(f"{a} {n:+d}" for a, n in v.items())
@@ -5190,6 +5195,7 @@ P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
 LADDER = {"claude": ["haiku", "sonnet", "opus"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
+SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
 FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new"}
 FRESH_MIN = 60000           # a thread this small is cheap to keep
@@ -5219,6 +5225,29 @@ def lint_why(text):
     return []
 
 
+def switch_cost(days=30):
+    """What model/agent switches re-billed: the context each one carried over."""
+    since, sw = time.time() - days * 86400, []
+    try:
+        with open(os.path.join(STATE_DIR, "corrections.jsonl")) as f:
+            for l in f:
+                try:
+                    r = json.loads(l)
+                except ValueError:
+                    continue
+                if r.get("switch") and r.get("t", 0) >= since:
+                    sw.append(r)
+    except OSError:
+        pass
+    if not sw:
+        return f"\nswitches ({days}d): none"
+    m = [r for r in sw if r["switch"] == "model"]
+    tot = sum(r.get("ctx", 0) for r in sw)
+    return (f"\nswitches ({days}d): {len(m)} model, {len(sw) - len(m)} agent · "
+            f"~{tot // 1000}k tokens re-read uncached in all "
+            f"(avg {tot // len(sw) // 1000}k each)")
+
+
 def coach_log(rec):
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -5237,8 +5266,13 @@ def ladder_tiers(cfg, topic, sess):
     return ((cfg.get("ladder_tiers") or {}).get(a) or LADDER.get(a)) if ladder_on(cfg, topic) else None
 
 
-def ladder_set(cfg, state, topic, sess, idx, why):
-    """Queue a /model switch to tier idx; the switch itself waits for idle like a prompt."""
+def ladder_set(cfg, state, topic, sess, idx, why, up=False):
+    """Queue a /model switch to tier idx; the switch itself waits for idle like a prompt.
+
+    The prompt cache belongs to one model, so a switch re-bills the whole thread
+    once. Free on a near-empty thread (after !fresh or /clear); otherwise only an
+    escalation is worth it, and that once per task.
+    """
     tiers = ladder_tiers(cfg, topic, sess)
     if not tiers:
         return None
@@ -5248,7 +5282,11 @@ def ladder_set(cfg, state, topic, sess, idx, why):
         idx = 1
     if _ladder.get(topic) == idx:
         return None
+    if tok and tok > SWITCH_FREE and not up:
+        return None
     _ladder[topic] = idx
+    coach_log({"t": int(time.time()), "topic": topic, "switch": "model", "to": tiers[idx],
+               "ctx": tok or 0})
     state.setdefault(sess, {}).setdefault("queue", []).append(f"/model {tiers[idx]}")
     return f"🪜 {sess} → {tiers[idx]} ({why})"
 
@@ -5257,9 +5295,11 @@ def ladder_up(cfg, state, topic, sess, why):
     tiers = ladder_tiers(cfg, topic, sess)
     if not tiers:
         return
+    co = _coach.setdefault(topic, {"miss": 0})
     cur = _ladder.get(topic, LADDER_START["normal"])
-    if cur < len(tiers) - 1:
-        note = ladder_set(cfg, state, topic, sess, cur + 1, why)
+    if cur < len(tiers) - 1 and not co.get("up"):
+        co["up"] = True           # once per task: the next task starts on its own tier
+        note = ladder_set(cfg, state, topic, sess, cur + 1, why, up=True)
         if note:
             send(cfg, topic, note + " · !ladder off to stop", mode="plain")
 
@@ -5425,6 +5465,7 @@ def coach_after(cfg, state, topic, sess, text):
         return None, False
     cls = task_class(text)
     _route_last[topic] = (cls, agent_key(cfg, topic, sess))
+    _coach.setdefault(topic, {"miss": 0}).pop("up", None)
     st = state.get(sess) or {}
     if st.get("mode") != "idle" or st.get("queue"):
         return None, False            # mid-task: the model stays as it is
@@ -5478,6 +5519,8 @@ def coach_cmd(cfg):
     if recs:
         by = {}
         for r in recs:
+            if r.get("switch"):
+                continue
             k = f"{r.get('cls')} → {r.get('agent')}"
             by[k] = by.get(k, 0) + 1
         out.append("corrections here by task: " + ", ".join(
@@ -11308,11 +11351,14 @@ def selfcheck():
     def fake_switch(c, st, l, t, k):
         switched_.append(k)
         c["topics"][t], c["started"][t] = c["bench"][t][k], k
-    with stubbed(has_session=lambda n: True, switch_agent=fake_switch):
+    with stubbed(has_session=lambda n: True, switch_agent=fake_switch, coach_log=lambda r: None):
         assert route(rcfg_, rst_, threading.Lock(), "4", "r", "add a settings page") is None
         rst_["r"]["changed"] = time.time()
         assert route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y") is None   # mid-task
         rst_["r"]["changed"] = time.time() - 3600
+        rst_["r"]["ctx_tok"] = 90000
+        assert route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y") is None   # big thread
+        rst_["r"]["ctx_tok"] = 5000
         ro_ = route(rcfg_, rst_, threading.Lock(), "4", "r", "rename x to y")
         assert ro_ and ro_[0] == "r-codex" and "light" in ro_[1] and switched_ == ["codex"], ro_
         route_learn(rcfg_, "4", -1)
@@ -11349,7 +11395,11 @@ def selfcheck():
         assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") and cst_["k"]["queue"] == ["/model sonnet"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
+        cst_["k"]["queue"] = []
+        ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
+        assert cst_["k"]["queue"] == [], cst_
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 10000
         assert fresh_after(ccfg_, cst_, "9", "k", "done") is None          # small: keep
         assert fresh_after(ccfg_, cst_, "9", "k", "done", force=True)

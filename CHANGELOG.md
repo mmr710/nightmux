@@ -498,6 +498,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Changed
 
+- Model ladder and auto routing switch only on threads under 30k tokens (a step up when the agent struggles is the one exception, once per task); `!route stats` shows what switches re-billed.
+
 - The hook scripts are now `nightmux_stop.py`, `nightmux_notify.py` and
   `nightmux_state.py` (was `tm-stop.py`, `tm-notify.py`, `tm-state.py`). Hyphens
   are not legal in a module name, and that was the only thing standing between
