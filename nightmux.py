@@ -905,8 +905,20 @@ def render(rec):
     return out
 
 
-def tail_transcript(st, path):
-    """Assistant output appended since the last read. Exact text, no chrome."""
+# A turn's price next to Opus's, by model family; the same ratio for input and
+# output at list prices ($1 / $3 / $5 per M input). Change it when prices move.
+MODEL_COST = {"haiku": 0.2, "sonnet": 0.6, "opus": 1.0}
+
+
+def model_cost(model):
+    return next((r for k, r in MODEL_COST.items() if k in (model or "").lower()), 1.0)
+
+
+def tail_transcript(st, path, ladder=False):
+    """Assistant output appended since the last read. Exact text, no chrome.
+
+    ladder: !ladder picks this session's model, so a turn on a lighter model
+    books what it cost less than Opus would have, in input-token terms."""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -935,10 +947,14 @@ def tail_transcript(st, path):
                 # it here is free -- these bytes are being decoded anyway -- and
                 # it is what lets the spend cap count cost instead of turns.
                 u = (rec.get("message") or {}).get("usage") or {}
-                spent += (u.get("input_tokens", 0) * WEIGHT["in"]
-                          + u.get("cache_creation_input_tokens", 0) * WEIGHT["write"]
-                          + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
-                          + u.get("output_tokens", 0) * WEIGHT["out"])
+                turn = (u.get("input_tokens", 0) * WEIGHT["in"]
+                        + u.get("cache_creation_input_tokens", 0) * WEIGHT["write"]
+                        + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
+                        + u.get("output_tokens", 0) * WEIGHT["out"])
+                spent += turn
+                cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
+                if ladder and turn and cheap > 0:
+                    sav_add("model_tokens", round(turn * cheap))
                 if u:
                     sav_ctx(st, u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                             + u.get("cache_read_input_tokens", 0))
@@ -2183,7 +2199,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # first, because a transcript that grew is reason enough to do the rest.
     st["snap"] = snap = snapshot(pane_id)
     tpath = (snap or {}).get("transcript")
-    gained = tail_transcript(st, tpath) if tpath else []
+    gained = tail_transcript(st, tpath, ladder_on(cfg, topic)) if tpath else []
     if st.get("unbilled"):
         budget_tick(cfg, state, topic, sess)
     if gained:
@@ -6221,8 +6237,8 @@ def sav_add(key, n=1):
     with _sav_lock:
         d = sav_data()
         d[key] = d.get(key, 0) + n
-        if key == "tokens":      # by day too, so a card can show its own window
-            day, by = time.strftime("%Y-%m-%d", time.gmtime()), d.setdefault("tokens_day", {})
+        if key in ("tokens", "model_tokens"):   # by day too, so a card shows its own window
+            day, by = time.strftime("%Y-%m-%d", time.gmtime()), d.setdefault(key + "_day", {})
             by[day] = by.get(day, 0) + n
             for old in sorted(by)[:-400]:
                 del by[old]
@@ -6266,6 +6282,8 @@ def saved_report():
             f"({days:.0f}d)\n"
             f"• {_k(d.get('tokens', 0))} tokens of context not re-read "
             f"({d.get('drops', 0)} compactions / fresh starts)\n"
+            f"• {_k(d.get('model_tokens', 0))} tokens' worth saved running !ladder turns on "
+            "haiku/sonnet instead of opus\n"
             f"• {d.get('turns', 0)} agent turns, {d.get('night_turns', 0)} of them between "
             "midnight and 7\n"
             f"• {d.get('resumes', 0)} queues resumed after a usage limit, "
@@ -6302,14 +6320,14 @@ ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:
 </body></html>"""
 
 
-def saved_in(d, days):
+def saved_in(d, days, key="tokens"):
     """Tokens saved in the last `days` days: the day ledger where it reaches back,
     the all-time total spread evenly over the time before it."""
-    now, total = time.time(), d.get("tokens", 0)
+    now, total = time.time(), d.get(key, 0)
     since = d.get("since", now)
     if now - since <= days * 86400:
         return total
-    by = d.get("tokens_day") or {}
+    by = d.get(key + "_day") or {}
     cut = time.strftime("%Y-%m-%d", time.gmtime(now - days * 86400))
     got = sum(n for k, n in by.items() if k > cut)
     first = min(by) if by else None
@@ -6329,11 +6347,12 @@ def wrapped_data(cfg, days):
     tok = {k: sum(a["tokens"][k] for a in ag.values())
            for k in ("input", "cache_read", "cache_write", "output")}
     toks, prompts = sum(tok.values()), sum(a["prompts"] or 0 for a in ag.values())
-    saved = saved_in(d, days)
+    saved, lighter = saved_in(d, days), saved_in(d, days, "model_tokens")
     r = saved / (toks + saved) if saved and toks else 0
     pct = f"{r:.0%}" if r >= 0.01 or not r else f"{r:.2%}"     # 941k of 3.4B is not 0%
     cells = [(_k(toks), "tokens used"),
              (pct, f"tokens saved ({_k(saved)})"),
+             (_k(lighter), "tokens' worth saved on lighter models"),
              (str(prompts), "prompts sent"), (str(len(proj)), "projects worked in"),
              (str(d.get("night_turns", 0)), "turns while I slept"),
              (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
@@ -6367,7 +6386,7 @@ def wrapped_data(cfg, days):
     if prompts >= 10:
         ins.append(("one-word nudges", f"{nud / prompts:.0%}"))
     return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]),
-            "used": toks, "saved": saved,
+            "used": toks, "saved": saved, "lighter": lighter,
             "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
 
 
@@ -12708,6 +12727,14 @@ def selfcheck():
             "content": [{"type": "text", "text": "hi"}]}}) + "\n")
     tail_transcript(tst, tp)
     assert int(tst["spend"][-1][1]) == 150, tst["spend"]   # 100*1.0 + 10*5.0
+    with open(tp, "a") as f:                       # the same turn on haiku, under !ladder
+        f.write(json.dumps({"type": "assistant", "message": {
+            "model": "claude-haiku-4-5", "usage": {"input_tokens": 100, "output_tokens": 10},
+            "content": [{"type": "text", "text": "hi"}]}}) + "\n")
+    with stubbed(sav_add=lambda k, n=1: tst.setdefault("booked", []).append((k, n))):
+        tail_transcript(tst, tp, ladder=True)
+    assert tst["booked"] == [("model_tokens", 120)], tst["booked"]   # 150 * (1 - 0.2)
+    assert model_cost("claude-opus-4-8") == 1 and model_cost("claude-sonnet-4-6") == 0.6
     os.remove(tp)
 
     # One parser, two knobs: a bare number keeps each setting's original unit,
@@ -13627,9 +13654,11 @@ def selfcheck():
         w_ = when_summary({"tz_offset": 3}, {"at": {h0_: 1, h0_ - 24: 2, h0_ - 72: 4}})
         assert w_["streak"] == 2 and w_["busiest"][1] == 4 and w_["active_days"] == 3, w_
         assert w_["peak_hour"] == time.gmtime(h0_ * 3600 + 3 * 3600).tm_hour, w_
-        with stubbed(analyze_chats=lambda d: r_, sav_data=lambda: {"tokens": 5000000}):
+        with stubbed(analyze_chats=lambda d: r_,
+                     sav_data=lambda: {"tokens": 5000000, "model_tokens": 2000000}):
             wd_ = wrapped_data({}, 30)
         pg_ = wrapped_page(30, wd_)
+        assert ("2.0M", "tokens' worth saved on lighter models") in wd_["cells"], wd_["cells"]
         assert wd_["saved"] == 5000000 and wd_["cells"][1][1] == "tokens saved (5.0M)", wd_
         assert wd_["cells"][1][0].endswith("%") and wd_["cells"][1][0] != "0%", wd_["cells"]
         assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
