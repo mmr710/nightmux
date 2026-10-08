@@ -2684,6 +2684,7 @@ def watcher(cfg, state, lock):
             deps_tick(cfg)
             briefing_tick(cfg, state, lock)
             reel_tick(cfg, state, lock)
+            replay_tick(cfg, state)
             sav_save()
             save_queue(state)
         except Exception as e:
@@ -8026,6 +8027,67 @@ def topics_status(cfg, state):
     return out
 
 
+# ---------- night replay: the office, recorded ----------
+# A frame — who sat where, in what state — whenever that changes, sampled every
+# REPLAY_STEP and at least every REPLAY_EVERY; a day of them on disk, no screen
+# text. office?replay scrubs through them with the same drawing code.
+# ponytail: this machine's topics only; a peer's rooms are not recorded here.
+REPLAY_KEEP, REPLAY_EVERY, REPLAY_STEP = 24 * 3600, 600, 20
+_replay = {"frames": None, "sig": None, "at": 0, "tried": 0, "file_n": 0}
+
+
+def replay_path():
+    return os.path.join(STATE_DIR, "replay.jsonl")
+
+
+def replay_frames():
+    if _replay["frames"] is None:
+        fr = []
+        try:
+            with open(replay_path()) as f:
+                for line in f:
+                    try:
+                        fr.append(json.loads(line))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        _replay["file_n"] = len(fr)
+        _replay["frames"] = [x for x in fr if x.get("t", 0) > time.time() - REPLAY_KEEP]
+    return _replay["frames"]
+
+
+def replay_tick(cfg, state, now=None):
+    now = now or time.time()
+    if now - _replay["tried"] < REPLAY_STEP:
+        return
+    _replay["tried"] = now
+    rooms = [{"topic": r["topic"], "name": r["name"], "desks": [
+        {k: d.get(k) for k in ("agent", "session", "live", "state", "queued")} for d in r["desks"]]}
+        for r in office_snapshot(cfg, state)["rooms"]]
+    sig = json.dumps(rooms, sort_keys=True)
+    if sig == _replay["sig"] and now - _replay["at"] < REPLAY_EVERY:
+        return
+    _replay["sig"], _replay["at"] = sig, now
+    fr = replay_frames()
+    fr.append({"t": int(now), "rooms": rooms})
+    while fr and fr[0]["t"] < now - REPLAY_KEEP:
+        fr.pop(0)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        if _replay["file_n"] > len(fr) + 200:      # trim the file now and then, not per frame
+            with open(replay_path() + ".tmp", "w") as f:
+                f.writelines(json.dumps(x) + "\n" for x in fr)
+            os.replace(replay_path() + ".tmp", replay_path())
+            _replay["file_n"] = len(fr)
+        else:
+            with open(replay_path(), "a") as f:
+                f.write(json.dumps(fr[-1]) + "\n")
+            _replay["file_n"] += 1
+    except OSError as e:
+        print(f"replay: {e}", file=sys.stderr)
+
+
 def office_snapshot(cfg, state):
     """Every topic as a room, every agent on its bench as a desk.
 
@@ -9913,6 +9975,8 @@ h1{font-size:14px;margin:0;letter-spacing:1px}
 .nav a{font-size:12px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:6px;padding:4px 9px;background:#131722}
 .sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 8px}
 #offline:empty{display:none}
+#rp{display:flex;gap:10px;align-items:center;margin:10px 16px 0;font-size:12px;color:#a9b1d6}
+#rp[hidden]{display:none}#rps{flex:1;min-width:0;accent-color:#e0af68}
 #offline{margin:10px 16px 0;padding:10px 12px;border:1px solid #f8514955;border-radius:8px;background:#1a1012;font-size:12px;color:#f0a0a0}
 #offline a{color:#79c0ff}
 .meter{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7}
@@ -9954,14 +10018,18 @@ body.demo #stage{display:block}
 <span class="meter" id="clock"></span>
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <span class="meter" id="srvs"></span>
-<nav class="nav"><a href="/">⚙ dashboard</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
+<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span></div>
 <div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
 <canvas id="stage"></canvas>
 <div id="sheet"></div><div id="toast"></div>
 <script>
 // ---------- pixel kit ----------
-const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo'), REEL = Q.has('reel');
+const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo'), REEL = Q.has('reel'),
+  REPLAY = Q.has('replay');
+let T = null;   // replay: the recorded moment on screen, in ms
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 function mix(c1, c2, t) {
   const a = parseInt(c1.slice(1), 16), b = parseInt(c2.slice(1), 16), m = (x, y) => Math.round(x + (y - x) * t);
@@ -10414,10 +10482,10 @@ function label(d) {
   return {busy: 'working', idle: 'idle', waiting: '✋ asking', limit: '💤 ' + (d.until ? left(d.until) : ''),
           unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
 }
-const hhmm = () => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+const hhmm = () => new Date(T || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
 // The window follows the viewer's clock: night, dawn from 5, day from 7, dusk to 21. ?hour=14 previews.
 function sky() {
-  const n = new Date(), h = Q.has('hour') ? +Q.get('hour') : n.getHours() + n.getMinutes() / 60;
+  const n = new Date(T || Date.now()), h = Q.has('hour') ? +Q.get('hour') : n.getHours() + n.getMinutes() / 60;
   const ramp = (a, b) => Math.max(0, Math.min(1, Math.min((h - a) / 2, (b - h) / 2)));
   return {dawn: ramp(5, 21), day: ramp(7, 19)};
 }
@@ -10480,7 +10548,7 @@ function render() {
   if (open) sheet();
 }
 
-function pick(topic, i) { if (window.PUB) return; const r = data.rooms.find(x => x.topic === topic);
+function pick(topic, i) { if (window.PUB || REPLAY) return; const r = data.rooms.find(x => x.topic === topic);
   open = {topic, session: r.desks[i].session}; sheet(); }
 
 function sheet() {
@@ -10559,13 +10627,43 @@ function draw() {
     if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
 }
 
+// ?replay: the last day as recorded, on a slider. Same rooms, same drawing.
+async function replay() {
+  document.body.classList.add('replay');
+  const bar = document.getElementById('rp'), s = document.getElementById('rps'),
+    btn = document.getElementById('rpp'), lab = document.getElementById('rpt');
+  bar.hidden = false;
+  let F = [];
+  try { F = (await (await fetch('/api/office/replay', {cache: 'no-store'})).json()).frames || []; } catch (e) {}
+  if (!F.length) { lab.textContent = 'nothing recorded yet — the office records while nightmux runs'; return; }
+  s.max = F.length - 1;
+  const show = i => { const f = F[i]; T = f.t * 1000; data = {rooms: f.rooms, installed: [], usage: {}};
+    lab.textContent = new Date(T).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false})
+      + '  ·  ' + (i + 1) + '/' + F.length;
+    render(); };
+  let timer = null;
+  s.oninput = () => show(+s.value);
+  btn.onclick = () => {
+    if (timer) { clearInterval(timer); timer = null; btn.textContent = '▶'; return; }
+    if (+s.value >= F.length - 1) s.value = 0;
+    btn.textContent = '⏸';
+    timer = setInterval(() => { if (+s.value >= F.length - 1) return btn.onclick();
+      s.value = +s.value + 1; show(+s.value); }, 350);
+  };
+  // Start where the night did: the first frame after 22:00 last night, if there is one.
+  const eve = new Date(); eve.setDate(eve.getDate() - (eve.getHours() < 12 ? 1 : 0)); eve.setHours(22, 0, 0, 0);
+  const i0 = F.findIndex(f => f.t * 1000 >= eve.getTime());
+  s.value = i0 > 0 ? i0 : 0; show(+s.value);
+}
+
 // GIF capture drives frames itself, one exact frame per call.
 window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
-if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
+if (REPLAY) replay();
+else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
 </script>
@@ -11257,6 +11355,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "projects_root": os.path.expanduser(cfg.get("projects_root") or "~/projects"),
                 "servers": [host_name(cfg)] + sorted(cfg.get("peers") or {})}),
                 "application/json")
+        if self.path == "/api/office/replay":
+            return self.reply(json.dumps({"frames": replay_frames()}), "application/json")
         if self.path in ("/api/topics", "/api/office"):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
@@ -12977,6 +13077,31 @@ def selfcheck():
         issues_poll("/x", "nightmux", set(), out_, {"since": "x", "ids": [2, 3]})
         assert "comment" not in out_ and out_["since"] == "2026-10-03T00:00:00Z", out_
     assert react_ == ["repos/me/r/issues/comments/2/reactions", "repos/me/r/issues/comments/3/reactions"]
+    # Night replay: a frame when the picture changes (sampled, plus a heartbeat),
+    # no screen text, on disk, and the file trimmed once it runs well past a day.
+    import tempfile
+    old_rp_ = dict(_replay)
+    snap_ = [{"rooms": [{"topic": "1", "name": "api", "desks": [{"agent": "claude", "session": "api",
+              "live": True, "state": "busy", "queued": 0, "screen": ["SECRET"]}]}]}]
+    with tempfile.TemporaryDirectory() as rd_, stubbed(STATE_DIR=rd_, office_snapshot=lambda c, s: snap_[0]):
+        _replay.update(frames=None, sig=None, at=0, tried=0, file_n=0)
+        t0_ = time.time() - 3000
+        replay_tick({}, {}, t0_)
+        replay_tick({}, {}, t0_ + 5)                       # too soon to look
+        replay_tick({}, {}, t0_ + 30)                      # same picture
+        snap_[0]["rooms"][0]["desks"][0]["state"] = "limit"
+        replay_tick({}, {}, t0_ + 60)
+        replay_tick({}, {}, t0_ + 61 + REPLAY_EVERY)       # heartbeat
+        _replay["frames"] = None
+        rf_ = replay_frames()
+        assert [f["t"] - int(t0_) for f in rf_] == [0, 60, 661], rf_
+        assert rf_[1]["rooms"][0]["desks"][0]["state"] == "limit" and "SECRET" not in json.dumps(rf_)
+        _replay["file_n"] = 999                            # long past a day: rewrite
+        snap_[0]["rooms"][0]["desks"][0]["state"] = "idle"
+        replay_tick({}, {}, t0_ + 700)
+        assert sum(1 for _ in open(replay_path())) == 4 and _replay["file_n"] == 4
+    _replay.update(old_rp_)
+    assert "?replay" in OFFICE_HTML and "/api/office/replay" in OFFICE_HTML
     # !arena: judged races add up per agent and per kind of task.
     old_sav_ = dict(_sav)
     _sav["d"] = {"since": 0}
@@ -13216,7 +13341,7 @@ def selfcheck():
         assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
     dof_ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "office.html")
     if os.path.exists(dof_):                       # the Pages demo is this page, kept in step
-        assert "if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }" in OFFICE_HTML  # live and /public both poll
+        assert "else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }" in OFFICE_HTML  # live and /public both poll
     assert open(dof_).read() == OFFICE_HTML, "docs/office.html is stale: re-export OFFICE_HTML"
     assert transcribe({"transcribe_cmd": "echo hello"}, "/x.ogg") == "hello /x.ogg"
     assert transcribe({}, "/x.ogg") is None or os.environ.get("NIGHTMUX_TRANSCRIBE")

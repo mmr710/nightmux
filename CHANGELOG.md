@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Night replay: the office records a frame whenever a desk changes state (states only, no screen text, the last 24 hours in `~/.nightmux-state/replay.jsonl`), and **⏪ last night** (`/office?replay`) scrubs or plays through it with the room's clock and sky following along. It opens at 22:00 last night.
 - `/nightmux <what to do>` in a GitHub comment: with `!issues auto` on, a comment on an issue starts it like a tapped issue (with your ask appended), and on a PR the agent works on and pushes to that PR's branch. Only the repo's owner, members and collaborators are listened to; nightmux reacts 👀 when it takes one. Only comments made after `!issues auto` count.
 - `!relay <planner>[,<reviewer>] <task>`: one agent writes the plan, this topic's agent builds it step by step, and an optional third reviews every change. `!plan`, `!shift` and `!pair` pointed at one task — the planner is started on the bench if it is not running.
 - `!arena`: every `!race` you judged, added up — wins, win rate, checks passed and average time per agent, and which agent wins which kind of task (tests, bug fix, refactor, UI, docs, feature). Kept with the other counters; the last 500 races.
