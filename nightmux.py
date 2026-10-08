@@ -2730,6 +2730,10 @@ AGENTS = {
     "aider": ["aider", "--restore-chat-history"],
     "gemini": ["gemini", "--resume latest"],   # or an index: --resume 5
     "opencode": ["opencode", "--continue"],
+    "cursor": ["cursor-agent", "resume"],
+    "amp": ["amp", "threads continue"],
+    "goose": ["goose session", "--resume"],   # bare `goose` is the help screen
+    "qwen": ["qwen", "--continue"],
 }
 
 
@@ -2760,6 +2764,10 @@ UPDATES = {
     "opencode": "opencode upgrade",
     "gemini": "npm install -g @google/gemini-cli@latest",
     "aider": "python3 -m pip install -U aider-chat",
+    "cursor": "cursor-agent update",
+    "amp": "amp update",
+    "goose": "goose update",
+    "qwen": "npm install -g @qwen-code/qwen-code@latest",
 }
 UPDATE_TIMEOUT = 600
 UPDATE_STAMP = os.path.join(STATE_DIR, "last_update")
@@ -8808,6 +8816,10 @@ const LOOK = {
   opencode: {shirt: '#a0a7b4', shade: '#6f7684', hair: '#6b4f3a', skin: '#f5d0a9', hat: 'beanie'},
   gemini:   {shirt: '#8e75ff', shade: '#6250c4', hair: '#c9a227', skin: '#f2c79b', hat: 'none'},
   aider:    {shirt: '#e0af68', shade: '#ad8040', hair: '#2b2f45', skin: '#e8b48a', hat: 'none'},
+  cursor:   {shirt: '#e6e9f2', shade: '#9aa0b0', hair: '#151515', skin: '#e8b48a', hat: 'cap'},
+  amp:      {shirt: '#f34e3f', shade: '#b0342a', hair: '#2b2f45', skin: '#f2c79b', hat: 'headset'},
+  goose:    {shirt: '#f6d365', shade: '#c9a227', hair: '#6b4f3a', skin: '#c98b5e', hat: 'beanie'},
+  qwen:     {shirt: '#615ced', shade: '#4440b0', hair: '#151515', skin: '#f5d0a9', hat: 'hood'},
 };
 const look = k => LOOK[k] || {shirt: '#c0caf5', shade: '#8189b0', hair: '#3b4261', skin: '#f2c79b', hat: 'none'};
 const color = k => look(k).shirt;

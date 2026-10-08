@@ -86,8 +86,9 @@ session is still yours — SSH in, attach, type directly, and the bot keeps work
 mid-conversation. Nothing is wrapped, proxied, or re-hosted, so there is no state
 to get out of sync and nothing to lose when the daemon restarts.
 
-**It is not tied to one agent.** `!new` starts your default; `!codex`, `!aider`,
-`!gemini` or anything you add to `agents` in the config starts that instead, and
+**It is not tied to one agent.** `!new` starts your default; `!codex`, `!agy`,
+`!opencode`, `!gemini`, `!aider`, `!cursor` (Cursor CLI), `!amp`, `!goose`,
+`!qwen` (Qwen Code) or anything you add to `agents` in the config starts that instead, and
 `!resume` remembers which agent a topic belongs to. The hooks and the usage
 numbers are Claude Code specific — every other agent degrades to reading the
 terminal, which is how nightmux worked before the hooks existed.
