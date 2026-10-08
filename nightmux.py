@@ -9587,79 +9587,137 @@ DASHBOARD_HTML = r"""<!doctype html>
 <link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14'%3E%F0%9F%8C%99%3C/text%3E%3C/svg%3E">
 <style>
-:root { color-scheme: dark; }
+:root { color-scheme: dark; --bg: #0a0d14; --card: #121725; --card2: #161c2c; --line: #232a3d; --fg: #dbe1ee;
+        --mut: #8b93a7; --dim: #5d6680; --acc: #e0af68; --blue: #7aa2f7; --ok: #3fb950; --busy: #e3b341;
+        --ask: #f0883e; --bad: #f85149; }
 * { box-sizing: border-box; }
-body { margin: 0; padding: 20px 16px 40px; background: #0b0e14; color: #d8dee9;
-       font: 14px/1.5 -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
-main { max-width: 1200px; margin: 0 auto; }
-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
-h1 { font-size: 18px; font-weight: 600; margin: 0; }
-h2 { font-size: 13px; font-weight: 600; color: #8b949e; text-transform: uppercase;
-     letter-spacing: .06em; margin: 26px 0 10px; display: flex; gap: 10px; align-items: center; }
+body { margin: 0; padding: 0 0 48px; background: var(--bg); color: var(--fg);
+       background-image: radial-gradient(1200px 500px at 90% -10%, #1d1838 0, transparent 60%),
+                         radial-gradient(900px 400px at -10% 0, #0f2236 0, transparent 55%);
+       background-attachment: fixed;
+       font: 14px/1.5 system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+header { position: sticky; top: 0; z-index: 5; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+         background: rgba(10,13,20,.78); border-bottom: 1px solid var(--line);
+         padding: calc(10px + env(safe-area-inset-top)) 16px 10px; }
+.hbar { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 17px; font-weight: 700; margin: 0; letter-spacing: .02em; display: flex; align-items: center; gap: 8px; }
+h1 svg { filter: drop-shadow(0 0 6px #e0af6888); }
+nav.top { margin-left: auto; display: flex; gap: 6px; }
+nav.top a { font-size: 13px; color: var(--fg); text-decoration: none; padding: 5px 11px; border-radius: 999px;
+            background: var(--card); border: 1px solid var(--line); }
+nav.top a:hover { border-color: var(--blue); }
+#pulse { display: flex; gap: 8px; flex-wrap: wrap; width: 100%; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px;
+        background: var(--card); border: 1px solid var(--line); color: var(--mut); font-variant-numeric: tabular-nums; }
+.pill b { color: var(--fg); font-size: 13px; }
+.pill.hot { border-color: var(--ask); color: var(--ask); box-shadow: 0 0 0 3px #f0883e22; }
+h2 { font-size: 12px; font-weight: 700; color: var(--mut); text-transform: uppercase;
+     letter-spacing: .1em; margin: 28px 0 12px; display: flex; gap: 10px; align-items: center; }
+h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); order: 1; }
+h2 > * { order: 2; }
 a { color: #79c0ff; }
-.sub { color: #6b7280; font-size: 13px; }
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); }
+.sub { color: var(--dim); font-size: 13px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); }
 .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); }
-.card, .tile { background: #131722; border: 1px solid #232838; border-radius: 10px; padding: 12px 14px; min-width: 0; }
-.tile .k { color: #8b949e; font-size: 12px; }
-.tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.bar { height: 6px; background: #232838; border-radius: 3px; overflow: hidden; margin-top: 6px; }
-.bar i { display: block; height: 100%; width: 0; background: #3fb950; transition: width .4s; }
-.bar i.mid { background: #d29922; } .bar i.hi { background: #f85149; }
+.card, .tile { background: linear-gradient(180deg, var(--card2), var(--card)); border: 1px solid var(--line);
+               border-radius: 14px; padding: 14px 16px; min-width: 0; position: relative;
+               box-shadow: 0 1px 0 #ffffff08 inset, 0 8px 24px -16px #000; transition: border-color .3s, box-shadow .3s; }
+.card[class*=" t-"]::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px;
+                              border-radius: 0 3px 3px 0; background: var(--dim); }
+.card.t-idle::before { background: var(--ok); } .card.t-busy::before { background: var(--busy); }
+.card.t-waiting::before { background: var(--ask); } .card.t-limit::before { background: var(--blue); }
+.card.t-waiting { border-color: #f0883e88; box-shadow: 0 0 0 3px #f0883e1f, 0 8px 24px -16px #000; }
+.card.t-busy { border-color: #e3b34144; }
+.tile .k { color: var(--mut); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: #1d2333; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+.bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg, #2ea043, #3fb950);
+         transition: width .6s cubic-bezier(.2,.8,.2,1); }
+.bar i.mid { background: linear-gradient(90deg, #bb8009, #e3b341); } .bar i.hi { background: linear-gradient(90deg, #da3633, #f85149); }
 .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
-.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: #f85149; }
-.dot.idle { background: #3fb950; } .dot.busy { background: #d29922; }
-.dot.waiting { background: #f0883e; }
-.sess { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta { color: #8b949e; font-size: 12px; overflow-wrap: anywhere; }
-.bench { color: #6b7280; font-size: 12px; margin-top: 4px; }
-.win { margin-top: 8px; font-size: 12px; color: #8b949e; display: flex; justify-content: space-between; }
-form { display: flex; gap: 6px; margin-top: 10px; }
-input { flex: 1; min-width: 0; background: #0b0e14; border: 1px solid #232838; color: #d8dee9;
-        border-radius: 6px; padding: 7px 8px; font: inherit; font-size: 16px; }
-button, select { background: #232838; border: 1px solid #2d3346; color: #d8dee9;
-         border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
-button:hover { background: #2d3346; } button:disabled { opacity: .5; cursor: default; }
-.ok { font-size: 12px; color: #3fb950; height: 16px; margin-top: 4px; }
-.ok.err { color: #f85149; }
-.empty { color: #6b7280; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--bad); position: relative; }
+.dot.idle { background: var(--ok); } .dot.busy { background: var(--busy); } .dot.waiting { background: var(--ask); }
+.dot.limit { background: var(--blue); } .dot.offline, .dot.gone, .dot.shell { background: var(--dim); }
+.dot.busy::after, .dot.waiting::after { content: ""; position: absolute; inset: -4px; border-radius: 50%;
+  border: 2px solid currentColor; color: var(--busy); animation: ping 1.6s cubic-bezier(0,0,.2,1) infinite; }
+.dot.waiting::after { color: var(--ask); animation-duration: 1s; }
+@keyframes ping { 0% { transform: scale(.6); opacity: .9 } 80%, 100% { transform: scale(1.6); opacity: 0 } }
+@media (prefers-reduced-motion: reduce) { .dot::after { animation: none !important; display: none; } }
+.sess { font-weight: 650; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { color: var(--mut); font-size: 12px; overflow-wrap: anywhere; }
+.bench { color: var(--dim); font-size: 12px; margin-top: 4px; }
+.win { margin-top: 10px; font-size: 12px; color: var(--mut); display: flex; justify-content: space-between; gap: 8px; }
+form { display: flex; gap: 6px; margin-top: 12px; }
+input { flex: 1; min-width: 0; background: #0a0d14; border: 1px solid var(--line); color: var(--fg);
+        border-radius: 10px; padding: 9px 11px; font: inherit; font-size: 16px; transition: border-color .2s, box-shadow .2s; }
+input:focus, textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px #7aa2f733; }
+button, select { background: #1d2333; border: 1px solid #2d3448; color: var(--fg);
+         border-radius: 10px; padding: 7px 13px; font: inherit; cursor: pointer; transition: background .2s, transform .1s; }
+button:hover { background: #262d42; } button:active { transform: scale(.97); }
+button:disabled { opacity: .5; cursor: default; }
+.ok { font-size: 12px; color: var(--ok); min-height: 16px; margin-top: 4px; }
+.ok.err { color: var(--bad); }
+.empty { color: var(--dim); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-th, td { text-align: right; padding: 5px 0 5px 8px; border-bottom: 1px solid #232838; overflow-wrap: anywhere; }
-th:first-child, td:first-child { text-align: left; }
-th { color: #8b949e; font-weight: 500; }
-.scroll { overflow-x: auto; background: #131722; border: 1px solid #232838; border-radius: 10px; }
+th, td { text-align: right; padding: 6px 0 6px 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+th:first-child, td:first-child { text-align: left; color: var(--mut); }
+th { color: var(--mut); font-weight: 500; }
+.scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 ul.tips { margin: 12px 0 0; padding-left: 18px; } ul.tips li { margin-bottom: 8px; }
 ul.tips b { color: #79c0ff; }
-.chipsrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
-.chip { font-size: 12px; padding: 3px 9px; border-radius: 12px; }
-.chip.live { background: #1f6feb33; border-color: #1f6feb; color: #79c0ff; cursor: default; }
-select.add { font-size: 12px; padding: 3px 6px; }
-button.close { margin-left: auto; font-size: 12px; padding: 3px 9px; color: #f85149; border-color: #f8514955; }
-button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.chipsrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.chip { font-size: 12px; padding: 4px 11px; border-radius: 999px; }
+.chip.live { background: #1f6feb26; border-color: #1f6feb; color: #79c0ff; cursor: default; }
+select.add { font-size: 12px; padding: 4px 8px; border-radius: 999px; }
+button.close { margin-left: auto; font-size: 12px; padding: 4px 11px; color: var(--bad); border-color: #f8514955;
+               border-radius: 999px; background: transparent; }
+button.primary { background: linear-gradient(180deg, #2f7bf5, #1f6feb); border-color: #1f6feb; color: #fff; font-size: 12px; }
 #newp { display: none; margin-bottom: 14px; }
-#newp.open { display: block; }
+#newp.open { display: block; animation: rise .25s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px) } }
 #newp .f { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); }
-#newp label { font-size: 12px; color: #8b949e; display: grid; gap: 4px; }
-textarea { background: #0b0e14; border: 1px solid #232838; color: #d8dee9; border-radius: 6px;
-           padding: 7px 8px; font: inherit; font-size: 16px; min-height: 60px; width: 100%; }
-#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 92vw;
-         background: #131722; border: 1px solid #2d3346; border-radius: 8px; padding: 8px 14px;
-         font-size: 13px; display: none; z-index: 9; }
+#newp label { font-size: 12px; color: var(--mut); display: grid; gap: 4px; }
+textarea { background: #0a0d14; border: 1px solid var(--line); color: var(--fg); border-radius: 10px;
+           padding: 9px 11px; font: inherit; font-size: 16px; min-height: 60px; width: 100%; }
+#toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%); max-width: 92vw;
+         background: #1a2032; border: 1px solid #2d3448; border-radius: 999px; padding: 9px 16px;
+         font-size: 13px; display: none; z-index: 9; box-shadow: 0 10px 30px -10px #000; }
 .srv + .srv { margin-top: 14px; }
-a.chatlnk { margin-left: auto; text-decoration: none; font-size: 16px; }
-#addp { display: none; margin-bottom: 12px; } #addp.open { display: block; }
+a.chatlnk { text-decoration: none; font-size: 15px; width: 30px; height: 30px; display: grid; place-items: center;
+            border-radius: 8px; background: #1d2333; border: 1px solid var(--line); flex: none; }
+a.chatlnk:first-of-type { margin-left: auto; }
+#addp { display: none; margin-bottom: 12px; } #addp.open { display: block; animation: rise .25s ease-out; }
 ol.steps { margin: 0; padding-left: 20px; } ol.steps li { margin-bottom: 10px; }
-pre { background: #0b0e14; border: 1px solid #232838; border-radius: 6px; padding: 8px 10px;
+pre { background: #0a0d14; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
       overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 6px 0; }
-code { background: #0b0e14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
-#setup .card { border-color: #d2992266; margin-bottom: 8px; }
-#setup .ok { color: #3fb950; font-size: 13px; margin: 0 0 6px; height: auto; }
-#setup li { margin-bottom: 6px; } #setup li span { color: #8b949e; font-size: 12px; display: block; } .sname { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+#setup .card { border-color: #e3b34166; margin-top: 16px; }
+#setup .ok { color: var(--ok); font-size: 13px; margin: 14px 0 0; height: auto; }
+#setup li { margin-bottom: 6px; } #setup li span { color: var(--mut); font-size: 12px; display: block; } .sname { font-size: 12px; color: var(--mut); margin-bottom: 6px; }
 .sname:empty { display: none; }
 </style></head>
-<body><main>
-<header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a> · <a href="/app">app</a></span></header>
+<body>
+<header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
+<nav class="top"><a href="/office">🏢 office</a><a href="/app">📱 app</a></nav>
+<div id="pulse"></div></div></header>
+<main>
 <div id="setup"></div>
+<h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
+<div id="newp" class="card"><form id="newf">
+  <div class="f">
+    <label>project name<input name="title" required placeholder="habit tracker" autocomplete="off"></label>
+    <label>agent<select name="agent"></select></label>
+    <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
+    <label id="srvl">server<select name="server"></select></label>
+  </div>
+  <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
+    <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
+  <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
+    <span class="meta">creates the Telegram topic, the folder and the session</span></div>
+</form></div>
+<div class="grid" id="grid"><p class="empty">loading…</p></div>
+<h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
 <h2>servers <button id="addsrv" class="primary">+ add server</button></h2>
 <div id="addp" class="card">
   <ol class="steps">
@@ -9677,21 +9735,6 @@ sudo tailscale up</pre></li>
 </div>
 <div class="grid" id="srvlist"></div>
 <div id="server" style="margin-top:12px"></div>
-<h2>limits per agent</h2><div class="grid" id="limits"><p class="empty">loading…</p></div>
-<h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
-<div id="newp" class="card"><form id="newf">
-  <div class="f">
-    <label>project name<input name="title" required placeholder="habit tracker" autocomplete="off"></label>
-    <label>agent<select name="agent"></select></label>
-    <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
-    <label id="srvl">server<select name="server"></select></label>
-  </div>
-  <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
-    <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
-  <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
-    <span class="meta">creates the Telegram topic, the folder and the session</span></div>
-</form></div>
-<div class="grid" id="grid"><p class="empty">loading…</p></div>
 <div id="toast"></div>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
@@ -9770,7 +9813,22 @@ function limits(rows) {
     });
 }
 
+function pulse(rows) {
+  const n = m => rows.filter(r => (r.mode || '').replace(/[^a-z]/g, '') === m).length,
+    ask = n('waiting'), q = rows.reduce((a, r) => a + (r.queued || 0), 0), held = rows.filter(r => r.held_until).length;
+  const p = [['busy', n('busy'), 'working'], ['waiting', ask, 'asking'], ['idle', n('idle'), 'idle']]
+    .filter(x => x[1] || x[0] !== 'waiting')
+    .map(([c, v, l]) => '<span class="pill' + (c === 'waiting' ? ' hot' : '') + '"><span class="dot ' + c + '"></span><b>' + v + '</b>' + l + '</span>');
+  if (q) p.push('<span class="pill">📝 <b>' + q + '</b>queued</span>');
+  if (held) p.push('<span class="pill">💤 <b>' + held + '</b>at a limit</span>');
+  p.push('<span class="pill"><b>' + rows.length + '</b>topic' + (rows.length === 1 ? '' : 's') + '</span>');
+  const html = p.join('');
+  if ($('pulse').innerHTML !== html) $('pulse').innerHTML = html;
+  document.title = (ask ? '✋' + ask + ' ' : '') + '🌙 nightmux';
+}
+
 function topics(rows) {
+  pulse(rows);
   if (!rows.length) { $('grid').innerHTML = '<p class="empty">no topics bound</p>'; return; }
   keyed($('grid'), rows, r => r.topic,
     r => {
@@ -9785,7 +9843,9 @@ function topics(rows) {
       return c;
     },
     (el, r) => {
-      el.querySelector('.dot').className = 'dot ' + ((r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline');
+      const mode = (r.mode || 'offline').replace(/[^a-z]/g, '') || 'offline';
+      el.className = 'card t-' + (r.held_until ? 'limit' : mode);
+      el.querySelector('.dot').className = 'dot ' + mode;
       set(el, '.sess', r.session);
       set(el, '.tid', 'topic ' + r.topic + (r.agent ? ' · ' + r.agent : '') + (r.server ? ' · ' + r.server : ''));
       set(el, '.info', (r.usage || r.mode) + (r.queued ? ' · ' + r.queued + ' queued' : '') +
@@ -10334,10 +10394,12 @@ function station(R, g, x0, d, f, o) {
   if (!sip && sit) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
     if (st === 'idle' && f % 6 < 3) R('rgba(230,233,242,.5)', x0 + 24, 83 + f % 3, 1, 2); }
   if (sit) {
-    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72;
+    const ph = (d.agent.length * 17 + x0) % 61, look = st === 'busy' && (f + ph) % 45 < 4 ? 1 : 0;
+    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72 + look;
+    const blink = !sleep && (f + ph) % 52 === 0;
     const sx = tx + 6, sy = ty + 2, sk = L.skin;
     if (sleep) { R(L.shirt, x0 + 21, 88, 12, 3); R(L.shade, x0 + 21, 90, 12, 1); }
-    spr(R, sleep ? HEAD.map(r => r.replace('E', 'S')) : HEAD, hx, hy, pal);
+    spr(R, sleep || blink ? SHUT : HEAD, hx, hy, pal);
     hat(R, L, hx, hy);
     if (st === 'busy') { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 6, 2); R(sk, sx + 7, sy + 5 - f % 2, 2, 2); R(L.shade, sx + 3, sy + 6, 4, 1); R(sk, sx + 10, sy + 6 - (f + 1) % 2, 2, 1); }
     else if (st === 'waiting') { R(L.shirt, sx, sy - 14, 2, 16); R(sk, sx + (f % 6 < 3 ? 0 : 1), sy - 16, 2, 2); }
@@ -10370,12 +10432,20 @@ function station(R, g, x0, d, f, o) {
 // the frame and when the state last changed, so reel and demo frames replay.
 const LW = 112, SPEED = DEMO ? 3 : 2, GRACE = DEMO ? 6 : 24, DWELL = DEMO ? [4, 20] : [30, 70];
 const SPOT = {wc: 9, coffee: 30, tv1: 52, tv2: 68, bed: 90, couch: 50};
+// A walk speeds up out of the chair and slows into the spot (half pace at either
+// end, half again in the middle), and each agent has its own stride.
+const RISE = 4;
+function stroll(a, b, u, pace) {                // where a walk from a to b is u frames in, or null
+  const dist = Math.abs(b - a), w = dist / pace;
+  if (u >= w) return null;
+  const s = u / w, e = s - Math.sin(2 * Math.PI * s) / (4 * Math.PI);
+  return {x: a + Math.sign(b - a) * dist * e, pose: 'walk', dir: Math.sign(b - a), walked: dist * e};
+}
 function plan(d, i, f, L0, x0) {
-  const t = f - (d.since || 0), home = x0 + 15;
-  const go = (tx, u, pose, spot) => {          // walk there, do the thing
-    const dist = Math.abs(tx - home), w = dist / SPEED;
-    return u < w ? {x: home + Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(tx - home)}
-                 : {x: tx, pose, spot};
+  const t = f - (d.since || 0), home = x0 + 15, pace = SPEED * (.85 + (i * 0.13) % .3);
+  const go = (tx, u, pose, spot) => {          // stand up, walk there, do the thing
+    if (u < RISE) return {x: home, pose: 'rise', dir: Math.sign(tx - home)};
+    return stroll(home, tx, u - RISE, pace) || {x: tx, pose, spot};
   };
   if (d.state === 'limit') {
     if (t < 14) return null;                     // slumps first, then gives up and goes to bed
@@ -10386,17 +10456,19 @@ function plan(d, i, f, L0, x0) {
   let u = u0 % P;
   const spot = ['coffee', 'tv', 'wc', 'tv', 'coffee', 'wc'][(c + i * 2) % 6];
   const tx = L0 + SPOT[spot === 'tv' ? (i % 2 ? 'tv2' : 'tv1') : spot];
-  const walk = Math.abs(tx - home) / SPEED, desk = DWELL[0] + (i * 37) % DWELL[1];
+  const walk = Math.abs(tx - home) / pace + RISE, desk = DWELL[0] + (i * 37) % DWELL[1];
   const stay = P - desk - 2 * walk;
   if (stay < 40 || u < desk) return null;
   u -= desk;
   if (u < walk + stay) return go(tx, u, spot === 'tv' ? 'sit' : spot === 'wc' ? 'in' : 'stand', spot);
   u -= walk + stay;
-  return u < walk ? {x: tx - Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(home - tx)} : null;
+  return stroll(tx, home, u, pace);
 }
 
-function hat(R, L, hx, hy) {
-  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
+const SHUT = HEAD.map(r => r.replace('E', 'S'));
+const HEADL = HEAD.map(r => [...r].reverse().join(''));         // facing left
+function hat(R, L, hx, hy, left) {
+  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, left ? hx - 1 : hx + 5, hy + 2, 3, 1); }
   if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
   if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
   if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
@@ -10452,12 +10524,23 @@ function actor(R, d, a, f, i) {
     if (f % 60 < 30) R(L.skin, x + 7, 96, 2, 2);             // hand to the snacks
     return;
   }
-  const step = a.pose === 'walk' ? (Math.floor(x / 3) % 2) : 0;
-  spr(R, HEAD, x, 77, pal); hat(R, L, x, 77);
-  spr(R, TORSO.slice(0, 8), x - 1, 85, pal); R('#2a2f45', x - 1, 93, 8, 3);
-  R('#2a2f45', x + (step ? 0 : 1), 96, 3, 17); R('#2a2f45', x + (step ? 4 : 3), 96, 3, 17);
-  R('#0b0d14', x + (step ? -1 : 0), 113, 4, 2); R('#0b0d14', x + (step ? 4 : 3), 113, 4, 2);
-  if (a.pose === 'walk') R(L.skin, x + (a.dir > 0 ? 6 : -1), 90 + step, 2, 2);
+  // Four-beat stride from the distance covered, so feet never skate: contact,
+  // passing (body up a pixel), the other contact, passing. Arms swing opposite.
+  const ph = a.pose === 'walk' ? Math.floor((a.walked || 0) / 2.5) % 4 : -1, up = ph % 2 === 1 ? 1 : 0,
+    left = a.dir < 0, y0 = (a.pose === 'rise' ? 1 : 0) - up, fwd = left ? -1 : 1;
+  const legs = ph === 0 ? [2, -1] : ph === 2 ? [-1, 2] : [0, 0];
+  R('rgba(0,0,0,.3)', x - 2 + (ph === 0 || ph === 2 ? -1 : 0), 114, 11 + (ph === 0 || ph === 2 ? 2 : 0), 2);
+  spr(R, left ? HEADL : HEAD, x, 77 + y0, pal); hat(R, L, x, 77 + y0, left);
+  spr(R, TORSO.slice(0, 8), x - 1, 85 + y0, pal); R('#2a2f45', x - 1, 93 + y0, 8, 3);
+  for (const [k, lx] of [[0, 1], [1, 3]]) {
+    const o = legs[k] * fwd, lift = ph >= 0 && legs[k] < 0 ? 1 : 0;
+    R('#2a2f45', x + lx + o, 96 + y0, 3, 17 - y0 - lift); R('#0b0d14', x + lx + o + (left ? -1 : 0), 113 - lift, 4, 2);
+  }
+  if (a.pose === 'walk') {
+    const sw = ph === 0 ? -1 : ph === 2 ? 1 : 0;
+    R(L.shade, x + (left ? 5 : 0) + sw * fwd, 88 + y0, 2, 5); R(L.skin, x + (left ? 5 : 0) + sw * fwd, 93 + y0, 2, 2);
+    R(L.skin, x + (left ? -1 : 6) - sw * fwd, 90 + y0 + (sw ? 0 : 1), 2, 2);
+  }
   if (a.pose === 'stand') { const sip = f % 40 < 14;           // coffee in hand
     R(L.shirt, x + 6, sip ? 84 : 88, 2, sip ? 6 : 4); R('#e6e9f2', x + 7, sip ? 82 : 91, 3, 4); }
 }
@@ -10490,7 +10573,8 @@ function effects(R, room, pad, f, fx) {
   }
 }
 
-function drawRoom(cv, room, f, o) {
+function drawRoom(cv, room, F, o) {
+  const f = Math.floor(F);   // poses and flicker step by frame; walking and dust use F
   const n = room.desks.length, w = Math.max(256, n * SW + LW), h = RH + (o.caption != null ? 16 : 0);
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const g = cv.getContext('2d');
@@ -10498,20 +10582,26 @@ function drawRoom(cv, room, f, o) {
   const R = (c, x, y, ww, hh) => { if (ww > 0 && hh > 0) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh)); } };
   const pad = Math.round((w - n * SW - LW) / 2), L0 = pad + n * SW;
   o.pad = pad;
-  const away = room.desks.map((d, i) => (d.away = plan(d, i, f, L0, pad + i * SW)));
+  const away = room.desks.map((d, i) => (d.away = plan(d, i, F, L0, pad + i * SW)));
   const occ = {wc: away.some(a => a && a.pose === 'in'), coffee: away.some(a => a && a.pose === 'stand'),
                tv: away.some(a => a && a.pose === 'sit')};
   backdrop(R, g, w, f, o);
   lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
   room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
+  room.desks.forEach((d, i) => { if (!d.live) return;          // dust drifting through the lamp light
+    const x0 = pad + i * SW;
+    for (let k = 0; k < 5; k++) {
+      const y = 12 + ((F * .25 + k * 11) % 44), x = x0 + 33 + Math.sin(F * .03 + k * 2.1) * (6 + y / 5);
+      R('rgba(255,226,170,' + (.45 * Math.sin(Math.PI * (y - 12) / 44)).toFixed(2) + ')', x, 56 + y, 1, 1);
+    } });
   for (const spot of ['coffee', 'tv']) {            // two on a break together get talking
     const here = away.filter(a => a && a.spot === spot && a.pose !== 'walk');
     if (here.length < 2 || f % 40 >= 28) continue;
     const k = Math.floor(f / 40), a = here[k % here.length];
     bubble(R, a.x - 4, spot === 'tv' ? 66 : 58, '?!·#'[k % 4], '#3b4261', (f >> 2) % 2);
   }
-  effects(R, room, pad, f, o.fx);
+  effects(R, room, pad, F, o.fx);
   if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn * (1 - (o.day || 0))) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
@@ -10789,7 +10879,14 @@ if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
-setInterval(() => { if (auto) { frame++; draw(); } }, 110);
+// The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
+// walk moves a pixel at a time instead of hopping two.
+let lastT = 0;
+(function loop(now) {
+  requestAnimationFrame(loop);
+  if (!auto || now - lastT < 33) { if (!auto) lastT = now; return; }
+  frame += Math.min(now - lastT, 250) / 110; lastT = now; draw();
+})(0);
 draw();
 </script>
 </body></html>"""
