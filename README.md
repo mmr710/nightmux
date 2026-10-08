@@ -608,6 +608,15 @@ the cache hit rate, the average context each call carried, how often you
 nudged with "continue"/"yes" — and what to change to get better output for
 fewer tokens. The same report is `!stats [days]` in Telegram.
 
+## Without Telegram
+
+No bot? Press Enter at the token prompt in `nightmux --setup` (or leave
+`token` out of `~/.nightmux.json`). nightmux runs dashboard-only: the
+dashboard at http://127.0.0.1:9090/ opens projects with **+ project**, and each
+project's 💬 chat view (an installable PWA) is the channel — the same commands,
+buttons and replies you would get in a Telegram topic. Add a bot later by
+running `--setup` again.
+
 ## The office
 
 `/office` on the same port is your night crew as a pixel-art office: a room

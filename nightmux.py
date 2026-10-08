@@ -112,6 +112,8 @@ _last_send = [0.0]
 
 def _post(cfg, method, body, headers=None):
     """One round trip. Paces outbound calls and honours a 429 back-off once."""
+    if not cfg.get("token"):
+        return {}            # dashboard-only: no bot, the chat view is the channel
     if method not in NO_THROTTLE:
         with _send_lock:
             wait = SEND_GAP - (time.time() - _last_send[0])
@@ -8133,7 +8135,16 @@ def setup():
                                     if cfg.get("token") else "")).strip()
     cfg["token"] = token or cfg.get("token")
     if not cfg["token"]:
-        sys.exit("no token, no bot")
+        if input("   no token — run dashboard-only, without Telegram? [Y/n] ").strip().lower() \
+                not in ("", "y", "yes"):
+            sys.exit("no token, no bot")
+        cfg.pop("token", None)
+        cfg.setdefault("webhook_port", 9090)
+        cfg.setdefault("topics", {})
+        save_cfg(cfg)
+        print(f"   dashboard-only: http://127.0.0.1:{cfg['webhook_port']}/ — '+ project' opens a "
+              "project, the 💬 chat view is your channel. Add a bot any time with --setup.\n")
+        return setup_tail(cfg)
     me = api(cfg, "getMe")
     if not me.get("ok"):
         sys.exit(f"telegram rejected that token: {me.get('description')}")
@@ -8156,6 +8167,11 @@ def setup():
           f"   allow_users = [{user_id}] — only you. Anyone you add here gets a\n"
           f"   shell on this machine; read SECURITY.md before you add a second.\n"
           f"   wrote {CFG_PATH} (0600)\n")
+    setup_tail(cfg)
+
+
+def setup_tail(cfg):
+    """Hooks and the service: the same with a bot or without."""
     for note in wire_claude() or ["claude settings already wired"]:
         print(f"   {note}")
     print()
@@ -8168,7 +8184,8 @@ def setup():
     print(wire_unit() or f"   started, unit at {PLIST_PATH if mac else UNIT_PATH}")
     print("\nDone. In the group: create a topic, then send\n"
           "   !new myproj ~/code/myproj\n"
-          "and type to it. !help lists the rest.")
+          "and type to it. !help lists the rest." if cfg.get("token") else
+          f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
 
 
 def restore_startup(cfg, state, lock):
@@ -9356,8 +9373,12 @@ def topic_new(cfg, state, lock, title, name, folder, key, idea="", server=""):
         return False, "a name is needed"
     if server and server not in (cfg.get("peers") or {}):
         return False, f"no server '{server}'"
-    r = api(cfg, "createForumTopic", chat_id=cfg["chat_id"], name=title)
-    topic = str(((r or {}).get("result") or {}).get("message_thread_id") or "")
+    if cfg.get("token"):
+        r = api(cfg, "createForumTopic", chat_id=cfg["chat_id"], name=title)
+        topic = str(((r or {}).get("result") or {}).get("message_thread_id") or "")
+    else:                       # dashboard-only: the topic is just a number here
+        r, topic = {}, str(max([1000] + [int(t) for t in cfg.get("topic_names") or {}
+                                          if str(t).isdigit()]) + 1)
     if not topic:
         return False, ("Telegram refused to create the topic — the bot needs the "
                        "'Manage topics' admin right: " + str((r or {}).get("description", "")))
@@ -9964,13 +9985,18 @@ def main():
         cfg = load_cfg()
     except json.JSONDecodeError as e:
         sys.exit(bad_cfg(e))
+    local_ = not cfg.get("token")
+    if local_:                  # no bot: the dashboard and its chat view are the UI
+        cfg.setdefault("webhook_port", 9090)
+        cfg.setdefault("chat_id", "local")
+        cfg.setdefault("allow_users", [0])
     for key in ("token", "chat_id", "allow_users"):
-        if not cfg.get(key):
+        if not cfg.get(key) and not (local_ and key == "token"):
             sys.exit(f"{CFG_PATH}: missing '{key}'  (run: {__file__} --setup)")
     cfg.setdefault("topics", {})
     # false: a peer — the primary polls and forwards. Not "poll": that one is
     # the watcher's tick in seconds.
-    poll = cfg.get("poll_telegram", True)
+    poll = cfg.get("poll_telegram", True) and not local_
     if cfg.get("peer_listen") and len(cfg.get("peer_secret") or "") < 16:
         sys.exit(f"{CFG_PATH}: peer_listen needs a peer_secret of 16+ characters")
     autostart(cfg)
@@ -9997,7 +10023,9 @@ def main():
         if cfg.get("webhook_port"):
             threading.Thread(target=run_webhook_server, daemon=True,
                              args=(cfg, state, lock, allow, cfg["webhook_port"])).start()
-        print(f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
+        print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ "
+              f"topics={cfg['topics']}" if local_ else
+              f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
         while True:
             time.sleep(3600)
 
@@ -11473,6 +11501,7 @@ def selfcheck():
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
         rcfg_["route_stats"] = {"light": {"codex": [9, 10], "claude": [1, 10]}}
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "codex"
+    assert _post({}, "sendMessage", b"") == {}       # dashboard-only: never reaches the network
     seen_ = {d["state"] for t_ in range(0, 400, 5) for r in demo_snapshot(t_)["rooms"] for d in r["desks"]}
     assert seen_ == {"busy", "idle", "limit", "waiting"}, seen_     # --demo shows every state
     # Prompt coach: vague prompts held, corrections learned, model ladder, fresh.
@@ -12956,12 +12985,16 @@ def setup_checks(cfg=None):
         except (OSError, ValueError) as e:
             add("config file", False, f"{CFG_PATH}: {e} — run: nightmux --setup")
             cfg = {}
-    missing = [k for k in ("token", "chat_id", "allow_users") if not cfg.get(k)]
-    add("config has token/chat_id/allow_users", not missing,
-        ("missing " + ", ".join(missing) + " — run: nightmux --setup") if missing else "")
-    me = api(cfg, "getMe") if cfg.get("token") else {}
-    add("token accepted by Telegram", bool(me.get("ok")),
-        me.get("description", "") or "get one from @BotFather, then nightmux --setup")
+    if cfg and not cfg.get("token"):
+        add("dashboard-only (no Telegram bot)", True,
+            "add a bot any time: nightmux --setup")
+    else:
+        missing = [k for k in ("token", "chat_id", "allow_users") if not cfg.get(k)]
+        add("config has token/chat_id/allow_users", not missing,
+            ("missing " + ", ".join(missing) + " — run: nightmux --setup") if missing else "")
+        me = api(cfg, "getMe") if cfg.get("token") else {}
+        add("token accepted by Telegram", bool(me.get("ok")),
+            me.get("description", "") or "get one from @BotFather, then nightmux --setup")
     if cfg.get("token") and cfg.get("chat_id"):
         chat = api(cfg, "getChat", chat_id=cfg["chat_id"])
         add("bot reachable in the configured chat", bool(chat.get("ok")),
