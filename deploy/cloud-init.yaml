@@ -1,0 +1,17 @@
+#cloud-config
+# A fresh Ubuntu VPS (Hetzner, DigitalOcean, Vultr…) ready for nightmux: paste
+# this into the provider's "user data" / "cloud-init" box when creating it.
+# Then: ssh in as `night`, run `claude` (and/or `codex`) once to log in, and
+#   curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh
+users:
+  - name: night
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys: []   # put your public key here, or copy root's below
+package_update: true
+packages: [git, python3, tmux, curl, nodejs, npm]
+runcmd:
+  - cp -r /root/.ssh /home/night/ 2>/dev/null && chown -R night:night /home/night/.ssh || true
+  - npm install -g @anthropic-ai/claude-code @openai/codex
+  - loginctl enable-linger night   # the user service keeps running after you log out

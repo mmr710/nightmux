@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux — your AI coding agents, overnight, from your phone</title>
+<meta name="description" content="Drive Claude Code, Codex, Gemini, opencode and more from Telegram or your phone. They keep working past usage limits, overnight.">
+<meta property="og:title" content="nightmux — your night crew">
+<meta property="og:description" content="Run Claude Code, Codex, agy, opencode from your phone. Auto-resume past usage limits. A pixel-art office of your agents.">
+<meta property="og:image" content="https://mmr710.github.io/nightmux/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z' fill='%23e0af68'/%3E%3C/svg%3E">
+<style>
+:root{--bg:#07090f;--card:#0d1120;--line:#1b2133;--fg:#cdd6f4;--dim:#8b93a7;--gold:#e0af68;--green:#9ece6a;--blue:#7aa2f7}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 ui-monospace,Menlo,Consolas,monospace}
+a{color:var(--blue)}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px}
+nav{display:flex;gap:16px;align-items:center;padding:16px 0;flex-wrap:wrap}
+nav b{color:var(--gold);letter-spacing:2px}
+nav .sp{flex:1}
+.btn{display:inline-block;border:2px solid var(--line);background:var(--card);color:var(--fg);padding:8px 14px;text-decoration:none;border-radius:6px}
+.btn.go{border-color:var(--gold);color:var(--gold)}
+h1{font-size:clamp(28px,6vw,48px);line-height:1.15;margin:32px 0 12px}
+h1 em{font-style:normal;color:var(--gold)}
+.lead{color:var(--dim);font-size:18px;max-width:720px}
+.hero{margin:28px 0;border:2px solid var(--line);border-radius:8px;overflow:hidden;background:#000}
+.hero img{display:block;width:100%;image-rendering:pixelated}
+pre{background:#05070d;border:1px solid var(--line);padding:14px;border-radius:6px;overflow:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin:24px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
+.card h3{margin:0 0 6px;font-size:16px;color:var(--gold)}
+.card p{margin:0;color:var(--dim);font-size:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{border-bottom:1px solid var(--line);padding:8px;text-align:left}
+th{color:var(--dim);font-weight:normal}
+footer{color:var(--dim);padding:40px 0;font-size:13px}
+</style></head><body><div class="wrap">
+<nav><b>🌙 NIGHTMUX</b><span class="sp"></span>
+<a href="office.html?demo">live demo</a><a href="leaderboard.html">leaderboard</a>
+<a class="btn go" href="https://github.com/mmr710/nightmux">★ star on GitHub</a></nav>
+
+<h1>Your AI coding agents keep working <em>while you sleep</em>.</h1>
+<p class="lead">nightmux drives Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose and
+Qwen Code in tmux — from Telegram or a dashboard on your phone. When one hits its usage limit, your
+queue waits and resumes the moment the window resets, or hands the work to another agent.</p>
+<div class="row"><a class="btn go" href="https://github.com/mmr710/nightmux">★ GitHub</a>
+<a class="btn" href="office.html?demo">▶ watch the night shift</a>
+<a class="btn" href="#install">install in one line</a></div>
+
+<div class="hero"><img src="office-demo.gif" alt="The pixel-art office: claude hits its limit at 02:14, codex takes over, agy asks and gets a yes from the phone, claude comes back at 04:11"></div>
+
+<div class="grid">
+<div class="card"><h3>⏸ → ▶ past usage limits</h3><p>Holds your queue through a 5-hour limit and resumes on reset — or one tap hands the work to another agent. Warns you an hour before it happens.</p></div>
+<div class="card"><h3>📱 your phone is the terminal</h3><p>Each project is a Telegram topic (or a chat in the dashboard). Menus become buttons. Photos, files and voice notes go straight to the agent.</p></div>
+<div class="card"><h3>✅ keeps going until it passes</h3><p><code>!goal npm test</code> runs your tests after every turn and sends failures back. Stops and asks when it goes in circles.</p></div>
+<div class="card"><h3>🏁 race agents</h3><p>Same task, two agents, two worktrees. Pick the winner with one tap.</p></div>
+<div class="card"><h3>💰 spends fewer tokens</h3><p>Auto-compact, a fresh session per task, a prompt coach that catches vague prompts, models picked by task.</p></div>
+<div class="card"><h3>🌙 a morning briefing</h3><p>What got done overnight, which PRs are ready, which errors came in — and a GIF of the night.</p></div>
+</div>
+
+<h2 id="install">Install</h2>
+<pre>curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh</pre>
+<p class="lead">One Python file, no dependencies, Linux or macOS with tmux. No bot? It runs dashboard-only.
+Want to look first? <code>python3 nightmux.py --demo</code> — no bot, no keys.</p>
+<p class="lead">Or with Docker: <code>docker run -it -v ~/code:/code -p 9090:9090 ghcr.io/mmr710/nightmux</code> — see the README.</p>
+
+<footer>MIT · single file · your code never leaves your server ·
+<a href="https://github.com/mmr710/nightmux">github.com/mmr710/nightmux</a></footer>
+</div></body></html>

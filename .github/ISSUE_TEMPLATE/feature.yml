@@ -1,0 +1,15 @@
+name: Idea
+description: Something nightmux should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to do from your phone (or overnight) that you can't today
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How you'd like it to look
+      description: A command, a button, a line in the morning briefing…

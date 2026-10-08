@@ -3617,6 +3617,8 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!lint",     # types the held prompt
               "!race",     # starts agents, applies a racer's changes
               "!public",   # can publish a page to the internet
+              "!qa",       # schedules prompts, adds a tool
+              "!leaderboard",  # posts to GitHub
               "!ladder",   # switches the agent's model
               "!fresh",    # clears the agent's context
               "!tools",    # changes agent config, restarts the agent
@@ -3723,6 +3725,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
         return route_cmd(cfg, lock, topic, arg)
+    if cmd == "!qa":
+        return qa_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!leaderboard":
+        return leaderboard_cmd(arg)
     if cmd == "!saved":
         return saved_report()
     if cmd == "!wrapped":
@@ -3841,6 +3847,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "!coach = what your prompts that land first try have in common\n"
                 "!saved = what nightmux saved you · !wrapped [days] = a shareable card\n"
                 "!public on|expose|off = a read-only office link for anyone\n"
+                "!qa 03:00 [url] | now | off = the agent clicks through the app at night and "
+                "files bugs as issues\n"
+                "!leaderboard [post] = your counts on the public board (opt-in)\n"
                 "!race [claude,codex] <task> = several agents do it, each in its own "
                 "worktree; you pick the winner\n"
                 "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
@@ -6100,6 +6109,82 @@ def public_cmd(cfg, lock, topic, arg):
     return (f"🌍 public office: /public/{pub['token']} on the dashboard's address\n"
             "states only — no screen text, prompts or buttons\n"
             "!public expose = on the internet (Funnel, that path only) · !public off")
+
+
+# ---------- !qa: a QA pass every night, with the browser tool ----------
+# The agent uses the app like a new user and files what is broken as GitHub
+# issues — so the morning starts with a bug list instead of a bug hunt. It only
+# reads and reports; fixing is a separate, deliberate step (!issues).
+QA_PROMPT = (
+    "Night QA pass. Open {url} with the browser tool and use the app like a new user: "
+    "every page, the main flows, forms with good and bad input, a phone-sized viewport, "
+    "the browser console. For each real bug (broken flow, console error, layout break, "
+    "wrong text) take a screenshot and file it with `gh issue create --label qa` (make the "
+    "label first if it is missing: `gh label create qa`) — steps "
+    "to reproduce, expected vs actual. Check open issues first and never file a duplicate. "
+    "Do not change any code. Finish with one line per issue filed, or: no bugs found.")
+
+
+def qa_cmd(cfg, state, lock, topic, sess, arg):
+    if not sess:
+        return "no session here"
+    st = state.setdefault(sess, {})
+    jobs = st.get("sched") or []
+    if arg == "off":
+        st["sched"] = [j for j in jobs if not j.get("qa")]
+        save_queue(state)
+        return "🔎 night QA off"
+    m = re.match(r"^(now|\d{1,2}:\d{2})(?:\s+(\S+))?$", arg)
+    if not m:
+        on = [j for j in jobs if j.get("qa")]
+        return ((f"🔎 night QA daily at {clock(cfg, on[0]['at'])}\n" if on else "🔎 night QA off\n")
+                + "!qa 03:00 [url] = every night · !qa now [url] · !qa off\n"
+                  "the agent clicks through the app with the browser tool and files bugs as "
+                  "GitHub issues (label qa); it does not change code")
+    url = m.group(2) or "the app (start its dev server first if it is not running)"
+    note = ""
+    if "browser" not in ((cfg.get("tools") or {}).get(topic) or []):
+        note = tools_cmd(cfg, state, lock, topic, sess, "add browser") or ""
+    prompt = QA_PROMPT.format(url=url)
+    if m.group(1) == "now":
+        st.setdefault("queue", []).append(prompt)
+        save_queue(state)
+        return "🔎 QA pass queued" + (f"\n{note}" if note else "")
+    at = at_epoch(cfg, m.group(1))
+    st["sched"] = [j for j in jobs if not j.get("qa")] + [
+        {"at": at, "every": 86400, "text": prompt, "qa": True}]
+    save_queue(state)
+    return (f"🔎 night QA daily at {clock(cfg, at)} (first in {left(at - time.time())})"
+            + (f"\n{note}" if note else ""))
+
+
+# ---------- !leaderboard: opt-in, counts only ----------
+# An entry is a comment on the pinned leaderboard issue, posted with your own
+# gh login when you say so; the board page reads the comments. Nothing is sent
+# until `!leaderboard post`, and the preview shows exactly what would be.
+LB_REPO, LB_ISSUE = "mmr710/nightmux", 54
+LB_URL = "https://mmr710.github.io/nightmux/leaderboard.html"
+
+
+def lb_entry():
+    d, r = sav_data(), analyze_chats(30)
+    return {"v": 1, "days": round((time.time() - d.get("since", time.time())) / 86400),
+            "turns": d.get("turns", 0), "night_turns": d.get("night_turns", 0),
+            "resumes": d.get("resumes", 0), "greens": d.get("greens", 0),
+            "tokens_saved": d.get("tokens", 0),
+            "prompts_30d": sum(a["prompts"] or 0 for a in (r.get("agents") or {}).values()),
+            "agents": sorted(r.get("agents") or {})}
+
+
+def leaderboard_cmd(arg):
+    body = "```json\n" + json.dumps(lb_entry()) + "\n```"
+    if arg == "post":
+        out = run("gh", "issue", "comment", str(LB_ISSUE), "-R", LB_REPO, "--body", body,
+                  timeout=60)
+        return (f"🏆 posted under your GitHub name\n{out[-200:]}\nboard: {LB_URL}"
+                if "github.com" in out else f"🏆 gh could not post: {out[-300:]}")
+    return (f"🏆 !leaderboard post would add this to github.com/{LB_REPO}/issues/{LB_ISSUE} "
+            f"under your GitHub name — counts only, no project names:\n{body}\nboard: {LB_URL}")
 
 
 # ---------- ghost pair: a second model reviews every change ----------
@@ -8523,7 +8608,9 @@ def setup():
     except (OSError, ValueError):
         cfg = {}
     print("nightmux setup\n\n"
-          "1. In Telegram, open @BotFather -> /newbot, and copy the token.")
+          "1. On your phone, open https://t.me/BotFather -> /newbot, pick any name,\n"
+          "   and paste the token it gives you here. No Telegram? Press Enter: nightmux\n"
+          "   runs dashboard-only, and you can add a bot later.")
     token = input("   token%s: " % (" [enter to keep the saved one]"
                                     if cfg.get("token") else "")).strip()
     cfg["token"] = token or cfg.get("token")
@@ -8568,6 +8655,8 @@ def setup_tail(cfg):
     for note in wire_claude() or ["claude settings already wired"]:
         print(f"   {note}")
     print()
+    if os.environ.get("NIGHTMUX_NO_SERVICE"):      # in a container the entrypoint runs it
+        return
     mac = sys.platform == "darwin"
     svc = "launchd agent" if mac else "systemd user service"
     if input(f"Install and start the {svc}? [Y/n] ").strip().lower() \
@@ -10391,6 +10480,13 @@ def restore_held(cfg, state):
                 if until > time.time() else ""), mode="plain")
 
 
+def web_host(cfg):
+    """Where the dashboard listens. Loopback unless told otherwise: it has no login,
+    so anything that can reach it drives your agents. Docker sets 0.0.0.0 inside the
+    container and publishes the port on the host's loopback only."""
+    return cfg.get("webhook_host") or os.environ.get("NIGHTMUX_HOST") or "127.0.0.1"
+
+
 def main():
     added = widen_path()
     if added:
@@ -10437,7 +10533,8 @@ def main():
     if not poll:
         if cfg.get("webhook_port"):
             threading.Thread(target=run_webhook_server, daemon=True,
-                             args=(cfg, state, lock, allow, cfg["webhook_port"])).start()
+                             args=(cfg, state, lock, allow, cfg["webhook_port"]),
+                             kwargs={"host": web_host(cfg)}).start()
         print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ "
               f"topics={cfg['topics']}" if local_ else
               f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
@@ -10456,8 +10553,9 @@ def main():
 
     if cfg.get("webhook_port"):
         threading.Thread(
-            target=run_webhook_server, 
-            args=(cfg, state, lock, allow, cfg["webhook_port"]), 
+            target=run_webhook_server,
+            args=(cfg, state, lock, allow, cfg["webhook_port"]),
+            kwargs={"host": web_host(cfg)},
             daemon=True
         ).start()
 
@@ -11933,12 +12031,23 @@ def selfcheck():
     sav_turn({}, sst_)
     sav_turn({}, sst_)
     assert _sav["d"]["tokens"] == 220000 and _sav["d"]["drops"] == 1 and "220k tokens" in saved_report()
+    qst_, qcfg_ = {"q": {}}, {"topics": {"3": "q"}, "tools": {"3": ["browser"]}}
+    assert "daily at" in qa_cmd(qcfg_, qst_, threading.Lock(), "3", "q", "03:00 http://localhost:3000")
+    assert qst_["q"]["sched"][0]["every"] == 86400 and "localhost:3000" in qst_["q"]["sched"][0]["text"]
+    assert "daily at" in qa_cmd(qcfg_, qst_, threading.Lock(), "3", "q", "")
+    assert qa_cmd(qcfg_, qst_, threading.Lock(), "3", "q", "off") and not qst_["q"]["sched"]
+    with stubbed(analyze_chats=lambda d: {"agents": {"claude": {"prompts": 4}}}):
+        lb_ = leaderboard_cmd("")
+        assert '"prompts_30d": 4' in lb_ and "would add" in lb_, lb_
     pcfg_ = {"public": {"token": "abc"}}
     assert public_ok(pcfg_, "abc") and not public_ok(pcfg_, "abd") and not public_ok({}, "")
     with stubbed(office_snapshot=lambda c, s: {"rooms": [{"topic": "1", "name": "x", "desks": [
             {"agent": "claude", "state": "busy", "screen": ["secret"], "doing": "d"}]}], "usage": {}}):
         ps_ = public_snapshot(pcfg_, {})
         assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
+    dof_ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "office.html")
+    if os.path.exists(dof_):                       # the Pages demo is this page, kept in step
+        assert open(dof_).read() == OFFICE_HTML, "docs/office.html is stale: re-export OFFICE_HTML"
     assert transcribe({"transcribe_cmd": "echo hello"}, "/x.ogg") == "hello /x.ogg"
     assert transcribe({}, "/x.ogg") is None or os.environ.get("NIGHTMUX_TRANSCRIBE")
     with tempfile.TemporaryDirectory() as rr_:
