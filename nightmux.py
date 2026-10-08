@@ -944,6 +944,7 @@ def tail_transcript(st, path):
     st["tpos"] = pos
     if spent:
         st.setdefault("spend", []).append((time.time(), spent))
+        st["unbilled"] = st.get("unbilled", 0) + spent     # for !budget's ledger
     return out
 
 
@@ -1626,6 +1627,105 @@ def cost_report(t, title):
     return "\n".join(rows)
 
 
+# ---------- !budget: a token allowance per project, per day/week/month ----------
+# Counted in the same base-equivalent tokens as !cost and !spendcap, from the
+# transcripts nightmux already tails — so Claude Code sessions only. Hitting it
+# reuses the usage-limit hold: the turn in flight finishes, new prompts queue,
+# and the queue resumes when the period rolls over.
+
+BUDGET_ADJ = {"day": "daily", "week": "weekly", "month": "monthly"}
+
+
+def budget_window(cfg, per, now=None):
+    """(start, end) of the current day/week/month in the user's timezone.
+
+    # ponytail: a DST change inside the period moves the edge by an hour.
+    """
+    now = now or time.time()
+    t = local_time(cfg, now)
+    start = now - (t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec)
+    if per == "week":
+        start -= t.tm_wday * 86400
+        return start, start + 7 * 86400
+    if per == "month":
+        start -= (t.tm_mday - 1) * 86400
+        return start, start + calendar.monthrange(t.tm_year, t.tm_mon)[1] * 86400
+    return start, start + 86400
+
+
+def spend_note(sess, n, now=None):
+    """Add to the per-session ledger: tokens per UTC hour, 35 days kept."""
+    hr = int((now or time.time()) // 3600)
+    with _sav_lock:
+        led = sav_data().setdefault("spent", {}).setdefault(sess, {})
+        led[str(hr)] = led.get(str(hr), 0) + n
+        for k in [k for k in led if int(k) < hr - 35 * 24]:
+            del led[k]
+        _sav["dirty"] = True
+
+
+def budget_used(cfg, topic, start):
+    sessions = set(bench_of(cfg, topic).values()) | {cfg["topics"].get(topic)}
+    with _sav_lock:
+        led = sav_data().get("spent") or {}
+        return int(sum(n for s in sessions for h, n in (led.get(s) or {}).items()
+                       if int(h) >= start // 3600))
+
+
+def budget_tick(cfg, state, topic, sess):
+    st = state.setdefault(sess, {})
+    spend_note(sess, st.pop("unbilled", 0))
+    b = (cfg.get("budgets") or {}).get(str(topic))
+    if not b:
+        return
+    start, end = budget_window(cfg, b["per"])
+    used, cap, key = budget_used(cfg, topic, start), b["tokens"], f"{b['per']}:{int(start)}"
+    if used >= cap and st.get("budget_hold") != key:
+        st["budget_hold"] = st["budget_warned"] = key
+        for s in set(bench_of(cfg, topic).values()) | {sess}:
+            o = state.setdefault(s, {})
+            o["limit_until"] = max(o.get("limit_until", 0), end)
+        save_queue(state)
+        send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {_k(used)} of {_k(cap)} — "
+             f"the turn in flight finishes, new prompts queue until {clock(cfg, end)}.\n"
+             "!budget off or a bigger !budget to lift it", mode="plain")
+    elif used >= 0.8 * cap and st.get("budget_warned") != key:
+        st["budget_warned"] = key
+        send(cfg, topic, f"💸 {sess} at {used / cap:.0%} of its {BUDGET_ADJ[b['per']]} budget "
+             f"({_k(used)} of {_k(cap)})", mode="plain")
+
+
+def budget_cmd(cfg, state, topic, sess, arg):
+    bs = cfg.setdefault("budgets", {})
+    words = arg.lower().split()
+    if words[:1] == ["off"]:
+        bs.pop(str(topic), None)
+        save_cfg(cfg)
+        lifted = 0
+        for s in set(bench_of(cfg, topic).values()) | {sess}:
+            o = state.get(s) or {}
+            if o.pop("budget_hold", None):
+                o.pop("limit_until", None)
+                lifted += 1
+        save_queue(state)
+        return "budget off" + (" · hold lifted, the queue resumes on idle" if lifted else "")
+    if words:
+        _, n = parse_amount(words[0])
+        per = words[1] if len(words) > 1 else "day"
+        if not n or per not in ("day", "week", "month"):
+            return "usage: !budget <50M|800k> [day|week|month] | off   (base-equiv tokens)"
+        bs[str(topic)] = {"tokens": n, "per": per}
+        save_cfg(cfg)
+    b = bs.get(str(topic))
+    if not b:
+        return "no budget here · !budget 50M [day|week|month] holds new prompts once it is spent"
+    start, end = budget_window(cfg, b["per"])
+    used = budget_used(cfg, topic, start)
+    return (f"💸 {_k(used)} of {_k(b['tokens'])} this {b['per']} ({used / b['tokens']:.0%}) · "
+            f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\nbase-equivalent tokens: "
+            "cache reads count 0.1, output 5 — the same scale as !cost")
+
+
 def digest_report(cfg, state, topic, sess, since):
     """What happened since `since` — the same readers !cost/!ctx/!git already use,
     just windowed and squeezed onto a phone screen instead of a full report.
@@ -1824,7 +1924,7 @@ def queue_blob(state):
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
         held = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                   "shift_total") if st.get(k)}
+                                   "shift_total", "budget_hold") if st.get(k)}
         if held.get("limit_until", 0) < time.time():
             held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
@@ -2025,6 +2125,8 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     st["snap"] = snap = snapshot(pane_id)
     tpath = (snap or {}).get("transcript")
     gained = tail_transcript(st, tpath) if tpath else []
+    if st.get("unbilled"):
+        budget_tick(cfg, state, topic, sess)
     if gained:
         st.setdefault("tbuf", []).extend(gained)
         st["last_gain"] = time.time()
@@ -2339,7 +2441,7 @@ def watchdog(cfg, state, topic, sess, alive):
         # cache of the old pane. Dropping them here deleted them from disk too,
         # on the next save, in the one case they exist to survive.
         state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                          "shift_total") if st.get(k)}
+                                          "shift_total", "budget_hold") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     if alive:
         st = state.setdefault(sess, {})          # the branch above rebinds it
@@ -3607,7 +3709,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!shift", "!center", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -3738,6 +3840,8 @@ HELP = [
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
         "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
+        "!budget <50M> [day|week|month] | off = a token allowance for this project; "
+        "once spent, new prompts wait for the next period",
         "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
         "first-try prompts have in common",
         "!memory [update|on|off] = project notes every agent reads on start",
@@ -4181,6 +4285,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return (f"idle sessions above {at}% context flagged after "
                 f"{IDLE_PARK // 3600}h" if at else
                 f"idle-context hints off — !idlectx {IDLE_CTX} to enable")
+    if cmd == "!budget":
+        return budget_cmd(cfg, state, topic, sess, arg)
     if cmd == "!cost":
         if arg.isdigit():   # every project, that many days back
             days = int(arg)
@@ -13848,6 +13954,42 @@ def selfcheck():
             time.sleep(0.02)
     assert ure_ and "me: a → b · restarting" in usaid_[0] and "box: 1.3 → 1.4" in usaid_[0], usaid_
     assert "old: no answer" in usaid_[0] and writes({}, "!upgrade", ""), usaid_
+    # !budget: the ledger fills from transcript spend; 80% warns once, 100%
+    # holds every agent of the topic until the period ends, off lifts it.
+    bsaid_ = []
+    bcfg_ = {"topics": {"3": "b"}, "bench": {"3": {"claude": "b", "codex": "b-codex"}}, "tz_offset": 0}
+    bst_ = {"b": {}}
+    s0_, e0_ = budget_window(bcfg_, "day", 1760000000)
+    assert e0_ - s0_ == 86400 and s0_ % 86400 == 0 and s0_ <= 1760000000 < e0_
+    ws_, we_ = budget_window(bcfg_, "week", 1760000000)
+    assert time.gmtime(ws_).tm_wday == 0 and we_ - ws_ == 7 * 86400
+    ms_, _ = budget_window(bcfg_, "month", 1760000000)
+    assert time.gmtime(ms_).tm_mday == 1
+    old_sav_ = dict(_sav)
+    _sav["d"] = {"since": 0}
+    try:
+        with stubbed(save_cfg=lambda c: None, save_queue=lambda s: None, has_session=lambda s: True,
+                     send=lambda c, t, x, mode="mono", buttons=None, quiet=False: bsaid_.append(x)):
+            assert "no budget" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget")
+            assert "usage" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget lots")
+            assert "of 1.0M this day" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget 1M")
+            bst_["b"]["unbilled"] = 850000
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "85%" in bsaid_[-1] and "limit_until" not in bst_["b"], bsaid_
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert len(bsaid_) == 1                     # warned once per period
+            bst_["b"]["unbilled"] = 200000
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "spent its daily budget" in bsaid_[-1], bsaid_
+            assert bst_["b"]["limit_until"] > time.time() and bst_["b-codex"]["limit_until"] > time.time()
+            assert "hold lifted" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget off")
+            assert "limit_until" not in bst_["b"] and "3" not in bcfg_["budgets"]
+            spend_note("b", 5, now=time.time() - 40 * 86400)
+            assert len(sav_data()["spent"]["b"]) == 2   # added, then pruned on the next note
+            spend_note("b", 5)
+            assert len(sav_data()["spent"]["b"]) == 1, sav_data()["spent"]
+    finally:
+        _sav.update(old_sav_)
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag

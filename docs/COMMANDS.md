@@ -68,6 +68,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!ladder` on|off = Claude on haiku/sonnet/opus by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
 - `!spendcap <turns|500k|2M|off>` = interrupt a runaway loop
+- `!budget <50M> [day|week|month]` | off = a token allowance for this project; once spent, new prompts wait for the next period
 - `!lint` on|off = hold a vague prompt for ✨ improve · `!coach` = what your first-try prompts have in common
 - `!memory [update|on|off]` = project notes every agent reads on start
 - `!stats [days]` = tokens, cache and prompts per agent · `!saved`
