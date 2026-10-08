@@ -15,7 +15,12 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Changed
 
+- `!wrapped` card is taller and says more: tokens saved by compactions, how many projects you worked in and the top six with bars, a 24-hour chart of when you prompt (in your `tz_offset`), peak hour, share after midnight, longest daily streak, busiest day, cache hit, tokens per prompt and top model. The chat analysis now records each prompt's project folder and hour — never its text.
+- `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+
 ### Fixed
+
+- `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
 
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
