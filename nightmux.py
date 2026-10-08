@@ -3797,7 +3797,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -3881,6 +3881,8 @@ HELP = [
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
         "!update [agent] = run each agent's own updater · !version",
+        "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
+        "who sent what",
         "!upgrade [here] = update nightmux itself, here and on every peer, and restart "
         "(agents keep running)",
     ]),
@@ -4087,6 +4089,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
         return public_cmd(cfg, lock, topic, arg)
+    if cmd == "!team":
+        return team_cmd(cfg, arg)
+    if cmd == "!audit":
+        return audit_cmd(arg)
     if cmd == "!look":
         return look_cmd(cfg, arg)
     if cmd == "!relay":
@@ -11792,6 +11798,84 @@ def redact(text):
     return text
 
 
+# ---------- team: roles and an audit log ----------
+# Everyone in allow_users is an admin unless "roles" says otherwise:
+#   watch  — reads only, like a readonly topic: status, pane, office, stats
+#   prompt — talks to the agents and answers their menus; no nightmux commands
+#            that start, stop, schedule, expose or reconfigure anything
+# A prompt is still a shell by proxy — the agent can run anything — so prompt
+# is for people you would hand a terminal, not strangers. SECURITY.md has more.
+ROLES = ("watch", "prompt", "admin")
+
+
+def role_of(cfg, user):
+    return (cfg.get("roles") or {}).get(str(user), "admin")
+
+
+def role_denied(cfg, user, text, has_file=False):
+    role = role_of(cfg, user)
+    if role == "admin":
+        return None
+    t = re.sub(r"^(/[\w:-]+)@\w+", r"\1", text.strip())
+    cmd, arg = (t.split(None, 1) + ["", ""])[:2]
+    cmd, arg = TG_SLASH.get(cmd.lower()[1:], cmd.lower()), arg.strip()
+    if role == "watch" and (has_file or writes(cfg, cmd, arg)):
+        return "👀 you can watch here, not type or change anything (role: watch)"
+    if role == "prompt" and cmd.startswith("!") and cmd not in KEYS and writes(cfg, cmd, arg):
+        return f"🙅 {cmd} needs an admin here — you can prompt the agents and answer menus (role: prompt)"
+    return None
+
+
+def audit_path():
+    return os.path.join(STATE_DIR, "audit.log")
+
+
+def audit(cfg, user, who, topic, text):
+    """Who sent what, where: one line each, secrets redacted. Kept when the team is
+    more than you — a "roles" entry turns it on, or "audit": true."""
+    if not (cfg.get("roles") or cfg.get("audit")):
+        return
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(audit_path(), "a") as f:
+            f.write(json.dumps({"t": int(time.time()), "user": user, "name": who.get("username")
+                                or who.get("first_name") or "", "topic": topic,
+                                "role": role_of(cfg, user), "text": redact(text)[:300]}) + "\n")
+    except OSError as e:
+        print(f"audit: {e}", file=sys.stderr)
+
+
+def team_cmd(cfg, arg):
+    w = arg.split()
+    roles = cfg.setdefault("roles", {})
+    allow = {str(u) for u in cfg.get("allow_users") or []}
+    if len(w) == 2 and w[1] in ROLES + ("remove",):
+        if w[0] not in allow:
+            return (f"{w[0]} is not in allow_users — add their numeric Telegram id there first "
+                    "(see SECURITY.md), then !reload")
+        if w[1] in ("admin", "remove"):
+            roles.pop(w[0], None)
+        else:
+            roles[w[0]] = w[1]
+        save_cfg(cfg)
+    elif w:
+        return "usage: !team [<user id> watch|prompt|admin]"
+    return ("👥 team\n" + "\n".join(f"{u}: {roles.get(u, 'admin')}" for u in sorted(allow))
+            + "\n\nwatch reads only · prompt talks to agents, no admin commands · admin all"
+            + ("\n!audit shows who did what" if roles or cfg.get("audit") else ""))
+
+
+def audit_cmd(arg):
+    n = int(arg) if arg.isdigit() else 20
+    try:
+        with open(audit_path()) as f:
+            rows = [json.loads(l) for l in f.readlines()[-n:]]
+    except (OSError, ValueError):
+        return "no audit log yet — it starts once a role is set (!team) or \"audit\": true"
+    return "\n".join(time.strftime("%m-%d %H:%M", time.localtime(r["t"]))
+                     + f" {r['name'] or r['user']} #{r['topic']} {r['text'][:80]}" for r in rows)
+
+
 def process(cfg, state, lock, allow, upd):
     cq = upd.get("callback_query")
     msg = cq["message"] if cq else (upd.get("message") or {})
@@ -11825,6 +11909,10 @@ def process(cfg, state, lock, allow, upd):
     if user not in allow:
         print(f"  drop: user {user} not in allow_users", flush=True)
         return
+    no = role_denied(cfg, user, text, bool(att or doc or voice))
+    if no:
+        send(cfg, topic, no, mode="plain")
+        return
     peer = peer_of(cfg, topic)
     if peer and not re.match(r"!(server|upgrade)\b", text):   # these act on every machine
         if peer_call(cfg, peer, "update", dict(upd, _peer=True)) is None:
@@ -11846,6 +11934,8 @@ def process(cfg, state, lock, allow, upd):
              "!raw <text> sends it to the agent anyway.", mode="plain")
         return
     chat_log(topic, "you", text if not cq else f"tap: {text}")
+    audit(cfg, user, (cq or msg).get("from") or {}, topic,
+          ("tap: " if cq else "") + (text or "[file]"))
     if att or doc or voice:  # hand Claude the path; it reads images and files itself
         path = fetch_file(cfg, doc.get("file_id") or voice.get("file_id") or att,
                           doc.get("file_name") or voice.get("file_name"))
@@ -13165,6 +13255,23 @@ def selfcheck():
         assert lc_["looks"]["claude"]["hat"] == "cap" and "no agent" in look_cmd(lc_, "bob hat cap")
         assert "default look" in look_cmd(lc_, "claude reset") and lc_["looks"] == {}
     assert "nextSkin" in OFFICE_HTML and "data.looks" in OFFICE_HTML
+    # team: watch reads, prompt talks but runs no admin commands, audit redacts.
+    tc_ = {"allow_users": [1, 2, 3], "roles": {"2": "watch", "3": "prompt"}, "topics": {}}
+    assert role_denied(tc_, 1, "!kill") is None
+    assert role_denied(tc_, 2, "!status") is None and "watch" in role_denied(tc_, 2, "fix it")
+    assert "watch" in role_denied(tc_, 2, "", has_file=True) and "watch" in role_denied(tc_, 2, "!1")
+    assert role_denied(tc_, 3, "fix the bug") is None and role_denied(tc_, 3, "!1") is None
+    assert role_denied(tc_, 3, "!y") is None and role_denied(tc_, 3, "!usage") is None
+    for c_ in ("!kill", "!new x", "!codex", "!raw hi", "!team 3 admin", "/spendcap 1", "!upgrade", "!events x"):
+        assert "admin" in (role_denied(tc_, 3, c_) or ""), c_
+    with tempfile.TemporaryDirectory() as ad_, stubbed(STATE_DIR=ad_, save_cfg=lambda c: None):
+        audit(tc_, 3, {"username": "sam"}, "5", "deploy with ghp_" + "c" * 36)
+        au_ = audit_cmd("5")
+        assert "sam #5 deploy with" in au_ and "c" * 36 not in au_, au_
+        audit({}, 1, {}, "5", "solo")                        # no team, no log
+        assert "solo" not in audit_cmd("")
+        assert "not in allow_users" in team_cmd(tc_, "9 watch")
+        assert "3: admin" in team_cmd(tc_, "3 admin") and "3" not in tc_["roles"]
     # !arena: judged races add up per agent and per kind of task.
     old_sav_ = dict(_sav)
     _sav["d"] = {"since": 0}

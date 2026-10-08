@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Team roles and an audit log: `!team <user id> watch|prompt|admin` — watch reads only, prompt talks to agents and answers menus but runs no admin commands, admin is everything (and the default). With a role set, every message and tap goes to `~/.nightmux-state/audit.log`, redacted; `!audit [n]` reads it. See SECURITY.md.
 - Office skins and avatars: 🎨 in the office cycles night, sunset, matrix, gameboy, vapor and mono (remembered per browser, or `?skin=`), and `!look <agent> shirt #hex hair #hex skin #hex hat cap|hood|headset|beanie|none` dresses an agent's avatar for everyone; `!look <agent> reset` undoes it.
 - Night replay: the office records a frame whenever a desk changes state (states only, no screen text, the last 24 hours in `~/.nightmux-state/replay.jsonl`), and **⏪ last night** (`/office?replay`) scrubs or plays through it with the room's clock and sky following along. It opens at 22:00 last night.
 - `/nightmux <what to do>` in a GitHub comment: with `!issues auto` on, a comment on an issue starts it like a tapped issue (with your ask appended), and on a PR the agent works on and pushes to that PR's branch. Only the repo's owner, members and collaborators are listened to; nightmux reacts 👀 when it takes one. Only comments made after `!issues auto` count.
