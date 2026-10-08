@@ -18,6 +18,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!server [peer|local]` = which machine runs this topic, or move it
 - `!worktrees` = git worktrees of this repo, and who is in each
 - `!update [agent]` = run each agent's own updater · `!version`
+- `!upgrade [here]` = update nightmux itself, here and on every peer, and restart (agents keep running)
 
 ## 💬 Talking to the agent
 

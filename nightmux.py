@@ -3608,7 +3608,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all",
-              "!update",   # runs installers on the host: no business in a read-only topic
+              "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
@@ -3691,6 +3691,8 @@ HELP = [
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
         "!update [agent] = run each agent's own updater · !version",
+        "!upgrade [here] = update nightmux itself, here and on every peer, and restart "
+        "(agents keep running)",
     ]),
     ("talk", "💬 Talking to the agent", [
         "anything else, and /slash commands -> typed into the agent",
@@ -3841,6 +3843,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
+    if cmd == "!upgrade":
+        return upgrade_cmd(cfg, topic, arg)
     if cmd == "!update":
         if _updating.locked():
             return "an agent update is already running"
@@ -8631,6 +8635,88 @@ def version_report():
                else "nothing — falling back to scraping the pane"))
 
 
+_upgrading = threading.Lock()
+
+
+def self_upgrade(here=None):
+    """Update nightmux's own code in place: (changed, what happened).
+
+    A git checkout fast-forwards (or, detached, moves to origin's default
+    branch) and refuses over local edits; a pip or pipx install upgrades the
+    package. New code that does not compile is rolled back. The caller restarts.
+    """
+    here = here or HERE
+
+    def sh(*a):
+        try:
+            p = subprocess.run(a, capture_output=True, text=True, timeout=300)
+            return p.returncode, (p.stdout + p.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return 1, str(e)
+    me = os.path.join(here, "nightmux.py")
+    if os.path.isdir(os.path.join(here, ".git")):
+        g = lambda *a: sh("git", "-C", here, *a)
+        rc, dirty = g("status", "--porcelain", "--untracked-files=no")
+        if rc or dirty:
+            return False, f"local edits in {here} — commit or stash them first"
+        old = g("rev-parse", "--short", "HEAD")[1]
+        rc, out = g("fetch", "-q", "origin")
+        if rc:
+            return False, "git fetch failed: " + out[-300:]
+        if g("symbolic-ref", "-q", "HEAD")[0] == 0:
+            rc, out = g("merge", "-q", "--ff-only", "@{u}")
+        else:
+            to = "origin/HEAD" if g("rev-parse", "-q", "--verify", "origin/HEAD")[0] == 0 else "origin/main"
+            rc, out = g("checkout", "-q", "--detach", to)
+        if rc:
+            return False, "update failed: " + out[-300:]
+        new = g("rev-parse", "--short", "HEAD")[1]
+        if new == old:
+            return False, f"already up to date ({old})"
+        if sh(sys.executable, "-m", "py_compile", me)[0]:
+            g("reset", "-q", "--hard", old)        # the tree was clean: nothing of yours is lost
+            return False, f"{new} does not compile here — stayed on {old}"
+        return True, f"{old} → {new}"
+    rc, out = sh(*(("pipx", "upgrade", "nightmux") if "pipx" in sys.executable else
+                   (sys.executable, "-m", "pip", "install", "-q", "-U", "nightmux")))
+    if rc:
+        return False, "upgrade failed: " + out[-300:]
+    new = sh(sys.executable, me, "--version")[1].split("\n")[0].replace("nightmux ", "")
+    return (False, f"already up to date ({VERSION})") if new == VERSION else (True, f"{VERSION} → {new}")
+
+
+def restart_self(delay=3):
+    """Re-exec this process on its new code once the reply has gone out. tmux
+    sessions are not ours, so every agent keeps running through it."""
+    def go():
+        time.sleep(delay)
+        sav_save()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=go, daemon=True).start()
+
+
+def upgrade_cmd(cfg, topic, arg):
+    if _upgrading.locked():
+        return "an upgrade is already running"
+
+    def go():
+        with _upgrading:
+            rows = []
+            if arg != "here":
+                for name in sorted(cfg.get("peers") or {}):
+                    r = peer_call(cfg, name, "upgrade", {}, timeout=330)
+                    rows.append(f"{name}: " + (r.get("msg", "?") if isinstance(r, dict) else
+                                               "no answer, or older than 1.4 — there run "
+                                               "pip install -U nightmux (or git pull) and restart"))
+            changed, msg = self_upgrade()
+            rows.insert(0, f"{host_name(cfg)}: {msg}" + (" · restarting" if changed else ""))
+            send(cfg, topic, "⬆️ " + "\n".join(rows), mode="plain")
+            if changed:
+                restart_self()
+    threading.Thread(target=go, daemon=True).start()
+    return "⬆️ upgrading nightmux" + ("" if arg == "here" or not cfg.get("peers") else " here and on every peer") + "…"
+
+
 def setup_chat(upd):
     """(chat_id, user_id, title) for a message in a forum group, else None.
 
@@ -10679,6 +10765,13 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
+        if self.peer and self.path == "/upgrade":       # the primary's !upgrade
+            with _upgrading:
+                changed, msg = self_upgrade()
+            if changed:
+                restart_self()
+            return self.reply(json.dumps({"ok": changed, "msg": msg + (" · restarting" if changed else "")}),
+                              "application/json")
         if self.peer and self.path == "/update":        # forwarded by the primary
             try:
                 upd = json.loads(body)
@@ -11039,7 +11132,7 @@ def process(cfg, state, lock, allow, upd):
         print(f"  drop: user {user} not in allow_users", flush=True)
         return
     peer = peer_of(cfg, topic)
-    if peer and not re.match(r"!server\b", text):
+    if peer and not re.match(r"!(server|upgrade)\b", text):   # these act on every machine
         if peer_call(cfg, peer, "update", dict(upd, _peer=True)) is None:
             send(cfg, topic, f"⚠️ {peer} did not answer — not delivered. Send it again "
                  "once it is back, or !server local to run this topic here", mode="plain")
@@ -13617,6 +13710,50 @@ def selfcheck():
                "!autocompact", "!keys", "!raw", "!model", "!worktrees", "!center", "!failover",
                "!update", "!reload", "!tz", "!digest", "!idea", "!errors", "!desktop", "!memory"):
         assert c_ in all_, c_
+    # !upgrade: a git checkout fast-forwards, refuses over local edits, rolls
+    # back code that does not compile; a branch and a detached deploy both move.
+    import tempfile
+    with tempfile.TemporaryDirectory() as ud_:
+        g_ = lambda d, *a: subprocess.run(("git", "-C", d) + a, capture_output=True, text=True)
+        org_, wk_, dep_ = (os.path.join(ud_, x) for x in ("o", "w", "d"))
+        subprocess.run(("git", "init", "-q", "-b", "main", org_), capture_output=True)
+        for d_ in (org_,):
+            g_(d_, "config", "user.email", "t@t")
+            g_(d_, "config", "user.name", "t")
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("x = 1\n")
+        g_(org_, "add", "-A")
+        g_(org_, "commit", "-qm", "one")
+        subprocess.run(("git", "clone", "-q", org_, wk_), capture_output=True)
+        subprocess.run(("git", "clone", "-q", org_, dep_), capture_output=True)
+        g_(dep_, "checkout", "-q", "--detach")
+        assert self_upgrade(wk_)[1].startswith("already up to date"), self_upgrade(wk_)
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("x = 2\n")
+        g_(org_, "commit", "-qam", "two")
+        with open(os.path.join(wk_, "nightmux.py"), "w") as f:
+            f.write("mine\n")
+        assert "local edits" in self_upgrade(wk_)[1]
+        g_(wk_, "checkout", "-q", "--", ".")
+        assert self_upgrade(wk_)[0] and self_upgrade(dep_)[0]
+        assert open(os.path.join(dep_, "nightmux.py")).read() == "x = 2\n"
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("def (:\n")
+        g_(org_, "commit", "-qam", "broken")
+        ch_, msg_ = self_upgrade(wk_)
+        assert not ch_ and "does not compile" in msg_, msg_
+        assert open(os.path.join(wk_, "nightmux.py")).read() == "x = 2\n"
+    usaid_, ure_ = [], []
+    with stubbed(self_upgrade=lambda: (True, "a → b"), restart_self=lambda: ure_.append(1),
+                 peer_call=lambda c, n, p, b=None, timeout=10: {"msg": "1.3 → 1.4 · restarting"} if n == "box" else None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: usaid_.append(x)):
+        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "")
+        for _ in range(100):
+            if usaid_:
+                break
+            time.sleep(0.02)
+    assert ure_ and "me: a → b · restarting" in usaid_[0] and "box: 1.3 → 1.4" in usaid_[0], usaid_
+    assert "old: no answer" in usaid_[0] and writes({}, "!upgrade", ""), usaid_
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag

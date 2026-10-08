@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!upgrade` updates nightmux itself on this machine and every peer, then restarts in place — agents keep running. A git checkout fast-forwards (a detached deploy moves to origin's default branch) and refuses over local edits; pip/pipx installs upgrade the package; new code that does not compile is rolled back. `!upgrade here` skips the peers.
 - The office: the window follows your clock (night, dawn, day, dusk; `?hour=` previews), agents on a break together chat, hand-offs get a "yours" / "got it", optional sounds (🔈) for done, asking and limit, and tapping an agent shows its last 24 terminal lines.
 - Android app: several servers (⚙ to switch, add, forget), pinch-zoom, and store listing metadata in `fastlane/metadata/android/` for F-Droid and Play.
 
