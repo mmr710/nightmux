@@ -739,6 +739,35 @@ tailscale serve --bg 9090          # https://<machine>.<tailnet>.ts.net
 then `"office_url": "https://<machine>.<tailnet>.ts.net/office"` in the
 config, and `!office` posts it as a button in Telegram.
 
+## The Android app
+
+The office, chat and dashboard in a native app, plus what a browser tab can't
+do: alerts, answering from the notification, a home-screen widget.
+
+- **Pair:** open `/app` on the dashboard (📱 **app** in its header). On a
+  computer it shows a QR code; scan it with the phone's camera, tap **Open in
+  app**, confirm. No URL typing. Or download
+  [`nightmux.apk`](https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk)
+  from the latest release and enter the address by hand.
+- **Alerts** (opt-in, ⚙): ✅ an agent finished, 🛑 it hit its usage limit
+  (with when it's back), ⏸ it needs you, with the menu's first three choices
+  as buttons on the notification. Answering needs the phone unlocked.
+- **Widget:** a tile per agent, room by room, colored by state. Live while
+  alerts are on, every 30 minutes otherwise.
+- **☾ ambient:** the office full screen, landscape, screen kept on. An old
+  phone on the desk becomes a window into the night shift.
+- Voice notes and file attachments work in chat; links to GitHub, X or
+  Telegram open in their apps.
+
+The app talks to the daemon the way the pages do, over your tailnet or LAN.
+nightmux has no login of its own, so don't put the dashboard on the open
+internet for it. Alerts poll every 15 seconds while on (there is no push
+route into a tailnet); turn them off and the app uses nothing in the
+background. Android 11+.
+
+Build it yourself with `gradle -p android assembleRelease` (Gradle 8.11,
+JDK 17, Android SDK 35).
+
 ## Plugins
 
 Drop an executable file in `~/.nightmux-plugins/`; its filename becomes a

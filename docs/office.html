@@ -581,7 +581,7 @@ function toast(t) { const el = document.getElementById('toast'); el.textContent 
   clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
 
 async function send(topic, text) {
-  try { const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', body: text});
+  try { const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', headers: {'X-Nightmux': '1'}, body: text});
     toast(r.ok ? 'sent ✓ — replies land in Telegram' : 'failed: ' + r.status); }
   catch (e) { toast('failed: ' + e); }
   setTimeout(poll, 700);

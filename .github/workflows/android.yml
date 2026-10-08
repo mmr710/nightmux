@@ -1,0 +1,50 @@
+name: android
+
+on:
+  pull_request:
+    paths: ["android/**", ".github/workflows/android.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:      # attaches the APK to the latest release
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      # Without the secrets the APK is debug-signed: it installs, but a later
+      # release signed with a different key will not install over it.
+      - name: Signing key
+        env:
+          KS: ${{ secrets.NIGHTMUX_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.NIGHTMUX_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "NIGHTMUX_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "NIGHTMUX_KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+          else
+            echo "::warning::no NIGHTMUX_KEYSTORE_B64 secret: debug-signed APK"
+          fi
+      - run: gradle -p android assembleRelease lintRelease
+      - run: cp android/app/build/outputs/apk/release/app-release.apk nightmux.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightmux-apk
+          path: nightmux.apk
+      - name: Attach to release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "${TAG:-$(gh release view --json tagName -q .tagName)}" nightmux.apk --clobber

@@ -8,9 +8,13 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- An Android app (`android/`, `nightmux.apk` on every release): office, chat and dashboard in one app, opt-in alerts when an agent finishes, needs you or hits its limit, answering a menu from the notification, a home-screen widget, and an ambient mode that keeps the office on screen. `/app` on the dashboard pairs it with a QR code.
+
 ### Changed
 
 ### Fixed
+
+- `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
 ## [1.3.0] — 2026-10-08
 

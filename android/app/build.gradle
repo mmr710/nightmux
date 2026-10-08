@@ -1,0 +1,37 @@
+plugins { id "com.android.application" }
+
+// One version for the daemon and the app: read it from nightmux.py.
+def ver = (file("../../nightmux.py").text =~ /(?m)^VERSION = "(\d+)\.(\d+)\.(\d+)"/)[0]
+
+android {
+    namespace "io.github.mmr710.nightmux"
+    compileSdk 35
+    defaultConfig {
+        applicationId "io.github.mmr710.nightmux"
+        minSdk 30
+        targetSdk 35
+        versionCode ver[1].toInteger() * 10000 + ver[2].toInteger() * 100 + ver[3].toInteger()
+        versionName "${ver[1]}.${ver[2]}.${ver[3]}"
+    }
+    // CI signs with the release key from repo secrets so updates install over
+    // each other; a local build without them falls back to the debug key.
+    def ks = System.getenv("NIGHTMUX_KEYSTORE")
+    signingConfigs {
+        release {
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv("NIGHTMUX_KEYSTORE_PASSWORD")
+                keyAlias "nightmux"
+                keyPassword System.getenv("NIGHTMUX_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig ks ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
