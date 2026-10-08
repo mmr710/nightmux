@@ -1129,11 +1129,14 @@ def clock(cfg, ts):
     Only display is shifted, never parsing: a banner the TUI printed is in the
     server's clock, and reinterpreting it would move every reset time.
     """
+    return time.strftime("%H:%M", local_time(cfg, ts))
+
+
+def local_time(cfg, ts):
     off = cfg.get("tz_offset")
     if off is None:
-        return time.strftime("%H:%M", time.localtime(ts))
-    secs = tz_shift(off, ts) if isinstance(off, str) else off * 3600
-    return time.strftime("%H:%M", time.gmtime(ts + secs))
+        return time.localtime(ts)
+    return time.gmtime(ts + (tz_shift(off, ts) if isinstance(off, str) else off * 3600))
 
 
 def left(secs):
@@ -3408,6 +3411,9 @@ def start_session(cfg, state, lock, topic, arg, key):
     if not name:
         return f"usage: !{key} <name> [dir] [flags] [@branch]"
     if has_session(name):
+        if name in bench_of(cfg, topic).values() or name == cfg["topics"].get(topic):
+            return (f"'{name}' is already this topic's session. To run {key} here "
+                    f"too, send just !{key}: it starts beside it in the same folder.")
         return f"'{name}' exists; use !bind {name}"
     if rest.startswith(("~", "/", ".")):        # dir first, anything after is flags
         cwd, _, flags = rest.partition(" ")
@@ -3668,6 +3674,128 @@ def run_plugin(cwd, name, arg):
     return body or f"!{name} produced no output (exit {out.returncode})"
 
 
+# ---------- !help ----------
+# (key, title, lines). !help is the index, !help <key> one section, !help <word>
+# every line that mentions it, !help all the lot. {agents} and {plugins} fill in.
+HELP = [
+    ("start", "🚀 Sessions and agents", [
+        "!new <name> [dir] [flags] [@branch] = start a session here ({agents})",
+        "!<agent> = add that agent to this topic (same folder) or switch to it; "
+        "the one you leave keeps running",
+        "!<agent> <name> [dir] = a new session with its own name",
+        "!agents = this topic's agents · @<agent> <text> = one prompt to one of "
+        "them, without switching",
+        "!bind <session> | !unbind | !sessions | !kill",
+        "!resume [agent] / !restore = relaunch this topic's dir with --continue",
+        "!failover <agent> = out of usage? hand the held work to another agent now",
+        "!server [peer|local] = which machine runs this topic, or move it",
+        "!worktrees = git worktrees of this repo, and who is in each",
+        "!update [agent] = run each agent's own updater · !version",
+    ]),
+    ("talk", "💬 Talking to the agent", [
+        "anything else, and /slash commands -> typed into the agent",
+        "photo/file/voice -> saved, path typed in (voice is transcribed)",
+        "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode",
+        "!keys <tmux keys> | !raw <text> (types even with a menu open)",
+        "!model <name> | !effort <low|medium|high>",
+        "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
+        "explain, tidy, ship); !p save <name> <text>",
+        "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!pane [lines] | !verbose | !ctl · type / for autocomplete",
+    ]),
+    ("night", "🌙 Overnight and schedules", [
+        "!goal [n] <check> | off = run a check (tests, build) after every turn "
+        "and send failures back until it passes",
+        "!shift then one prompt per line = a sequential overnight plan",
+        "!plan <big task> = the agent splits it into steps, run one at a time",
+        "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]",
+        "!queue [clear|now] = prompts waiting for the agent",
+        "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
+        "./check.sh, looped until green",
+        "!qa 03:00 [url] | now | off = the agent clicks through the app at night "
+        "and files bugs as issues",
+        "!loopguard [ping|auto|off] = notice an agent going in circles",
+        "!briefing [HH:MM|now|off] = one morning message: done, waiting, limits",
+        "!digest [HH:MM|off] = what happened while you slept",
+    ]),
+    ("team", "👥 Several agents at once", [
+        "!consult <question> = ask them separately, let them read each other, "
+        "get one prompt back · !use [agent] runs it",
+        "!pair <agent> [rounds] | off = a second agent reviews every change",
+        "!race [claude,codex] <task> = each in its own worktree; you pick the winner",
+        "!route auto|off|stats = send each task to the agent that fits it, "
+        "learned from results",
+        "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
+        "!center [off] = this topic watches every session · !board = all at a glance",
+    ]),
+    ("tokens", "🪙 Tokens and limits", [
+        "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!autocompact <pct|150k|off> = /compact at a share or a token count "
+        "(default 200k) · !idlectx <pct|off>",
+        "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when "
+        "it struggles",
+        "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
+        "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
+        "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
+        "first-try prompts have in common",
+        "!memory [update|on|off] = project notes every agent reads on start",
+        "!stats [days] = tokens, cache and prompts per agent · !saved",
+    ]),
+    ("code", "🔧 Git, PRs and production", [
+        "!git | !diff | !get <path> = the session's repo and files",
+        "!undo = snapshot branches + restore commands (never runs them)",
+        "!watch pr [n] | merge | off = feed CI failures and review comments "
+        "to the agent; merge button when green",
+        "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
+        "fix, PR",
+        "!errors [auto|ask|off|expose] = production errors (Sentry or any JSON) "
+        "become fixes",
+        "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages",
+    ]),
+    ("see", "👀 Watch and share", [
+        "!office = the live office: a room per topic, a desk per agent",
+        "!status | !board | !log (daemon journal) | !grep <text> [days]",
+        "!preview = the app this session serves, on your phone · "
+        "!shot [:port][/path|url] = phone-size screenshot",
+        "!tools [add|rm browser [all] | restart] = give the agent a browser",
+        "!desktop [open <app>|shot|off] = a virtual desktop agents can drive",
+        "!apk [install] · !android connect|pair <ip:port> [code] · !shot android",
+        "!reel [hours] | daily HH:MM | off = the night as a GIF",
+        "!wrapped [days] = a shareable card · !public on|expose|off = "
+        "read-only office link · !leaderboard [post]",
+    ]),
+    ("setup", "⚙️ Setup", [
+        "!reload = re-read the config · !tz = timezone",
+        "!plugins = executables in {plugins}; each file is a command",
+        "!version = build, python, and which hooks are wired",
+    ]),
+]
+
+
+def help_text(cfg, arg=""):
+    """(text, button rows). Rows only for the index, so a tap opens a section."""
+    fill = lambda l: l.replace("{agents}", ", ".join(agents(cfg))).replace("{plugins}", PLUGIN_DIR)
+    section = lambda k, t, ls: t + "\n" + "\n".join("• " + fill(l) for l in ls)
+    q = arg.strip().lower().lstrip("!")
+    if q == "all":
+        return "\n\n".join(section(*h) for h in HELP), None
+    for k, t, ls in HELP:
+        if q == k:
+            return section(k, t, ls) + "\n\n!help = all sections", None
+    if q:
+        hits = [fill(l) for _, _, ls in HELP for l in ls if q in l.lower()]
+        return ("\n".join("• " + l for l in hits) if hits
+                else f"nothing about '{arg}'. !help for the sections"), None
+    lines = ["nightmux — tap a section, or !help <section|command|all>", ""]
+    lines += [f"{t}  ·  !help {k}" for k, t, _ in HELP]
+    lines += ["", "quick start: !new <name> <dir> · then just type · !<agent> adds "
+              "another agent here · !goal <tests> keeps it going until they pass"]
+    rows = [[(t, f"!help {k}") for k, t, _ in HELP[i:i + 2]] for i in range(0, len(HELP), 2)]
+    rows.append([("📖 everything", "!help all")])
+    return "\n".join(lines), rows
+
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -3803,108 +3931,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     "agent now · installed: " + ", ".join(installed_agents(cfg)))
         return failover(cfg, state, lock, topic, arg.split()[0].lower())
     if cmd == "!help":
-        return ("!bind <session> | !unbind | !sessions\n"
-                f"!new <name> [dir] [flags] [@branch], or !<agent>: "
-                f"{', '.join(agents(cfg))}\n"
-                "!agents = this topic's agents; bare !<agent> switches between them\n"
-                "@claude <text> / @agy <text> = send one prompt to one of them, "
-                "without switching\n"
-                "!consult <question> = ask them separately, let them read each "
-                "other, get one prompt back\n"
-                "!use [agent] = run the prompt a consult settled on, in this "
-                "topic's agent\n"
-                "!plan <big task> = agent breaks it into steps, runs them one "
-                "at a time like !shift\n"
-                "!autoyes <agent|off> = answer that agent's own permission menus "
-                "for it\n"
-                "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
-                "!worktrees = git worktrees of this topic's repo, and who is in each\n"
-                "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
-                "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
-                "!undo = list snapshot branches + restore commands (never runs them)\n"
-                "!queue [clear|now] | !usage | !ctx | !cost [days] | !tz | !reload\n"
-                "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]\n"
-                "!shift then one prompt per line = a sequential overnight plan\n"
-                "!digest [HH:MM|off] = what happened while you slept, on demand or daily\n"
-                "!center [off] = make this topic watch/control every session\n"
-                "!board = every topic at a glance (works anywhere)\n"
-                "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
-                "!version = build, python, and which hooks are wired\n"
-                "!stats [days] = token, cache and prompt statistics per agent from "
-                "this machine's transcripts, with what to change\n"
-                "!preview = open the app this session is serving on your phone "
-                "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
-                "!watch pr [n] | merge | off = feed this PR's CI failures and review "
-                "comments to the agent; ping with a merge button when green\n"
-                "!idea [@agent] <what to build> = new folder + git + agent writing "
-                "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
-                "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
-                "spec, explain, tidy, ship); !p save <name> <text>\n"
-                "!route auto|off = send each new task to the bench agent that fits it "
-                "(routine → light, design/debug → heavy), learning from !goal results "
-                "and corrections; !route stats = first-try rate per agent\n"
-                "!lint on|off = hold a vague prompt ('fix it') for ✨ improve or send as is\n"
-                "!coach = what your prompts that land first try have in common\n"
-                "!saved = what nightmux saved you · !wrapped [days] = a shareable card\n"
-                "!public on|expose|off = a read-only office link for anyone\n"
-                "!qa 03:00 [url] | now | off = the agent clicks through the app at night and "
-                "files bugs as issues\n"
-                "!leaderboard [post] = your counts on the public board (opt-in)\n"
-                "!race [claude,codex] <task> = several agents do it, each in its own "
-                "worktree; you pick the winner\n"
-                "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
-                "struggles\n!fresh now|on|off = after a green !goal: notes to memory, "
-                "/clear, re-read\n"
-                "!reel [hours] | daily HH:MM | off = the night as a GIF of the office, "
-                "with what each agent did\n"
-                "!pair <agent> [rounds] | off = a second agent reviews every change "
-                "this one makes; real issues go back to the coder, LGTM stays quiet\n"
-                "!loopguard [ping|auto|off] = notice an agent going in circles (same "
-                "error, same file churned, apologies) and ping you, or step it back\n"
-                "!apk [install] = build the project's debug APK and send it here (or "
-                "install it on your phone) · !android connect|pair <ip:port> [code] = "
-                "your phone over wireless debugging · !shot android\n"
-                "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
-                "one and the agent branches, fixes, opens a PR that nightmux watches\n"
-                "!errors [auto|ask|off|expose] = Sentry (or any JSON) webhook: new "
-                "production errors become fix buttons or go straight to the agent\n"
-                "!desktop [open <app>|shot|off] = a virtual desktop agents can drive "
-                "(!tools add desktop) and you can watch from the phone\n"
-                "!tools [add|rm browser [all] | restart] = give the agent a headless "
-                "browser it drives itself (Playwright MCP)\n"
-                "!briefing [HH:MM|now|off] = one morning message: done overnight, "
-                "waiting for you (questions, green PRs, errors), limits, queued\n"
-                "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages "
-                "(npm, pip-audit, govulncheck), upgraded by the agent on a tap\n"
-                "!forecast = when each agent's usage window fills at the current pace "
-                "(you are warned ahead of time where it matters)\n"
-                "!memory [update|on|off] = the project's notes (.nightmux/memory.md) "
-                "that every agent reads when it starts here; kept up to date after quiet spells\n"
-                "!goal [n] <check> | off = run a check (tests, build) after every "
-                "turn and send failures back until it passes\n"
-                "!server [peer|local] = which machine this topic runs on; move it "
-                "to another nightmux (see README: two servers)\n"
-                "!office = link to the live office page: a room per topic, a desk "
-                "per agent\n"
-                "!failover <agent> = hit a usage limit? hand the held work to "
-                "another agent now; \"failover\": \"codex\" in the config does it "
-                "unasked\n"
-                "!update [agent] = run each installed agent's own updater "
-                "(claude, codex, agy, opencode…); \"auto_update\": true in the "
-                "config does it daily\n"
-                "!grep <text> [days] searches every transcript\n"
-                f"!plugins = list executables in {PLUGIN_DIR}; any file there "
-                "is a command, its name the trigger\n"
-                "!autocompact <pct|150k|off> = /compact at a share of the window, "
-                "or at a token count (default 200k)\n!idlectx <pct|off>\n"
-                "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
-                "turns, or tokens, in 5m\n"
-                "type / for the same commands with autocomplete\n"
-                "!model <name> | !effort <low|medium|high>\n"
-                "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode\n"
-                "!keys <tmux keys> | !raw <text> (type even with a menu open)\n"
-                "photo/file/voice -> saved, path typed in\n"
-                "/slash and anything else -> typed into Claude")
+        text, rows = help_text(cfg, arg)
+        if rows:
+            send(cfg, topic, text, mode="plain", buttons=kb(rows))
+            return ""
+        return text
     if cmd == "!log":
         return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
     if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
@@ -5995,36 +6026,95 @@ def tweet_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:675px;background:#07090f;color:#cdd6f4;
-font:28px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
-justify-content:space-between;padding:56px 64px;box-sizing:border-box;
-background-image:radial-gradient(circle at 85% 15%,#2a1d4a 0,#07090f 55%)}
+body{margin:0;width:1200px;height:1000px;background:#07090f;color:#cdd6f4;
+font:26px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
+justify-content:space-between;padding:52px 64px;box-sizing:border-box;
+background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%)}
 h1{margin:0;font-size:40px;color:#e0af68;letter-spacing:2px}.sub{color:#8b93a7;font-size:22px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}
-.n{font-size:64px;font-weight:700;color:#9ece6a}.l{font-size:20px;color:#a9b1d6}
+h2{margin:0 0 10px;font-size:18px;color:#7aa2f7;letter-spacing:3px;font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.n{font-size:56px;font-weight:700;color:#9ece6a}.l{font-size:19px;color:#a9b1d6}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:48px}
+.p{display:flex;align-items:center;gap:12px;font-size:20px;margin:6px 0}
+.p em{width:230px;font-style:normal;overflow:hidden;white-space:nowrap}
+.p b{display:inline-block;height:14px;background:#bb9af7;border-radius:3px}
+.p span{color:#565f89;margin-left:auto}
+ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:#e0af68;font-style:normal}
 .foot{display:flex;justify-content:space-between;color:#565f89;font-size:20px}
-.moon{font-size:44px}
 </style></head><body>
 <div><h1><svg width="34" height="34" viewBox="0 0 16 16" style="vertical-align:-5px"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg> my night crew · {period}</h1><div class="sub">{agents}</div></div>
 <div class="grid">{cells}</div>
+<div class="two"><div><h2>PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
 <div class="foot"><span>made with nightmux</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
 
 
-def wrapped_cells(days):
+def wrapped_data(cfg, days):
+    """Everything on the card: headline numbers, projects, the hours, and what they say."""
     d, r = sav_data(), analyze_chats(days)
-    ag = r.get("agents") or {}
-    prompts = sum(a["prompts"] or 0 for a in ag.values())
-    toks = sum(sum(a["tokens"].values()) for a in ag.values())
-    cells = [(_k(toks), "tokens through my agents"), (str(prompts), "prompts sent"),
+    ag, w = r.get("agents") or {}, r.get("when") or {}
+    proj, w = w.get("projects") or [], when_summary(cfg, w)
+    tok = {k: sum(a["tokens"][k] for a in ag.values())
+           for k in ("input", "cache_read", "cache_write", "output")}
+    toks, prompts = sum(tok.values()), sum(a["prompts"] or 0 for a in ag.values())
+    cells = [(_k(toks), "tokens through my agents"),
+             (_k(d.get("tokens", 0)), "tokens saved, not re-read"),
+             (str(prompts), "prompts sent"), (str(len(proj)), "projects worked in"),
              (str(d.get("night_turns", 0)), "turns while I slept"),
              (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
-             (_k(d.get("tokens", 0)), "tokens not re-read"),
              (str(d.get("greens", 0)), "checks turned green"),
-             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions"),
-             (str(len(ag)), "agents on the crew")]
+             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions")]
     cells = [c for c in cells if c[0] not in ("0", "0k")][:6]   # a fresh install has zeros
-    return cells, sorted(ag, key=lambda a: -ag[a]["prompts"])
+    ins = []
+    if w.get("peak_hour") is not None:
+        h = w["peak_hour"]
+        ins.append(("peak hour", f"{h:02d}:00–{(h + 1) % 24:02d}:00"))
+    if w.get("night_pct"):
+        ins.append(("after midnight", f"{w['night_pct']:.0%} of prompts"))
+    if w.get("streak", 0) > 1:
+        ins.append(("longest streak", f"{w['streak']} days in a row"))
+    if w.get("busiest"):
+        day, n = w["busiest"]
+        ins.append(("busiest day", time.strftime("%b %d", time.strptime(day, "%Y-%m-%d"))
+                    + f" · {n} prompts"))
+    ctx = tok["input"] + tok["cache_read"] + tok["cache_write"]
+    if ctx:
+        ins.append(("from cache", f"{tok['cache_read'] / ctx:.0%} of context"))
+    if prompts and toks:
+        ins.append(("per prompt", f"{_k(toks // prompts)} tokens"))
+    models = {}
+    for a in ag.values():
+        for m, n in a["models"].items():
+            models[m] = models.get(m, 0) + n
+    if models:
+        ins.append(("top model", max(models, key=models.get)))
+    nud = sum(round((a["nudge_pct"] or 0) * (a["prompts"] or 0)) for a in ag.values())
+    if prompts >= 10:
+        ins.append(("one-word nudges", f"{nud / prompts:.0%}"))
+    return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]),
+            "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
+
+
+def wrapped_page(days, w):
+    e = html.escape
+    top = max([n for _, n in w["projects"]] or [1])
+    projects = "".join(f'<div class="p"><em>{e(p[:20])}</em><b style="width:{max(4, 200 * n // top)}px">'
+                       f'</b><span>{n}</span></div>' for p, n in w["projects"]) or \
+        '<div class="p">—</div>'
+    hi = max(w["hours"]) or 1
+    hours = ('<svg width="500" height="70" viewBox="0 0 480 70">' + "".join(
+        f'<rect x="{i * 20}" y="{60 - 56 * n // hi}" width="16" height="{max(1, 56 * n // hi)}" '
+        f'fill="{"#e0af68" if i < 6 else "#7aa2f7"}"/>' for i, n in enumerate(w["hours"]))
+        + '<text x="0" y="70" font-size="10" fill="#565f89">0h</text>'
+          '<text x="234" y="70" font-size="10" fill="#565f89">12h</text>'
+          '<text x="460" y="70" font-size="10" fill="#565f89">23h</text></svg>')
+    return (WRAPPED_HTML.replace("{period}", f"last {days} days")
+            .replace("{agents}", e(" · ".join(w["agents"])))
+            .replace("{cells}", "".join(f'<div><div class="n">{e(n)}</div><div class="l">{e(l)}'
+                                        '</div></div>' for n, l in w["cells"]))
+            .replace("{projects}", projects).replace("{hours}", hours)
+            .replace("{insights}", "".join(f"<li><i>{e(k)}</i> {e(v)}</li>"
+                                           for k, v in w["insights"][:6])))
 
 
 def wrapped_cmd(cfg, topic, arg):
@@ -6034,17 +6124,14 @@ def wrapped_cmd(cfg, topic, arg):
         return 'no Chromium found — install one or set "browser" in the config'
 
     def go():
-        cells, ags = wrapped_cells(days)
-        page = WRAPPED_HTML.replace("{period}", f"last {days} days").replace(
-            "{agents}", html.escape(" · ".join(ags) or "")).replace("{cells}", "".join(
-                f'<div><div class="n">{html.escape(n)}</div><div class="l">{html.escape(l)}</div></div>'
-                for n, l in cells))
+        w = wrapped_data(cfg, days)
+        page = wrapped_page(days, w)
         os.makedirs(STATE_DIR, exist_ok=True)
         src, out = os.path.join(STATE_DIR, "wrapped.html"), os.path.join(STATE_DIR, "wrapped.png")
         with open(src, "w") as f:
             f.write(page)
         run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-            "--window-size=1200,675", "--virtual-time-budget=2000", f"--screenshot={out}",
+            "--window-size=1200,1000", "--virtual-time-budget=2000", f"--screenshot={out}",
             "file://" + src, timeout=60)
         try:
             with open(out, "rb") as f:
@@ -6053,9 +6140,11 @@ def wrapped_cmd(cfg, topic, arg):
         except OSError:
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
-        top = ", ".join(f"{n} {l}" for n, l in cells[:4] if n not in ("0", "0k"))
+        cells = w["cells"]
+        top = ", ".join(f"{n} {l}" for n, l in cells[:4])
         send_file(cfg, topic, "wrapped.png", png, kind="photo",
-                  caption=f"🌙 your last {days} days with nightmux",
+                  caption=f"🌙 your last {days} days with nightmux\n" + "\n".join(
+                      f"• {k}: {v}" for k, v in w["insights"]),
                   buttons=kb([[("🐦 post it", tweet_url(
                       f"My AI coding agents, last {days} days: {top}. Run by nightmux "
                       f"{REPO_URL} #ClaudeCode #vibecoding"))]]))
@@ -8032,10 +8121,30 @@ def _chat_bucket(stats, agent):
     return stats.setdefault(agent, {
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
-        "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {}})
+        "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
+        "projects": {}, "at": {}})
 
 
-def _chat_prompt(b, text):
+def _chat_when(b, ts, cwd):
+    """Where and when one prompt happened: the project's folder name and the UTC
+    hour — kept raw so it can be shown in the phone's timezone, not the server's."""
+    if cwd:
+        n = os.path.basename(cwd.rstrip("/")) or cwd
+        b["projects"][n] = b["projects"].get(n, 0) + 1
+    if ts:
+        h = int(ts // 3600)
+        b["at"][h] = b["at"].get(h, 0) + 1
+
+
+def _iso_ts(s):
+    try:
+        return calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_prompt(b, text, ts=None, cwd=None):
+    _chat_when(b, ts, cwd)
     b["prompts"] += 1
     b["prompt_chars"] += len(text)
     if NUDGE.match(text):
@@ -8083,7 +8192,7 @@ def _scan_claude(stats, home, since):
                         c = m.get("content")
                         if (isinstance(c, str) and not d.get("isMeta")
                                 and not d.get("isSidechain") and not c.startswith("<")):
-                            _chat_prompt(b, c)
+                            _chat_prompt(b, c, _iso_ts(d.get("timestamp")), d.get("cwd"))
                     elif m.get("usage") and d.get("requestId") not in seen:
                         seen.add(d.get("requestId"))
                         u = m["usage"]
@@ -8105,20 +8214,23 @@ def _scan_codex(stats, home, since):
         if os.path.getmtime(p) < since:
             continue
         b["sessions"] += 1
-        model, last = None, None
+        model, last, cwd = None, None, None
         with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
-                if '"turn_context"' not in line and '"event_msg"' not in line:
+                if ('"turn_context"' not in line and '"event_msg"' not in line
+                        and '"session_meta"' not in line):
                     continue
                 try:
                     d = json.loads(line)
                 except ValueError:
                     continue
                 pl = d.get("payload") or {}
-                if d.get("type") == "turn_context":
+                if d.get("type") == "session_meta":
+                    cwd = pl.get("cwd")
+                elif d.get("type") == "turn_context":
                     model = pl.get("model") or model
                 elif pl.get("type") == "user_message":
-                    _chat_prompt(b, pl.get("message") or "")
+                    _chat_prompt(b, pl.get("message") or "", _iso_ts(d.get("timestamp")), cwd)
                 elif pl.get("type") == "error":
                     b["errors"] += 1
                 elif pl.get("type") == "token_count" and pl.get("info"):
@@ -8154,13 +8266,14 @@ def _scan_opencode(stats, home, since):
                 _chat_call(b, d.get("modelID"), t.get("input") or 0, c.get("read") or 0,
                            c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
         b["sessions"] += len(sess)
-        for (data,) in con.execute(
-                "SELECT p.data FROM part p JOIN message m ON m.id = p.message_id "
+        for data, at, cwd in con.execute(
+                "SELECT p.data, m.time_created, s.directory FROM part p "
+                "JOIN message m ON m.id = p.message_id LEFT JOIN session s ON s.id = m.session_id "
                 "WHERE m.time_created >= ? AND m.data LIKE '%\"role\":\"user\"%'",
                 (int(since * 1000),)):
             d = json.loads(data)
             if d.get("type") == "text" and not d.get("synthetic"):
-                _chat_prompt(b, d.get("text") or "")
+                _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
     finally:
         con.close()
 
@@ -8174,9 +8287,13 @@ def _scan_agy(stats, home, since):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for (steps,) in con.execute("SELECT step_count FROM conversation_summaries "
-                                    "WHERE last_modified_time >= ?", (cut,)):
+        for steps, ws in con.execute("SELECT step_count, workspace_uris FROM "
+                                     "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
             b["sessions"] += 1
+            m = re.search(r"file://(/[^\"',\s]+)", ws or "")
+            if m:      # no prompts on disk: a conversation counts once for its project
+                n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
+                b["projects"][n] = b["projects"].get(n, 0) + 1
             b["requests"] += steps or 0     # agy keeps no token counts on disk
     finally:
         con.close()
@@ -8274,10 +8391,42 @@ def analyze_chats(days=30, home=None):
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
-           "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips]}
+           "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips],
+           "when": chat_when(stats)}
     if home is None:
         _analysis[days] = out
     return out
+
+
+def chat_when(stats):
+    """Prompts per project and per UTC hour, summed over every agent."""
+    proj, at = {}, {}
+    for s in stats.values():
+        for k, v in s["projects"].items():
+            proj[k] = proj.get(k, 0) + v
+        for k, v in s["at"].items():
+            at[k] = at.get(k, 0) + v
+    return {"projects": sorted(proj.items(), key=lambda kv: -kv[1]), "at": at}
+
+
+def when_summary(cfg, w):
+    """Hours, days and streaks in the user's timezone."""
+    hours, days = [0] * 24, {}
+    for h, n in (w.get("at") or {}).items():
+        t = local_time(cfg, int(h) * 3600)
+        hours[t.tm_hour] += n
+        d = time.strftime("%Y-%m-%d", t)
+        days[d] = days.get(d, 0) + n
+    run_ = best = 0
+    prev = None
+    for d in sorted(days):
+        t = calendar.timegm(time.strptime(d, "%Y-%m-%d"))
+        run_ = run_ + 1 if prev is not None and t - prev == 86400 else 1
+        best, prev = max(best, run_), t
+    return {"hours": hours, "active_days": len(days), "streak": best,
+            "busiest": max(days.items(), key=lambda kv: kv[1]) if days else None,
+            "peak_hour": hours.index(max(hours)) if any(hours) else None,
+            "night_pct": round(sum(hours[:6]) / sum(hours), 3) if any(hours) else None}
 
 
 def _k(n):
@@ -12012,7 +12161,7 @@ def selfcheck():
         os.makedirs(os.path.join(h_, ".claude", "projects", "p"))
         with open(os.path.join(h_, ".claude", "projects", "p", "s.jsonl"), "w") as f:
             for i in range(30):
-                f.write(json.dumps({"type": "user", "timestamp": now_, "message": {
+                f.write(json.dumps({"type": "user", "timestamp": now_, "cwd": "/w/shop", "message": {
                     "content": "continue" if i % 2 else f"SECRETPROMPT refactor {i}"}},
                     separators=(",", ":")) + "\n")       # as Claude writes it
                 u_ = {"input_tokens": 5, "cache_read_input_tokens": 10000,
@@ -12040,6 +12189,19 @@ def selfcheck():
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
         assert "SECRETPROMPT" not in json.dumps(r_) + stats_report(r_)
+        assert r_["when"]["projects"] == [("shop", 30)], r_["when"]
+        w_ = when_summary({}, r_["when"])
+        assert sum(w_["hours"]) == 30 and w_["streak"] == 1, w_   # codex line has no timestamp
+        h0_ = int(time.time() // 3600)
+        w_ = when_summary({"tz_offset": 3}, {"at": {h0_: 1, h0_ - 24: 2, h0_ - 72: 4}})
+        assert w_["streak"] == 2 and w_["busiest"][1] == 4 and w_["active_days"] == 3, w_
+        assert w_["peak_hour"] == time.gmtime(h0_ * 3600 + 3 * 3600).tm_hour, w_
+        with stubbed(analyze_chats=lambda d: r_, sav_data=lambda: {"tokens": 5000000}):
+            wd_ = wrapped_data({}, 30)
+        pg_ = wrapped_page(30, wd_)
+        assert ("5.0M", "tokens saved, not re-read") in wd_["cells"], wd_["cells"]
+        assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
+        assert "peak hour" in pg_ and "from cache" in pg_ and "SECRETPROMPT" not in pg_
         said_ = " ".join(t["tip"] for t in r_["tips"] if t["agent"] == "claude")
         assert "cache hit 10%" in said_ and "nudges" in said_ and "100k tokens" in said_, said_
         lim_cfg = {"topics": {"5": "o"}, "bench": {"5": {"claude": "o", "codex": "o-codex"}}}
@@ -13375,6 +13537,23 @@ def selfcheck():
                                             "codex")
     assert spawned[-1][2] == "codex --sandbox", spawned[-1]
     assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
+    # "!agy box ~" in box's own topic: point at bare !agy, not at !bind.
+    globals()["has_session"] = lambda n: n == "box"
+    assert "send just !agy" in start_session(cfg2, {}, lk, "9", "box ~", "agy")
+    assert "use !bind box" in start_session(cfg2, {}, lk, "8", "box ~", "agy")
+    globals()["has_session"] = lambda n: False
+    # !help: an index with a button per section, sections, search, everything.
+    hi_, rows_ = help_text(cfg2)
+    assert len([b for r in rows_ for b in r]) == len(HELP) + 1 and "!help night" in hi_
+    assert help_text(cfg2, "night")[0].startswith("🌙") and help_text(cfg2, "night")[1] is None
+    assert "!goal [n]" in help_text(cfg2, "!goal")[0] and "nothing about" in help_text(cfg2, "zzz")[0]
+    all_ = help_text(cfg2, "all")[0]
+    assert "opencode" in all_ and "{agents}" not in all_ and PLUGIN_DIR in all_
+    # Every command the old flat list named is still somewhere in a section.
+    for c_ in ("!bind", "!consult", "!use", "!shift", "!at", "!queue", "!usage", "!grep", "!plugins",
+               "!autocompact", "!keys", "!raw", "!model", "!worktrees", "!center", "!failover",
+               "!update", "!reload", "!tz", "!digest", "!idea", "!errors", "!desktop", "!memory"):
+        assert c_ in all_, c_
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag
