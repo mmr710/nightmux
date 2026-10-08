@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Built-in agents: `!cursor` (Cursor CLI), `!amp`, `!goose`, `!qwen` (Qwen Code) — start, resume, `!update` and their own look in the office.
+
 - Dashboard-only mode: with no bot token nightmux runs on the dashboard and its chat view alone — `--setup` offers it at the token prompt, + project numbers topics locally, `--doctor` accepts it.
 
 - `nightmux --demo [port]`: serves the office with a made-up night across three projects — working, asking, hitting limits — no Telegram bot, config or API keys needed.
