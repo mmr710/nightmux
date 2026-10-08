@@ -726,8 +726,12 @@ scrolling, a yes/no dialog, a limit bar, static. A finished turn sparkles; a
 hand-off flies a folder from one desk to the next. Every room has a lounge:
 idle agents get up and wander to the coffee machine, the TV or the toilet
 and come back; one that hit its usage limit goes to bed until the window
-resets. `/office?demo` plays the
-night shift above on a loop, no server state needed.
+resets. Two agents on a break at the same time get talking, and a hand-off
+comes with a "yours" / "got it". The window follows your clock: stars and a
+moon at night, sunrise from 5, daylight from 7, dusk until 21
+(`/office?hour=14` previews). 🔈 turns on sounds for a finished turn, a
+question and a limit. Tap an agent for its last 24 terminal lines, live.
+`/office?demo` plays the night shift above on a loop, no server state needed.
 
 To open it from your phone without opening a port to the internet, put it on
 your tailnet:
@@ -756,8 +760,10 @@ do: alerts, answering from the notification, a home-screen widget.
   alerts are on, every 30 minutes otherwise.
 - **☾ ambient:** the office full screen, landscape, screen kept on. An old
   phone on the desk becomes a window into the night shift.
-- Voice notes and file attachments work in chat; links to GitHub, X or
-  Telegram open in their apps.
+- **Several servers:** ⚙ lists them; tap one to switch, add or forget.
+  Alerts and the widget follow the one on screen.
+- Pinch to zoom the office. Voice notes and file attachments work in chat;
+  links to GitHub, X or Telegram open in their apps.
 
 The app talks to the daemon the way the pages do, over your tailnet or LAN.
 nightmux has no login of its own, so don't put the dashboard on the open
@@ -766,7 +772,8 @@ route into a tailnet); turn them off and the app uses nothing in the
 background. Android 11+.
 
 Build it yourself with `gradle -p android assembleRelease` (Gradle 8.11,
-JDK 17, Android SDK 35).
+JDK 17, Android SDK 35). Store listing text and screenshots live in
+`fastlane/metadata/android/`, the layout F-Droid and Play both read.
 
 ## Plugins
 
