@@ -1,0 +1,13 @@
+<p>nightmux runs coding agents (Claude Code, Codex, opencode, Gemini and more) in tmux on your own server through the night. This app is its window: every project is a room, every agent a desk, and every animation is a real state.</p>
+<p><b>What you get</b></p>
+<ul>
+<li><b>The office</b>: agents type while they work, raise a hand when they need you, go to bed when they hit a usage limit, and wander to the coffee machine when idle. The window follows your clock: stars at night, sunrise, daylight.</li>
+<li><b>Alerts</b> (opt-in): an agent finished, needs an answer, or hit its limit.</li>
+<li><b>Answer from the notification</b>: a menu's choices become buttons. Unlocking the phone is required.</li>
+<li><b>Home-screen widget</b>: a tile per agent, colored by what it is doing.</li>
+<li><b>Ambient mode</b>: the office full screen with the screen kept on. Put an old phone on your desk.</li>
+<li><b>Chat and dashboard</b>: prompt agents, send voice notes and files, switch agents, open projects.</li>
+<li><b>Several servers</b>: switch between machines from the menu.</li>
+</ul>
+<p><b>You need</b> a machine running nightmux (free, open source: github.com/mmr710/nightmux), reachable from the phone over Tailscale or your LAN. Pair by scanning the QR code on the dashboard's /app page.</p>
+<p>No account, no tracking, no ads, no third-party services. The app talks only to the server you give it.</p>
