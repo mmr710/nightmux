@@ -668,3 +668,24 @@ the command-center topic, or General. `!update [agent]` does it on demand.
 off by default because it runs installers unattended. Running sessions keep
 their version until relaunched: `!kill yes`, then `!restore`.
 
+
+## MCP server
+
+`nightmux --mcp` is a stdio [MCP](https://modelcontextprotocol.io) server, so any MCP
+client — Claude Desktop, Cursor, or an agent in another topic — can see and steer
+your night crew. It talks to the running daemon on `127.0.0.1:<webhook_port>`, so
+the daemon must be up with the dashboard on.
+
+| tool | does |
+|---|---|
+| `list_topics` | every topic, its agent, state and queue |
+| `read_terminal` | the last N lines of a topic's terminal |
+| `read_chat` | the relayed conversation; `after` for only what's new |
+| `send_prompt` | a prompt for the topic's agent, queued like one from your phone |
+
+nightmux's own `!` commands are not exposed: an MCP client can prompt agents, not kill them.
+
+```json
+{ "mcpServers": { "nightmux": { "command": "nightmux", "args": ["--mcp"] } } }
+```
+(or `"command": "python3", "args": ["/path/to/nightmux.py", "--mcp"]` for a git checkout)

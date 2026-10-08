@@ -7212,6 +7212,11 @@ def desk_call(name, a):
 
 def mcp_desktop(inp=None, out=None):
     """--mcp-desktop: a stdio MCP server, JSON-RPC per line, for the desktop."""
+    mcp_loop("nightmux-desktop", DESK_TOOLS, desk_call, inp, out)
+
+
+def mcp_loop(name, tools, call, inp=None, out=None):
+    """A stdio MCP server: JSON-RPC per line, tools only."""
     inp, out = inp or sys.stdin, out or sys.stdout
     for line in inp:
         try:
@@ -7224,12 +7229,12 @@ def mcp_desktop(inp=None, out=None):
         if m == "initialize":
             res = {"protocolVersion": params.get("protocolVersion") or "2024-11-05",
                    "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "nightmux-desktop", "version": VERSION}}
+                   "serverInfo": {"name": name, "version": VERSION}}
         elif m == "tools/list":
-            res = {"tools": DESK_TOOLS}
+            res = {"tools": tools}
         elif m == "tools/call":
             try:
-                res = {"content": desk_call(params.get("name"), params.get("arguments") or {})}
+                res = {"content": call(params.get("name"), params.get("arguments") or {})}
             except Exception as e:
                 res = {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True}
         elif m == "ping":
@@ -7239,6 +7244,64 @@ def mcp_desktop(inp=None, out=None):
                   "error": {"code": -32601, "message": f"no method {m}"}})
         out.write(json.dumps(reply) + "\n")
         out.flush()
+
+
+# ---------- --mcp: nightmux itself as an MCP server ----------
+# Any MCP client (Claude Desktop, Cursor, another agent) can see the topics,
+# read a terminal and the chat, and queue a prompt. A thin client over the
+# running daemon's local API: no state of its own, nothing to keep in sync.
+
+_topic_arg = {"topic": {"type": "string", "description": "topic id, from list_topics"}}
+NM_TOOLS = [
+    {"name": "list_topics", "description": "Every project topic: its agent, state "
+     "(idle/busy/waiting/limit), queued prompts and usage.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "read_terminal", "description": "The last lines of a topic's terminal.",
+     "inputSchema": {"type": "object", "required": ["topic"], "properties": dict(
+         _topic_arg, lines={"type": "integer", "default": 120})}},
+    {"name": "read_chat", "description": "The topic's conversation as nightmux relayed it: "
+     "your prompts and the agent's answers. Pass after=<last id> to get only new ones.",
+     "inputSchema": {"type": "object", "required": ["topic"], "properties": dict(
+         _topic_arg, after={"type": "integer", "default": 0})}},
+    {"name": "send_prompt", "description": "Give the topic's agent a prompt. Queued if "
+     "it is busy or out of usage, like a message from the phone.",
+     "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
+         _topic_arg, text={"type": "string"})}},
+]
+
+
+def nm_call(name, a, base=None):
+    base = base or f"http://127.0.0.1:{load_cfg().get('webhook_port') or 9090}"
+    t = urllib.parse.quote(str(a.get("topic", "")), safe="")
+
+    def get(path):
+        with urllib.request.urlopen(base + path, timeout=10) as r:
+            return json.loads(r.read())
+    if name == "list_topics":
+        rows = get("/api/topics")
+        text = "\n".join(f"{r['topic']}: {r.get('session')} · {r.get('agent') or '?'} · "
+                         f"{r.get('mode')}" + (f" · {r['queued']} queued" if r.get("queued") else "")
+                         + (f" · {r.get('server')}" if r.get("server") else "")
+                         for r in rows) or "no topics"
+    elif name == "read_terminal":
+        n = max(1, min(int(a.get("lines") or 120), 2000))
+        d = get(f"/api/term/{t}?lines={max(n, 50)}")
+        text = d.get("error") or "\n".join(d.get("lines", [])[-n:])
+    elif name == "read_chat":
+        d = get(f"/api/chat/{t}?after={int(a.get('after') or 0)}")
+        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in d.get("items", [])) \
+            or d.get("error") or "nothing new"
+    elif name == "send_prompt":
+        txt = str(a.get("text") or "").strip()
+        if not txt or txt.startswith("!"):
+            raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
+        req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
+                                     headers={"X-Nightmux": "1"})
+        urllib.request.urlopen(req, timeout=10).close()
+        text = "sent — read_chat for the answer"
+    else:
+        raise ValueError(f"no tool {name}")
+    return [{"type": "text", "text": text}]
 
 
 # ---------- !errors: production errors become fix prompts ----------
@@ -12566,6 +12629,21 @@ def selfcheck():
         assert tl_["lines"][0] == "one" and "ghp_" + "a" * 36 not in json.dumps(tl_), tl_
         assert tl_["mode"] == "busy" and len(tl_["lines"]) == 2, tl_
     assert term_lines({"topics": {}}, {}, "7")["error"] == "topic not bound"
+    # --mcp: the tools read the daemon's own API and refuse nightmux commands.
+    base_ = f"http://127.0.0.1:{port_}"
+    assert "5: o" in nm_call("list_topics", {}, base_)[0]["text"]
+    with stubbed(tmux=lambda *a: "l1\nl2\nl3", has_session=lambda s: True):
+        assert nm_call("read_terminal", {"topic": "5", "lines": 2}, base_)[0]["text"] == "l2\nl3"
+    try:
+        nm_call("send_prompt", {"topic": "5", "text": "!kill"}, base_)
+        raise AssertionError("a command went through MCP")
+    except ValueError:
+        pass
+    import io
+    mo_ = io.StringIO()
+    mcp_loop("nightmux", NM_TOOLS, nm_call, io.StringIO(json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"), mo_)
+    assert [t["name"] for t in json.loads(mo_.getvalue())["result"]["tools"]][0] == "list_topics"
     assert "terminal" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/term/5").read().decode()
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
@@ -14564,6 +14642,8 @@ def cli():
         print(commands_md(), end="")
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
+    elif "--mcp" in sys.argv:
+        mcp_loop("nightmux", NM_TOOLS, nm_call)
     elif "--demo" in sys.argv:
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
