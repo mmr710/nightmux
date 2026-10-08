@@ -619,7 +619,10 @@ or fail it over. Screen text is redacted before it leaves the machine.
 Each agent has its own look — claude's hood, codex's cap, agy's headset,
 opencode's beanie — and the monitor shows what kind of work it is: code
 scrolling, a yes/no dialog, a limit bar, static. A finished turn sparkles; a
-hand-off flies a folder from one desk to the next. `/office?demo` plays the
+hand-off flies a folder from one desk to the next. Every room has a lounge:
+idle agents get up and wander to the coffee machine, the TV or the toilet
+and come back; one that hit its usage limit goes to bed until the window
+resets. `/office?demo` plays the
 night shift above on a loop, no server state needed.
 
 To open it from your phone without opening a port to the internet, put it on

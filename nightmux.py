@@ -8861,7 +8861,7 @@ function backdrop(R, g, w, f, o) {
   text(R, 'NIGHTMUX', 8, 62, '#e0af68');                          // sign + clock on the wainscot
   R('#e0af68', 4, 63, 2, 3);
   if (o.clock) { R('#05070d', w - 30, 61, 26, 8); R('#1b2133', w - 30, 61, 26, 1); text(R, o.clock, w - 28, 63, '#9ece6a'); }
-  for (const px of (o.pad >= 9 ? [1, w - 9] : [1])) {               // plants, where there is floor
+  for (const px of [1]) {               // plants, where there is floor
     R('#8a4b2c', px + 1, 112, 7, 8); R('#a35c37', px + 1, 112, 7, 1);
     for (const [lx, ly, lc] of [[3, 101, 0], [1, 104, 1], [5, 103, 1], [2, 108, 0], [6, 107, 0], [4, 98, 1]])
       R(lc ? '#4f9d5b' : '#3b7a46', px + lx + (f % 40 < 20 && ly < 102 ? 1 : 0), ly, 2, 5);
@@ -8904,7 +8904,7 @@ function bubble(R, x, y, glyph, fg, bob) {
 }
 
 function station(R, g, x0, d, f, o) {
-  const L = look(d.agent), st = d.state, here = st !== 'gone' && st !== 'shell';
+  const L = look(d.agent), st = d.state, here = st !== 'gone' && st !== 'shell', sit = here && !d.away;
   const pal = {o: '#0b0d14', h: L.hair, s: L.skin, S: mix(L.skin, '#5a3a2a', .35), E: '#0b0d14',
                c: L.shirt, C: L.shade, p: '#2a2f45'};
   if (d.live) {                                                    // hanging lamp + its light
@@ -8916,14 +8916,14 @@ function station(R, g, x0, d, f, o) {
     g.globalCompositeOperation = 'source-over';
   }
   R('rgba(0,0,0,.35)', x0 + 8, 117, 56, 3);                        // floor shadow
-  const cx = x0 + 10, tilt = here ? 0 : -1;                        // chair
+  const cx = x0 + 10, tilt = sit ? 0 : -1;                        // chair
   R('#262b40', cx + 1 + tilt, 76, 5, 24); R('#343b57', cx + 2 + tilt, 77, 1, 22);
   R('#262b40', cx + 1, 98, 15, 3); R('#343b57', cx + 2, 98, 13, 1);
   R('#1b1f30', cx + 7, 101, 2, 9); R('#1b1f30', cx + 1, 110, 15, 2);
   for (const wx of [1, 7, 14]) R('#0b0d14', cx + wx, 112, 2, 2);
   const sleep = st === 'limit', lean = st === 'idle' ? -1 : 0;
   const tx = x0 + 15 + (sleep ? 2 : lean), ty = 81 + (sleep ? 2 : 0);
-  if (here) { spr(R, TORSO, tx, ty, pal); R('#2a2f45', tx + 4, ty + 9, 9, 2); }
+  if (sit) { spr(R, TORSO, tx, ty, pal); R('#2a2f45', tx + 4, ty + 9, 9, 2); }
   R('#a07c5c', x0 + 22, 92, 40, 1); R('#8a6a4f', x0 + 22, 93, 40, 1);  // desk
   R('#6b4f3a', x0 + 23, 94, 38, 22); R('#5a4130', x0 + 23, 94, 38, 1);
   R('#5a4130', x0 + 46, 98, 13, 7); R('#c9a46a', x0 + 51, 101, 3, 1);
@@ -8936,17 +8936,14 @@ function station(R, g, x0, d, f, o) {
   R('#3a4060', x0 + 27, 90, 12, 2); for (let k = 0; k < 5; k++) R('#c9cfdc', x0 + 28 + k * 2, 90, 1, 1);  // keyboard
   for (let q = 0; q < Math.min(d.queued || 0, 5); q++) R(['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], mx + 1 + q * 4, my - 4, 3, 3);
   const sip = st === 'idle' && f % 48 < 12;
-  if (!sip && here) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
+  if (!sip && sit) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
     if (st === 'idle' && f % 6 < 3) R('rgba(230,233,242,.5)', x0 + 24, 83 + f % 3, 1, 2); }
-  if (here) {
+  if (sit) {
     const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72;
     const sx = tx + 6, sy = ty + 2, sk = L.skin;
     if (sleep) { R(L.shirt, x0 + 21, 88, 12, 3); R(L.shade, x0 + 21, 90, 12, 1); }
     spr(R, sleep ? HEAD.map(r => r.replace('E', 'S')) : HEAD, hx, hy, pal);
-    if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
-    if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
-    if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
-    if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
+    hat(R, L, hx, hy);
     if (st === 'busy') { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 6, 2); R(sk, sx + 7, sy + 5 - f % 2, 2, 2); R(L.shade, sx + 3, sy + 6, 4, 1); R(sk, sx + 10, sy + 6 - (f + 1) % 2, 2, 1); }
     else if (st === 'waiting') { R(L.shirt, sx, sy - 14, 2, 16); R(sk, sx + (f % 6 < 3 ? 0 : 1), sy - 16, 2, 2); }
     else if (st === 'unknown') { R(L.shirt, sx - 1, sy - 6, 2, 8); R(sk, hx + 1 + f % 2, hy + 1, 2, 2); }
@@ -8970,6 +8967,104 @@ function station(R, g, x0, d, f, o) {
   text(R, nm, nx, 121, d.live ? '#e0af68' : '#8b93a7');
   if (d.live) R('#e0af68', nx - 3, 123, 1, 1);
   if (!d.live && !o.nodim) R('rgba(4,6,12,.42)', x0, 57, SW, RH - 57);
+}
+
+// ---------- the lounge: where agents go when they are not working ----------
+// Idle agents wander off for coffee, the TV or the toilet and come back; one
+// that hit its limit goes to bed until the window resets. A pure function of
+// the frame and when the state last changed, so reel and demo frames replay.
+const LW = 112, SPEED = DEMO ? 3 : 2, GRACE = DEMO ? 6 : 24, DWELL = DEMO ? [4, 20] : [30, 70];
+const SPOT = {wc: 9, coffee: 30, tv1: 52, tv2: 68, bed: 90, couch: 50};
+function plan(d, i, f, L0, x0) {
+  const t = f - (d.since || 0), home = x0 + 15;
+  const go = (tx, u, pose, spot) => {          // walk there, do the thing
+    const dist = Math.abs(tx - home), w = dist / SPEED;
+    return u < w ? {x: home + Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(tx - home)}
+                 : {x: tx, pose, spot};
+  };
+  if (d.state === 'limit') {
+    if (t < 14) return null;                     // slumps first, then gives up and goes to bed
+    return go(L0 + (i % 2 ? SPOT.couch : SPOT.bed), t - 14, 'lie', i % 2 ? 'couch' : 'bed');
+  }
+  if (d.state !== 'idle' || t < GRACE) return null;
+  const P = 340, u0 = t - GRACE, c = Math.floor(u0 / P);
+  let u = u0 % P;
+  const spot = ['coffee', 'tv', 'wc', 'tv', 'coffee', 'wc'][(c + i * 2) % 6];
+  const tx = L0 + SPOT[spot === 'tv' ? (i % 2 ? 'tv2' : 'tv1') : spot];
+  const walk = Math.abs(tx - home) / SPEED, desk = DWELL[0] + (i * 37) % DWELL[1];
+  const stay = P - desk - 2 * walk;
+  if (stay < 40 || u < desk) return null;
+  u -= desk;
+  if (u < walk + stay) return go(tx, u, spot === 'tv' ? 'sit' : spot === 'wc' ? 'in' : 'stand', spot);
+  u -= walk + stay;
+  return u < walk ? {x: tx - Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(home - tx)} : null;
+}
+
+function hat(R, L, hx, hy) {
+  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
+  if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
+  if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
+  if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
+}
+
+function lounge(R, g, L0, f, occ) {
+  R('rgba(0,0,0,.35)', L0 + 2, 117, LW - 4, 3);
+  // WC
+  R('#0b0d14', L0 + 3, 73, 18, 44); R('#2b3452', L0 + 4, 74, 16, 43);
+  R(occ.wc ? '#3b3550' : '#463f5e', L0 + 5, 75, 14, 42); R('#2b2640', L0 + 5, 75, 1, 42);
+  R('#c9a46a', L0 + 16, 96, 2, 2); text(R, 'WC', L0 + 7, 78, '#cdd6f4');
+  R(occ.wc ? '#f7768e' : '#9ece6a', L0 + 17, 79, 2, 2);
+  // coffee
+  R('#6b4f3a', L0 + 25, 97, 18, 20); R('#a07c5c', L0 + 25, 96, 18, 1); R('#5a4130', L0 + 25, 97, 18, 1);
+  R('#1f2335', L0 + 28, 82, 12, 14); R('#3a4060', L0 + 29, 83, 10, 3); R(occ.coffee && f % 10 < 5 ? '#9ece6a' : '#565f89', L0 + 37, 84, 1, 1);
+  R('#0b0d14', L0 + 31, 89, 6, 5); R('#e6e9f2', L0 + 32, 91, 4, 3);
+  if (occ.coffee) for (let k = 0; k < 3; k++) R('rgba(230,233,242,.45)', L0 + 33 + (f + k) % 2, 87 - k * 2 - f % 2, 1, 2);
+  // TV on the wall, couch under it
+  R('#0b0d14', L0 + 45, 58, 36, 22); R('#1f2335', L0 + 46, 59, 34, 20);
+  if (occ.tv) {
+    const C = ['#7aa2f7', '#bb9af7', '#9ece6a', '#e0af68', '#7dcfff', '#f7768e'];
+    for (let y = 0; y < 16; y += 2) for (let x = 0; x < 30; x += 3)
+      R(C[((x * 3 + y * 5 + (f >> 2) * 7) >> 3) % 6], L0 + 48 + x, 61 + y, 3, 2);
+    g.globalCompositeOperation = 'lighter';
+    const gl = g.createRadialGradient(L0 + 63, 70, 3, L0 + 63, 90, 40);
+    gl.addColorStop(0, 'rgba(122,162,247,.22)'); gl.addColorStop(1, 'rgba(122,162,247,0)');
+    g.fillStyle = gl; g.fillRect(L0 + 23, 56, 80, 62);
+    g.globalCompositeOperation = 'source-over';
+  } else { R('#0b0e1a', L0 + 48, 61, 30, 16); R('#f7768e', L0 + 78, 77, 1, 1); }
+  R('#3d2c4a', L0 + 46, 97, 38, 7); R('#4d3b5e', L0 + 46, 97, 38, 1);          // couch back
+  R('#5a4570', L0 + 46, 104, 38, 6); R('#3d2c4a', L0 + 44, 99, 3, 12); R('#3d2c4a', L0 + 83, 99, 3, 12);
+  R('#1b1622', L0 + 47, 110, 2, 5); R('#1b1622', L0 + 81, 110, 2, 5);
+  // bed
+  R('#3a4466', L0 + 87, 104, 3, 12); R('#2b3452', L0 + 87, 108, 23, 6); R('#e6e9f2', L0 + 89, 105, 6, 3);
+  R('#1b1f30', L0 + 88, 114, 2, 3); R('#1b1f30', L0 + 107, 114, 2, 3);
+}
+
+function actor(R, d, a, f, i) {
+  const L = look(d.agent), pal = {o: '#0b0d14', h: L.hair, s: L.skin, S: mix(L.skin, '#5a3a2a', .35),
+    E: '#0b0d14', c: L.shirt, C: L.shade, p: '#2a2f45'}, x = Math.round(a.x);
+  if (a.pose === 'in') return;
+  if (a.pose === 'lie') {
+    const y = a.spot === 'bed' ? 101 : 98, hx = x - 1;
+    spr(R, HEAD.map(r => r.replace('E', 'S')), hx, y, pal);
+    R(L.shirt, hx + 7, y + 3, 9, 5); R('#2b3452', hx + 13, y + 2, 11, 6); R('#3a4466', hx + 13, y + 2, 11, 1);
+    for (let k = 0; k < 3; k++) { const ph = (f * .6 + k * 8) % 24;
+      text(R, 'Z', hx + 6 + ph / 3, y - 6 - ph, 'rgba(122,162,247,' + (1 - ph / 24).toFixed(2) + ')'); }
+    return;
+  }
+  if (a.pose === 'sit') {                                    // on the couch, facing the TV
+    spr(R, TORSO, x - 1, 92, pal); spr(R, HEAD, x, 84, pal); hat(R, L, x, 84);
+    R('#2a2f45', x + 3, 102, 7, 2); R('#2a2f45', x + 8, 104, 2, 9); R('#0b0d14', x + 8, 113, 4, 2);
+    if (f % 60 < 30) R(L.skin, x + 7, 96, 2, 2);             // hand to the snacks
+    return;
+  }
+  const step = a.pose === 'walk' ? (Math.floor(x / 3) % 2) : 0;
+  spr(R, HEAD, x, 77, pal); hat(R, L, x, 77);
+  spr(R, TORSO.slice(0, 8), x - 1, 85, pal); R('#2a2f45', x - 1, 93, 8, 3);
+  R('#2a2f45', x + (step ? 0 : 1), 96, 3, 17); R('#2a2f45', x + (step ? 4 : 3), 96, 3, 17);
+  R('#0b0d14', x + (step ? -1 : 0), 113, 4, 2); R('#0b0d14', x + (step ? 4 : 3), 113, 4, 2);
+  if (a.pose === 'walk') R(L.skin, x + (a.dir > 0 ? 6 : -1), 90 + step, 2, 2);
+  if (a.pose === 'stand') { const sip = f % 40 < 14;           // coffee in hand
+    R(L.shirt, x + 6, sip ? 84 : 88, 2, sip ? 6 : 4); R('#e6e9f2', x + 7, sip ? 82 : 91, 3, 4); }
 }
 
 function deskX(room, session, pad) {
@@ -8999,15 +9094,20 @@ function effects(R, room, pad, f, fx) {
 }
 
 function drawRoom(cv, room, f, o) {
-  const n = room.desks.length, w = Math.max(256, n * SW), h = RH + (o.caption != null ? 16 : 0);
+  const n = room.desks.length, w = Math.max(256, n * SW + LW), h = RH + (o.caption != null ? 16 : 0);
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const g = cv.getContext('2d');
   g.imageSmoothingEnabled = false;
   const R = (c, x, y, ww, hh) => { if (ww > 0 && hh > 0) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh)); } };
-  const pad = Math.round((w - n * SW) / 2);
+  const pad = Math.round((w - n * SW - LW) / 2), L0 = pad + n * SW;
   o.pad = pad;
+  const away = room.desks.map((d, i) => (d.away = plan(d, i, f, L0, pad + i * SW)));
+  const occ = {wc: away.some(a => a && a.pose === 'in'), coffee: away.some(a => a && a.pose === 'stand'),
+               tv: away.some(a => a && a.pose === 'sit')};
   backdrop(R, g, w, f, o);
+  lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
+  room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
   effects(R, room, pad, f, o.fx);
   if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
@@ -9022,7 +9122,7 @@ function drawRoom(cv, room, f, o) {
 }
 
 // ---------- the night shift (?demo): the README's own story, deterministic for GIF frames ----------
-const CAST = ['claude', 'codex', 'agy', 'opencode'], LOOP = 176;
+const CAST = ['opencode', 'agy', 'codex', 'claude'], LOOP = 176;
 const STORY = [
   {at: 0,   clock: '01:58', cap: '01:58|claude refactors the api, agy writes tests', live: 'claude',
    s: {claude: 'busy', codex: 'idle', agy: 'busy', opencode: 'idle'}},
@@ -9043,11 +9143,14 @@ const STORY = [
    s: {claude: 'idle', codex: 'idle', agy: 'idle', opencode: 'idle'}},
 ];
 function scene(t) {
+  const raw = t;
   t = ((t % LOOP) + LOOP) % LOOP;
   let k = 0; while (k + 1 < STORY.length && STORY[k + 1].at <= t) k++;
-  const step = STORY[k];
+  const step = STORY[k], since = a => { let at = 0;
+    for (let j = 1; j <= k; j++) if (STORY[j].s[a] !== STORY[j - 1].s[a]) at = STORY[j].at;
+    return at + raw - t; };
   const room = {topic: 'demo', name: 'the night shift', desks: CAST.map(a => ({
-    agent: a, session: a, live: step.live === a, state: step.s[a], queued: (step.q || {})[a] || 0,
+    agent: a, session: a, live: step.live === a, state: step.s[a], queued: (step.q || {})[a] || 0, since: since(a),
     prog: step.s[a] === 'limit' ? (t - 26) / 94 : 0}))};
   const fx = STORY.filter(s => s.fx && t >= s.at).map(s => Object.assign({start: s.at}, s.fx));
   if (t >= 146) for (const a of CAST) fx.push({type: 'sparkle', on: a, start: 146 + CAST.indexOf(a) * 3});
@@ -9056,7 +9159,7 @@ function scene(t) {
 
 // ---------- live ----------
 let data = {rooms: [], installed: [], usage: {}}, frame = 0, open = null, lastSig = '', auto = true;
-const prev = {}, prevLive = {}, fx = {};
+const prev = {}, prevLive = {}, fx = {}, since = {};
 function track() {
   for (const r of data.rooms) {
     const live = (r.desks.find(d => d.live) || {}).session;
@@ -9065,6 +9168,8 @@ function track() {
     prevLive[r.topic] = live;
     for (const d of r.desks) {
       const k = r.topic + '|' + d.session;
+      if (prev[k] !== d.state) since[k] = frame;
+      d.since = since[k] || 0;
       if (prev[k] === 'busy' && d.state === 'idle') (fx[r.topic] = fx[r.topic] || []).push({type: 'sparkle', on: d.session, start: frame});
       prev[k] = d.state;
       if (d.state === 'limit' && d.until) d.prog = 1 - (d.until - Date.now() / 1000) / 18000;
