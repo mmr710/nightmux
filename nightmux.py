@@ -11473,6 +11473,8 @@ def selfcheck():
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
         rcfg_["route_stats"] = {"light": {"codex": [9, 10], "claude": [1, 10]}}
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "codex"
+    seen_ = {d["state"] for t_ in range(0, 400, 5) for r in demo_snapshot(t_)["rooms"] for d in r["desks"]}
+    assert seen_ == {"busy", "idle", "limit", "waiting"}, seen_     # --demo shows every state
     # Prompt coach: vague prompts held, corrections learned, model ladder, fresh.
     assert lint_why("fix it") and lint_why("still broken") and lint_why("Doesn't work")
     assert not lint_why("no, do not do that") and not lint_why("fix the null check in app.js")
@@ -13023,6 +13025,89 @@ def doctor():
     return ok
 
 
+# ---------- --demo: the office with a made-up night, no bot, no keys ----------
+# Ten seconds from `git clone` to seeing what nightmux does: three projects,
+# agents working, asking, hitting limits and handing over, driven by the clock.
+DEMO_ROOMS = [
+    ("webshop", [("claude", [(40, "busy", "refactoring checkout.ts — 4 files"), (25, "limit", ""),
+                             (30, "idle", ""), (35, "busy", "adding tests for the cart")]),
+                 ("codex", [(40, "idle", ""), (55, "busy", "carrying on from the working tree"),
+                            (35, "idle", "")])]),
+    ("api", [("agy", [(30, "busy", "writing migration 0042_orders"), (20, "waiting", ""),
+                      (50, "busy", "running the migration"), (30, "idle", "")]),
+             ("opencode", [(60, "idle", ""), (40, "busy", "fixing the flaky auth test"),
+                           (30, "idle", "")])]),
+    ("game", [("claude", [(25, "idle", ""), (45, "busy", "tuning the jump physics"),
+                          (60, "idle", "")]),
+              ("gemini", [(70, "busy", "drawing sprites for level 2"), (60, "idle", "")])]),
+]
+
+
+def demo_snapshot(now=None):
+    now = time.time() if now is None else now
+    rooms = []
+    for ti, (name, desks) in enumerate(DEMO_ROOMS):
+        out = []
+        for di, (agent_, plan_) in enumerate(desks):
+            period = sum(d for d, _, _ in plan_)
+            t = (now + ti * 17 + di * 29) % period
+            for dur, st, doing in plan_:
+                if t < dur:
+                    break
+                t -= dur
+            desk = {"agent": agent_, "session": f"{name}-{agent_}", "live": di == 0, "state": st,
+                    "screen": [], "doing": doing, "queued": 2 if st == "limit" else 0,
+                    "ctx": 20 + (now / 9 + di * 13) % 60}
+            if st == "limit":
+                desk["until"] = now + (dur - t) * 60
+            if st == "waiting":
+                desk["screen"] = ["Run migration 0042_orders on the dev database?"]
+                desk["options"] = [{"text": "1. Yes", "send": "!1"}, {"text": "2. No", "send": "!2"}]
+            out.append(desk)
+        rooms.append({"topic": str(ti + 1), "name": name, "desks": out})
+    return {"rooms": rooms, "installed": ["claude", "codex", "agy", "opencode", "gemini"],
+            "now": now, "usage": {"five_hour": 40 + (now / 30) % 55, "seven_day": 35}}
+
+
+def demo_serve(port=8099):
+    import http.server
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def out(self, code, body, ctype="text/html; charset=utf-8", loc=None):
+            data = body.encode() if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            if loc:
+                self.send_header("Location", loc)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/office":
+                return self.out(200, OFFICE_HTML)
+            if path == "/api/office":
+                return self.out(200, json.dumps(demo_snapshot()), "application/json")
+            self.out(302, "", loc="/office")
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.out(200, "ok", "text/plain")
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+    print(f"🌙 nightmux demo — a made-up night, no bot or keys needed\n"
+          f"   open http://127.0.0.1:{port}/office  (or /office?demo for the story)\n"
+          "   Ctrl-C to stop · the real thing: nightmux --setup")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
     if "--selfcheck" in sys.argv:
@@ -13041,11 +13126,9 @@ def cli():
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
     elif "--demo" in sys.argv:
-        print("\033[1mTo experience the nightmux auto-resume magic instantly:\033[0m\n")
-        print("1. Open your Telegram bot")
-        print("2. Send this exact message to bind a test agent:\n")
-        print("    !new demo bash -c \"echo 'Working...'; sleep 2; echo 'usage limit reached. resets in 1m'; sleep 125; echo 'Agent resumed!'\"\n")
-        print("nightmux will immediately detect the simulated limit, pause the topic, wait until the reset window opens, and auto-resume.\n")
+        i = sys.argv.index("--demo")
+        port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
+        demo_serve(int(port))
     else:
         main()
 

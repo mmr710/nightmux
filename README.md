@@ -36,6 +36,8 @@ Python stdlib only — one file, ~5,400 lines you can read in an afternoon.
 
 ![The night shift in the office: claude hits its limit at 02:14 and hands the work to codex, agy asks and gets a yes from your phone, and at 04:11 the window resets and claude is back](docs/office-demo.gif)
 
+Try it without a bot or keys: `python3 nightmux.py --demo`, then open http://127.0.0.1:8099/office — a made-up night across three projects.
+
 **Try it:** `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | bash` — five minutes, no
 dependencies, no server. [Full install →](#install)
 
