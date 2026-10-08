@@ -597,6 +597,7 @@ function sheet() {
               r.name].filter(Boolean).join(' · '), 'meta');
   if (d.doing) add('pre', d.doing);
   if (d.screen.length) { const t = add('pre', d.screen.join('\n'), 'term'); t.scrollTop = t.scrollHeight; }
+  if (!window.PUB) { const a = add('a', 'full terminal ↗', 'meta'); a.href = '/term/' + open.topic + '?agent=' + d.agent; a.target = '_blank'; }
   const acts = [];
   if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
   if (!d.live) acts.push(['★ make live', '!' + d.agent]);

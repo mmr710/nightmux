@@ -9154,7 +9154,8 @@ function topics(rows) {
   keyed($('grid'), rows, r => r.topic,
     r => {
       const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
-        '<span class="meta tid"></span><a class="chatlnk" href="/chat?t=' + encodeURIComponent(r.topic) + '">💬</a></div>' +
+        '<span class="meta tid"></span><a class="chatlnk" href="/chat?t=' + encodeURIComponent(r.topic) + '">💬</a>' +
+        '<a class="chatlnk" title="terminal" href="/term/' + encodeURIComponent(r.topic) + '">⌨️</a></div>' +
         '<div class="meta info"></div><div class="bench"></div>' +
         '<div class="chipsrow agents"></div>' +
         '<form><input placeholder="send a prompt…" autocomplete="off" enterkeyhint="send">' +
@@ -10044,6 +10045,7 @@ function sheet() {
               r.name].filter(Boolean).join(' · '), 'meta');
   if (d.doing) add('pre', d.doing);
   if (d.screen.length) { const t = add('pre', d.screen.join('\n'), 'term'); t.scrollTop = t.scrollHeight; }
+  if (!window.PUB) { const a = add('a', 'full terminal ↗', 'meta'); a.href = '/term/' + open.topic + '?agent=' + d.agent; a.target = '_blank'; }
   const acts = [];
   if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
   if (!d.live) acts.push(['★ make live', '!' + d.agent]);
@@ -10544,6 +10546,73 @@ def qr_svg(text):
 
 
 APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
+TERM_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux terminal</title><link rel="icon" href="/icon.svg">
+<style>
+:root{--bg:#050608;--fg:#c0caf5;--mut:#7a83a6;--bar:#11151f;--acc:#f5c542}
+@media (prefers-color-scheme:light){:root{--bg:#fafafa;--fg:#1f2335;--mut:#6b7089;--bar:#eceef4;--acc:#9a6b00}}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.35 ui-monospace,Menlo,Consolas,monospace}
+header{position:sticky;top:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 16px;
+background:var(--bar);font-family:system-ui,sans-serif}
+header b{color:var(--acc)}header span{color:var(--mut);font-size:13px}
+select,input{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--mut);border-radius:6px;padding:3px 6px}
+pre{margin:0;padding:12px 16px 40px;white-space:pre-wrap;word-break:break-all}
+mark{background:var(--acc);color:#000}
+</style></head><body>
+<header><b>🌙 terminal</b><span id="who"></span><select id="ag" aria-label="agent"></select>
+<input id="q" type="search" placeholder="find" aria-label="find"><span id="st"></span></header>
+<pre id="t">loading…</pre>
+<script>
+const topic = location.pathname.split('/')[2], qs = new URLSearchParams(location.search);
+const t = document.getElementById('t'), ag = document.getElementById('ag'), q = document.getElementById('q');
+let agent = qs.get('agent') || '', last = '';
+const esc = s => s.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+function paint() {
+  const k = q.value.trim();
+  t.innerHTML = k ? esc(last).split(esc(k)).join('<mark>' + esc(k) + '</mark>') : esc(last);
+}
+async function tick() {
+  try {
+    const r = await fetch('/api/term/' + topic + '?lines=5000&agent=' + encodeURIComponent(agent));
+    const d = await r.json();
+    document.getElementById('who').textContent = (d.session || '') + (d.error ? ' · ' + d.error : '');
+    if (ag.options.length !== (d.agents || []).length) {
+      ag.innerHTML = ''; for (const a of d.agents || []) ag.add(new Option(a, a, false, a === d.agent));
+    }
+    agent = d.agent || agent;
+    const text = (d.lines || []).join('\n');
+    if (text !== last) {
+      const bottom = innerHeight + scrollY >= document.body.scrollHeight - 40;
+      last = text; paint();
+      if (bottom) scrollTo(0, document.body.scrollHeight);
+    }
+    document.getElementById('st').textContent = d.mode || '';
+  } catch (e) { document.getElementById('st').textContent = 'offline'; }
+}
+ag.onchange = () => { agent = ag.value; last = ''; tick(); };
+q.oninput = () => { paint(); const m = t.querySelector('mark'); if (m) m.scrollIntoView({block: 'center'}); };
+tick(); setInterval(() => { if (!document.hidden) tick(); }, 1500);
+</script></body></html>"""
+
+
+def term_lines(cfg, state, topic, agent="", n=2000):
+    """The scrollback of one of a topic's agents, redacted, for /term."""
+    bench = bench_of(cfg, topic)
+    cur = cfg.get("topics", {}).get(topic)
+    key = agent if agent in bench else next((k for k, v in bench.items() if v == cur), None)
+    sess = bench.get(key) or cur
+    if not sess:
+        return {"lines": [], "error": "topic not bound", "agents": []}
+    n = max(50, min(int(n) if str(n).isdigit() else 2000, 5000))
+    raw = tmux("capture-pane", "-p", "-J", "-t", tgt(sess), "-S", f"-{n}")
+    lines = [redact(l) for l in raw.split("\n")] if has_session(sess) else []
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return {"lines": lines, "session": sess, "agent": key, "agents": sorted(bench),
+            "mode": (state.get(sess) or {}).get("mode") if lines else "gone"}
+
+
 APP_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nightmux app</title><link rel="icon" href="/icon.svg">
@@ -10695,6 +10764,23 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "application/json")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
+        if self.path.startswith("/term/"):
+            return self.reply(TERM_HTML, "text/html; charset=utf-8")
+        if self.path.startswith("/api/term/"):
+            u = urllib.parse.urlsplit(self.path)
+            topic, qq = u.path[len("/api/term/"):].strip("/"), urllib.parse.parse_qs(u.query)
+            cfg = self.server.cfg
+            peer = None if self.peer else peer_of(cfg, topic)
+            if peer:
+                got = peer_call(cfg, peer, f"api/term/{topic}?{u.query}", timeout=5)
+                return self.reply(json.dumps(got if isinstance(got, dict) else
+                                             {"lines": [], "error": f"{peer} not answering"}),
+                                  "application/json")
+            with self.server.lock:
+                st_ = dict(self.server.state)
+            return self.reply(json.dumps(term_lines(cfg, st_, topic, (qq.get("agent") or [""])[0],
+                                                    (qq.get("lines") or ["2000"])[0])),
+                              "application/json")
         if self.path == "/api/setup":
             return self.reply(json.dumps([{"label": l, "ok": ok, "fix": fix}
                                           for l, ok, fix in setup_checks(self.server.cfg)]),
@@ -12367,6 +12453,14 @@ def selfcheck():
             lim_ = {r["agent"]: r for r in agent_limits(lim_cfg, lim_st, home=h_)}
         assert lim_["claude"]["busy"] == 1 and lim_["claude"]["windows"][0]["pct"] == 77, lim_
         assert lim_["codex"]["held"] == 1 and lim_["codex"]["windows"][0]["label"] == "5h", lim_
+    with stubbed(tmux=lambda *a: "one\nghp_" + "a" * 36 + "\n\n", has_session=lambda s: True):
+        tl_ = term_lines({"topics": {"5": "o"}, "bench": {"5": {"claude": "o", "codex": "o-codex"}}},
+                         {"o-codex": {"mode": "busy"}}, "5", "codex", "99999")
+        assert tl_["session"] == "o-codex" and tl_["agents"] == ["claude", "codex"], tl_
+        assert tl_["lines"][0] == "one" and "ghp_" + "a" * 36 not in json.dumps(tl_), tl_
+        assert tl_["mode"] == "busy" and len(tl_["lines"]) == 2, tl_
+    assert term_lines({"topics": {}}, {}, "7")["error"] == "topic not bound"
+    assert "terminal" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/term/5").read().decode()
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
