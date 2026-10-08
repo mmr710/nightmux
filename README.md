@@ -609,6 +609,29 @@ the cache hit rate, the average context each call carried, how often you
 nudged with "continue"/"yes" — and what to change to get better output for
 fewer tokens. The same report is `!stats [days]` in Telegram.
 
+## Race agents on one task
+
+`!race claude,codex add rate limiting to the login endpoint` gives the same
+task to each agent, each in its own git worktree from your current commit (so
+nobody edits anybody else's files). When they are done you get one card: what
+each changed, whether your `!goal` check passes in its tree, how long it took —
+and a 🏆 button per agent. The winner's changes land staged in your folder;
+the other worktrees are deleted. `!race diff codex` shows one's diff first,
+`!race cancel` drops it all. Without a list it races the topic's bench (or
+the first two agents installed).
+
+## Voice notes
+
+Send a voice note and, with a transcriber configured, the agent gets the
+words (shown back to you as 🎙 so you can check them). You choose where your
+voice goes — any command that takes the audio path last and prints text:
+
+```json
+"transcribe_cmd": "sh -c 'ffmpeg -loglevel quiet -y -i \"$0\" -ar 16000 /tmp/nm.wav && whisper-cli -m ~/models/ggml-base.en.bin -nt -np -f /tmp/nm.wav'"
+```
+
+(whisper.cpp, fully local.) Without one, the agent gets the audio file's path.
+
 ## Without Telegram
 
 No bot? Press Enter at the token prompt in `nightmux --setup` (or leave
