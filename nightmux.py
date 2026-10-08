@@ -3358,13 +3358,47 @@ def plan_capture(cfg, state, topic, sess, body):
         send(cfg, topic, f"🗺️ asked {sess} to plan '{p['task'][:60]}', got no "
              f"numbered list back:\n\n{body}", mode="mono")
         return True
-    st = state.setdefault(sess, {})
+    to = p.get("to") or sess          # !relay: one agent plans, another builds
+    st = state.setdefault(to, {})
     st["shift"], st["shift_total"] = steps, len(steps)
     save_queue(state)
-    send(cfg, topic, f"🗺️ plan set: {len(steps)} step(s), one at a time on idle\n"
+    send(cfg, topic, (f"🗺️ plan from {sess} → {to}" if to != sess else "🗺️ plan set")
+         + f": {len(steps)} step(s), one at a time on idle\n"
          + "\n".join(f"{i + 1}. {s.splitlines()[0][:70]}" for i, s in enumerate(steps)),
          mode="plain", buttons=kb([[("stop", "!shift clear")]]))
     return True
+
+
+def relay_cmd(cfg, state, lock, topic, sess, arg):
+    """!relay <planner>[,<reviewer>] <task>: the planner writes the steps, this
+    topic's live agent builds them one at a time, the reviewer (via !pair)
+    reviews every change. Three features already here, pointed at one task."""
+    first, _, task = arg.partition(" ")
+    keys = [k for k in first.lower().split(",") if k]
+    if not task.strip() or not 0 < len(keys) <= 2 or any(k not in agents(cfg) for k in keys):
+        return ("usage: !relay <planner>[,<reviewer>] <task>\n"
+                "the planner breaks the task into steps, this topic's agent builds them one "
+                "at a time, the reviewer checks every change · e.g. !relay claude,codex add "
+                "CSV export")
+    if not sess or not has_session(sess):
+        return "this topic has no live session to build in"
+    if str(topic) in _plan:
+        return "a plan request is already out — !plan cancel to drop it"
+    live = next((k for k, v in bench_of(cfg, topic).items() if v == sess), "this agent")
+    notes = []
+    if len(keys) == 2:
+        r = pair_cmd(cfg, state, lock, topic, sess, keys[1])
+        if not r.startswith("👥"):
+            return r
+        notes.append(r)
+    psess, note = (sess, "") if keys[0] == live else pair_reviewer(cfg, topic, keys[0])
+    if not psess:
+        return f"could not start {keys[0]}: {note}"
+    notes += [note] if note else []
+    _plan[str(topic)] = {"sess": psess, "task": task.strip(), "at": time.time(), "to": sess}
+    send_prompt(cfg, state, topic, psess, PLAN_PROMPT.format(task=task.strip()))
+    return "\n".join([f"🏃 relay: {keys[0]} plans → {live} builds"
+                      + (f" → {keys[1]} reviews" if len(keys) == 2 else "")] + notes)
 
 
 def consult_tick(cfg, state):
@@ -3762,7 +3796,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!shift", "!center", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -3881,6 +3915,8 @@ HELP = [
         "get one prompt back · !use [agent] runs it",
         "!pair <agent> [rounds] | off = a second agent reviews every change",
         "!race [claude,codex] <task> = each in its own worktree; you pick the winner",
+        "!relay <planner>[,<reviewer>] <task> = one agent plans, this one builds step "
+        "by step, another reviews each change",
         "!arena = every race you judged: wins per agent, and who wins which kind of task",
         "!route auto|off|stats = send each task to the agent that fits it, "
         "learned from results",
@@ -4046,6 +4082,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
         return public_cmd(cfg, lock, topic, arg)
+    if cmd == "!relay":
+        return relay_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!arena":
         return arena_report()
     if cmd == "!race":
@@ -14443,6 +14481,16 @@ def selfcheck():
         csent.clear()
         assert plan_capture(cfg2, pstate, "9", "box", "sure, working on it") is True
         assert any("no numbered list" in x for x in csent), csent
+        # !relay: another agent on the bench plans, this topic's agent builds
+        with stubbed(pair_reviewer=lambda c, t, k: ("box-codex", "started codex"),
+                     bench_of=lambda c, t: {"claude": "box"}):
+            assert "usage" in relay_cmd(cfg2, pstate, threading.Lock(), "9", "box", "nobody do it")
+            out = relay_cmd(cfg2, pstate, threading.Lock(), "9", "box", "codex add CSV export")
+            assert "codex plans → claude builds" in out and "started codex" in out, out
+            assert pprompts[-1][0] == "box-codex" and "add CSV export" in pprompts[-1][1]
+            assert plan_capture(cfg2, pstate, "9", "box-codex", "1. a\n2. b") is True
+            assert pstate["box"]["shift"] == ["a", "b"] and "box-codex" not in pstate, pstate
+            assert "plan from box-codex → box: 2 step" in csent[-1], csent[-1]
     # plugins: a name is a filesystem path, so it is restricted before it
     # becomes one, and only ever run — never typed into a session. Still
     # inside topic 9's "box" window above, before it is put back below.

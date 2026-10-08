@@ -55,6 +55,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!consult <question>` = ask them separately, let them read each other, get one prompt back · `!use [agent]` runs it
 - `!pair <agent> [rounds]` | off = a second agent reviews every change
 - `!race [claude,codex] <task>` = each in its own worktree; you pick the winner
+- `!relay <planner>`[,&lt;reviewer>] &lt;task> = one agent plans, this one builds step by step, another reviews each change
 - `!arena` = every race you judged: wins per agent, and who wins which kind of task
 - `!route` auto|off|stats = send each task to the agent that fits it, learned from results
 - `!all <sess1,sess2|--all> <prompt>` = one prompt to several sessions
