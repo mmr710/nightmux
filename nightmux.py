@@ -8784,7 +8784,7 @@ code { background: #0b0e14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .sname:empty { display: none; }
 </style></head>
 <body><main>
-<header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a></span></header>
+<header><h1>🌙 nightmux</h1><span class="sub">your night crew, at a glance · <a href="/office">office</a> · <a href="/app">app</a></span></header>
 <div id="setup"></div>
 <h2>servers <button id="addsrv" class="primary">+ add server</button></h2>
 <div id="addp" class="card">
@@ -9037,7 +9037,7 @@ async function send(ev, topic, card) {
   if (!text) return;
   btn.disabled = true;
   try {
-    const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', body: text});
+    const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', headers: {'X-Nightmux': '1'}, body: text});
     if (!r.ok) throw new Error(r.status);
     input.value = ''; ok.className = 'ok'; ok.textContent = '✓ sent';
   } catch (e) { ok.className = 'ok err'; ok.textContent = 'not sent (' + e.message + ') — text kept'; }
@@ -9140,7 +9140,7 @@ const T = new URLSearchParams(location.search).get('t'), log = document.getEleme
 let last = 0, first = true;
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(text) {
-  return fetch('/topic/' + encodeURIComponent(T), {method: 'POST', body: text});
+  return fetch('/topic/' + encodeURIComponent(T), {method: 'POST', headers: {'X-Nightmux': '1'}, body: text});
 }
 function add(m) {
   const el = document.createElement('div'); el.className = 'msg ' + m.who;
@@ -9775,7 +9775,7 @@ function toast(t) { const el = document.getElementById('toast'); el.textContent 
   clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
 
 async function send(topic, text) {
-  try { const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', body: text});
+  try { const r = await fetch('/topic/' + encodeURIComponent(topic), {method: 'POST', headers: {'X-Nightmux': '1'}, body: text});
     toast(r.ok ? 'sent ✓ — replies land in Telegram' : 'failed: ' + r.status); }
   catch (e) { toast('failed: ' + e); }
   setTimeout(poll, 700);
@@ -10104,6 +10104,189 @@ def join_cli(code):
           f"new project, or send !server {got['name']} in a topic.")
 
 
+# ---------- QR (pairing the Android app) ----------
+# Byte mode, error correction L, versions 1-9: up to 230 bytes, plenty for a URL.
+QR_EC = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30]      # EC codewords per block
+QR_BLOCKS = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2]
+
+
+def _gf_mul(x, y):
+    z = 0
+    for i in range(7, -1, -1):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z
+
+
+def _rs(data, deg):
+    """Reed-Solomon remainder: the EC codewords for one block."""
+    div, root = [0] * (deg - 1) + [1], 1
+    for _ in range(deg):
+        for j in range(deg):
+            div[j] = _gf_mul(div[j], root)
+            if j + 1 < deg:
+                div[j] ^= div[j + 1]
+        root = _gf_mul(root, 2)
+    out = [0] * deg
+    for b in data:
+        f = b ^ out.pop(0)
+        out.append(0)
+        for i, c in enumerate(div):
+            out[i] ^= _gf_mul(c, f)
+    return out
+
+
+def qr_matrix(text):
+    """The module grid for text, as rows of bools (True = dark).
+
+    ponytail: fixed mask 0 instead of scoring all eight; every mask is valid
+    and phone cameras read it, score them if a scanner ever balks.
+    """
+    data = text.encode()
+    for ver in range(1, 10):
+        size = ver * 4 + 17
+        raw = (16 * ver + 128) * ver + 64
+        if ver >= 2:
+            na = ver // 7 + 2
+            raw -= (25 * na - 10) * na - 55
+        if ver >= 7:
+            raw -= 36
+        raw //= 8
+        cap = raw - QR_EC[ver] * QR_BLOCKS[ver]
+        if len(data) + 2 <= cap:
+            break
+    else:
+        raise ValueError("too long for a QR here")
+    bits = "0100" + format(len(data), "08b") + "".join(format(b, "08b") for b in data)
+    bits += "0" * min(4, cap * 8 - len(bits))
+    bits += "0" * (-len(bits) % 8)
+    words = [int(bits[i:i + 8], 2) for i in range(0, len(bits), 8)]
+    words += [0xEC, 0x11] * ((cap - len(words)) // 2) + [0xEC] * ((cap - len(words)) % 2)
+    nb, ec = QR_BLOCKS[ver], QR_EC[ver]
+    per = cap // nb                         # versions 1-9 at L have equal blocks
+    blocks = [words[i * per:(i + 1) * per] for i in range(nb)]
+    eccs = [_rs(b, ec) for b in blocks]
+    final = [b[i] for i in range(per) for b in blocks] + [e[i] for i in range(ec) for e in eccs]
+
+    m = [[False] * size for _ in range(size)]
+    fn = [[False] * size for _ in range(size)]
+
+    def put(x, y, dark):
+        m[y][x], fn[y][x] = dark, True
+
+    for i in range(size):
+        put(6, i, i % 2 == 0)
+        put(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (size - 4, 3), (3, size - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                if 0 <= cx + dx < size and 0 <= cy + dy < size:
+                    put(cx + dx, cy + dy, max(abs(dx), abs(dy)) not in (2, 4))
+    if ver >= 2:
+        na = ver // 7 + 2
+        step = (ver * 8 + na * 3 + 5) // (na * 4 - 4) * 2
+        pos = [6] + sorted(size - 7 - i * step for i in range(na - 1))
+        for i, ax in enumerate(pos):
+            for j, ay in enumerate(pos):
+                if (i, j) in ((0, 0), (0, na - 1), (na - 1, 0)):
+                    continue
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        put(ax + dx, ay + dy, max(abs(dx), abs(dy)) != 1)
+    fmt = 1 << 3                            # EC level L, mask 0
+    rem = fmt
+    for _ in range(10):
+        rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+    fb = ((fmt << 10) | rem) ^ 0x5412
+    bit = lambda v, i: (v >> i) & 1 == 1
+    for i in range(6):
+        put(8, i, bit(fb, i))
+    put(8, 7, bit(fb, 6))
+    put(8, 8, bit(fb, 7))
+    put(7, 8, bit(fb, 8))
+    for i in range(9, 15):
+        put(14 - i, 8, bit(fb, i))
+    for i in range(8):
+        put(size - 1 - i, 8, bit(fb, i))
+    for i in range(8, 15):
+        put(8, size - 15 + i, bit(fb, i))
+    put(8, size - 8, True)
+    if ver >= 7:
+        rem = ver
+        for _ in range(12):
+            rem = (rem << 1) ^ ((rem >> 11) * 0x1F25)
+        vb = ver << 12 | rem
+        for i in range(18):
+            a, b = size - 11 + i % 3, i // 3
+            put(a, b, bit(vb, i))
+            put(b, a, bit(vb, i))
+    i, right = 0, size - 1
+    while right >= 1:
+        if right == 6:
+            right = 5
+        for vert in range(size):
+            for j in range(2):
+                x = right - j
+                y = size - 1 - vert if (right + 1) & 2 == 0 else vert
+                if not fn[y][x] and i < len(final) * 8:
+                    m[y][x] = bit(final[i >> 3], 7 - (i & 7))
+                    i += 1
+        right -= 2
+    for y in range(size):
+        for x in range(size):
+            if not fn[y][x] and (x + y) % 2 == 0:
+                m[y][x] = not m[y][x]
+    return m
+
+
+def qr_svg(text):
+    m = qr_matrix(text)
+    n = len(m) + 8
+    d = "".join(f"M{x + 4},{y + 4}h1v1h-1z" for y, row in enumerate(m)
+                for x, v in enumerate(row) if v)
+    return (f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {n} {n}' "
+            f"shape-rendering='crispEdges'><rect width='{n}' height='{n}' fill='#fff'/>"
+            f"<path d='{d}' fill='#000'/></svg>")
+
+
+APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
+APP_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux app</title><link rel="icon" href="/icon.svg">
+<style>
+:root{--bg:#0b0e14;--fg:#c0caf5;--mut:#7a83a6;--acc:#f5c542;--card:#11151f}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:flex;
+justify-content:center;padding:32px 16px}
+main{max-width:420px;width:100%;text-align:center}
+img{width:240px;height:240px;border-radius:8px;background:#fff}
+a.b{display:block;margin:12px 0;padding:14px;border-radius:10px;background:var(--acc);color:#111;
+font-weight:600;text-decoration:none}
+a.s{background:var(--card);color:var(--fg)}
+p{color:var(--mut)}code{color:var(--fg)}
+</style></head><body><main>
+<h1>🌙 nightmux on Android</h1>
+<div id="desk"><p>Point your phone's camera at this code, then tap <b>Open in app</b> there.</p>
+<img id="qr" alt="QR code for this page"></div>
+<div id="phone">
+<a class="b" id="open">Open in app</a>
+<a class="b s" href="__APK__">Download the app (.apk)</a>
+<p>Installed it already? <b>Open in app</b> connects it to <code id="here"></code>. No typing.</p>
+</div>
+<p>The app reaches this server the same way this page did, over your tailnet or LAN.</p>
+</main><script>
+const here = location.origin;
+document.getElementById('here').textContent = here;
+document.getElementById('qr').src = '/qr.svg?d=' + encodeURIComponent(here + '/app');
+document.getElementById('open').href = 'intent://connect?url=' + encodeURIComponent(here) +
+  '#Intent;scheme=nightmux;package=io.github.mmr710.nightmux;S.browser_fallback_url=' +
+  encodeURIComponent('__APK__') + ';end';
+if (/Android/.test(navigator.userAgent)) document.getElementById('desk').style.display = 'none';
+if (/NightmuxApp/.test(navigator.userAgent)) document.getElementById('phone').innerHTML =
+  '<p>You are already in the app.</p>';
+</script></body></html>""".replace("__APK__", APK_URL)
+
+
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     peer = False   # this request came from another nightmux, through /peer/
 
@@ -10185,6 +10368,16 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "application/manifest+json")
         if self.path == "/icon.svg":
             return self.reply(ICON_SVG, "image/svg+xml")
+        if self.path == "/app":
+            return self.reply(APP_HTML, "text/html; charset=utf-8")
+        if self.path.startswith("/qr.svg?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                return self.reply(qr_svg((q.get("d") or [""])[0]), "image/svg+xml")
+            except ValueError:
+                self.send_response(414)
+                self.end_headers()
+                return
         if self.path == "/sw.js":       # installable as an app; no offline cache
             return self.reply("self.addEventListener('fetch', () => {});", "text/javascript")
         if self.path.startswith("/api/chat/"):
@@ -10334,6 +10527,12 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # Same guard as /api/topic: a text/plain POST needs no preflight, so
+        # without it any page open on a tailnet device could type into agents.
+        if not self.peer and self.headers.get("X-Nightmux") != "1":
+            self.send_response(403)
+            self.end_headers()
+            return
         topic = self.resolve_topic(parts[1])
         peer = peer_of(cfg, topic)
         if peer and body:
@@ -12265,6 +12464,25 @@ def selfcheck():
         assert False, "accepted without the header"
     except urllib.error.HTTPError as e:
         assert e.code == 403
+    # Same for typing into a topic: text/plain is a "simple" cross-site POST.
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port_}/topic/321", data=b"rm -rf ~", method="POST"))
+        assert False, "typed into a topic without the header"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+    # Pairing page and its QR: finder patterns in the corners, quiet zone, sized by length.
+    assert "Open in app" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/app").read().decode()
+    qsvg_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/qr.svg?d=https%3A%2F%2Fbox.ts.net%2Fapp").read()
+    assert qsvg_.startswith(b"<svg") and b"M4,4h1" in qsvg_
+    qm_ = qr_matrix("https://box.ts.net/app")
+    assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
+    assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
+    try:
+        qr_matrix("x" * 400)
+        assert False, "accepted a QR too long"
+    except ValueError:
+        pass
     # The daemon's PATH grows by the user bin dirs that exist, never duplicates.
     with tempfile.TemporaryDirectory() as hp_:
         os.makedirs(os.path.join(hp_, ".local", "bin"))
