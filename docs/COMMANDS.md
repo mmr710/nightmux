@@ -82,7 +82,8 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!git` | `!diff` | `!get <path>` = the session's repo and files
 - `!undo` = snapshot branches + restore commands (never runs them)
 - `!watch` pr [n] | merge | off = feed CI failures and review comments to the agent; merge button when green
-- `!issues [auto [label]`|auto off] = GitHub issues as buttons -> branch, fix, PR
+- `!issues [auto [label]`|auto off] = GitHub issues as buttons -> branch, fix, PR; auto also answers '`/nightmux <task>`' comments from collaborators
+- `!issue <n>` = this one issue -> branch, fix, PR
 - `!errors [auto|ask|off|expose]` = production errors (Sentry or any JSON) become fixes
 - `!deps [fix | nightly [HH:MM|off]`] = vulnerable and outdated packages
 
