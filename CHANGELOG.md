@@ -12,7 +12,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Changed
 
+- `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+
 ### Fixed
+
+- `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
 
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
