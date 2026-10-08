@@ -10565,7 +10565,7 @@ if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
-else { poll(); setInterval(poll, 2000); }
+if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
 </script>
@@ -13216,7 +13216,8 @@ def selfcheck():
         assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
     dof_ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "office.html")
     if os.path.exists(dof_):                       # the Pages demo is this page, kept in step
-        assert open(dof_).read() == OFFICE_HTML, "docs/office.html is stale: re-export OFFICE_HTML"
+        assert "if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }" in OFFICE_HTML  # live and /public both poll
+    assert open(dof_).read() == OFFICE_HTML, "docs/office.html is stale: re-export OFFICE_HTML"
     assert transcribe({"transcribe_cmd": "echo hello"}, "/x.ogg") == "hello /x.ogg"
     assert transcribe({}, "/x.ogg") is None or os.environ.get("NIGHTMUX_TRANSCRIBE")
     with tempfile.TemporaryDirectory() as rr_:

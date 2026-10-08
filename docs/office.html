@@ -665,7 +665,7 @@ if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
-else { poll(); setInterval(poll, 2000); }
+if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
 </script>

@@ -32,6 +32,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 - `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
 
+- The `/public` office never fetched anything since `!public` landed: a line inserted above the poll turned it into an `else`. Both offices poll again, and selfcheck pins it.
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
 ## [1.3.0] — 2026-10-08
