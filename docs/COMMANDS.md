@@ -101,7 +101,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!desktop [open <app>|shot|off]` = a virtual desktop agents can drive
 - `!apk [install]` · `!android` connect|pair &lt;ip:port> [code] · `!shot` android
 - `!reel [hours]` | daily HH:MM | off = the night as a GIF
-- `!wrapped [days]` = a shareable card · `!public` on|expose|off = read-only office link · `!leaderboard [post]`
+- `!wrapped [days]` = two cards, one with project names and one to share · `!public` on|expose|off = read-only office link · `!leaderboard [post]`
 
 ## ⚙️ Setup
 

@@ -3975,7 +3975,7 @@ HELP = [
         "!desktop [open <app>|shot|off] = a virtual desktop agents can drive",
         "!apk [install] · !android connect|pair <ip:port> [code] · !shot android",
         "!reel [hours] | daily HH:MM | off = the night as a GIF",
-        "!wrapped [days] = a shareable card · !public on|expose|off = "
+        "!wrapped [days] = two cards, one with project names and one to share · !public on|expose|off = "
         "read-only office link · !leaderboard [post]",
     ]),
     ("setup", "⚙️ Setup", [
@@ -6221,6 +6221,11 @@ def sav_add(key, n=1):
     with _sav_lock:
         d = sav_data()
         d[key] = d.get(key, 0) + n
+        if key == "tokens":      # by day too, so a card can show its own window
+            day, by = time.strftime("%Y-%m-%d", time.gmtime()), d.setdefault("tokens_day", {})
+            by[day] = by.get(day, 0) + n
+            for old in sorted(by)[:-400]:
+                del by[old]
         _sav["dirty"] = True
 
 
@@ -6297,6 +6302,25 @@ ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:
 </body></html>"""
 
 
+def saved_in(d, days):
+    """Tokens saved in the last `days` days: the day ledger where it reaches back,
+    the all-time total spread evenly over the time before it."""
+    now, total = time.time(), d.get("tokens", 0)
+    since = d.get("since", now)
+    if now - since <= days * 86400:
+        return total
+    by = d.get("tokens_day") or {}
+    cut = time.strftime("%Y-%m-%d", time.gmtime(now - days * 86400))
+    got = sum(n for k, n in by.items() if k > cut)
+    first = min(by) if by else None
+    if first and first <= cut:
+        return got
+    start = calendar.timegm(time.strptime(first, "%Y-%m-%d")) if first else now
+    before = max(0, total - sum(by.values()))       # saved before the ledger existed
+    span = max(86400, start - since)
+    return got + round(before * min(1, (start - (now - days * 86400)) / span))
+
+
 def wrapped_data(cfg, days):
     """Everything on the card: headline numbers, projects, the hours, and what they say."""
     d, r = sav_data(), analyze_chats(days)
@@ -6305,8 +6329,11 @@ def wrapped_data(cfg, days):
     tok = {k: sum(a["tokens"][k] for a in ag.values())
            for k in ("input", "cache_read", "cache_write", "output")}
     toks, prompts = sum(tok.values()), sum(a["prompts"] or 0 for a in ag.values())
-    cells = [(_k(toks), "tokens through my agents"),
-             (_k(d.get("tokens", 0)), "tokens saved, not re-read"),
+    saved = saved_in(d, days)
+    r = saved / (toks + saved) if saved and toks else 0
+    pct = f"{r:.0%}" if r >= 0.01 or not r else f"{r:.2%}"     # 941k of 3.4B is not 0%
+    cells = [(_k(toks), "tokens used"),
+             (pct, f"tokens saved ({_k(saved)})"),
              (str(prompts), "prompts sent"), (str(len(proj)), "projects worked in"),
              (str(d.get("night_turns", 0)), "turns while I slept"),
              (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
@@ -6340,14 +6367,16 @@ def wrapped_data(cfg, days):
     if prompts >= 10:
         ins.append(("one-word nudges", f"{nud / prompts:.0%}"))
     return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]),
+            "used": toks, "saved": saved,
             "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
 
 
-def wrapped_page(days, w):
+def wrapped_page(days, w, share=False):
+    """share=True is the one to post: projects become counts, never names."""
     e = html.escape
     top = max([n for _, n in w["projects"]] or [1])
-    projects = "".join(f'<div class="p"><em>{e(p[:20])}</em><b style="width:{max(4, 200 * n // top)}px">'
-                       f'</b><span>{n}</span></div>' for p, n in w["projects"]) or \
+    projects = "".join(f'<div class="p"><em>{"project " + str(i + 1) if share else e(p[:20])}</em><b style="width:{max(4, 200 * n // top)}px">'
+                       f'</b><span>{n}</span></div>' for i, (p, n) in enumerate(w["projects"])) or \
         '<div class="p">—</div>'
     hi = max(w["hours"]) or 1
     hours = ('<svg width="500" height="70" viewBox="0 0 480 70">' + "".join(
@@ -6371,9 +6400,7 @@ def wrapped_cmd(cfg, topic, arg):
     if not b:
         return 'no Chromium found — install one or set "browser" in the config'
 
-    def go():
-        w = wrapped_data(cfg, days)
-        page = wrapped_page(days, w)
+    def draw(page):
         os.makedirs(STATE_DIR, exist_ok=True)
         src, out = os.path.join(STATE_DIR, "wrapped.html"), os.path.join(STATE_DIR, "wrapped.png")
         with open(src, "w") as f:
@@ -6385,14 +6412,23 @@ def wrapped_cmd(cfg, topic, arg):
             with open(out, "rb") as f:
                 png = f.read()
             os.remove(out)
+            return png
         except OSError:
+            return None
+
+    def go():
+        w = wrapped_data(cfg, days)
+        mine, pub = draw(wrapped_page(days, w)), draw(wrapped_page(days, w, share=True))
+        if not (mine and pub):
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
         cells = w["cells"]
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
-        send_file(cfg, topic, "wrapped.png", png, kind="photo",
-                  caption=f"🌙 your last {days} days with nightmux\n" + "\n".join(
-                      f"• {k}: {v}" for k, v in w["insights"]),
+        send_file(cfg, topic, "wrapped.png", mine, kind="photo",
+                  caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
+                  + "\n".join(f"• {k}: {v}" for k, v in w["insights"]))
+        send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
+                  caption="📤 to share: projects shown as counts only",
                   buttons=kb([[("🐦 post it", tweet_url(
                       f"My AI coding agents, last {days} days: {top}. Run by nightmux "
                       f"{REPO_URL} #ClaudeCode #vibecoding"))]]))
@@ -13594,8 +13630,16 @@ def selfcheck():
         with stubbed(analyze_chats=lambda d: r_, sav_data=lambda: {"tokens": 5000000}):
             wd_ = wrapped_data({}, 30)
         pg_ = wrapped_page(30, wd_)
-        assert ("5.0M", "tokens saved, not re-read") in wd_["cells"], wd_["cells"]
+        assert wd_["saved"] == 5000000 and wd_["cells"][1][1] == "tokens saved (5.0M)", wd_
+        assert wd_["cells"][1][0].endswith("%") and wd_["cells"][1][0] != "0%", wd_["cells"]
         assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
+        ps_ = wrapped_page(30, wd_, share=True)
+        assert "shop" not in ps_ and "project 1" in ps_ and ">30<" in ps_, ps_
+        t0_ = time.time()
+        d0_ = {"since": t0_ - 100 * 86400, "tokens": 1000}
+        assert saved_in(d0_, 10) == 100 and saved_in({"since": t0_, "tokens": 7}, 10) == 7
+        d0_["tokens_day"] = {time.strftime("%Y-%m-%d", time.gmtime(t0_)): 40}
+        assert 40 + 80 < saved_in(d0_, 10) <= 40 + 97, saved_in(d0_, 10)   # ledger + ~10/100 of the rest
         assert "peak hour" in pg_ and "from cache" in pg_ and "SECRETPROMPT" not in pg_
         said_ = " ".join(t["tip"] for t in r_["tips"] if t["agent"] == "claude")
         assert "cache hit 10%" in said_ and "nudges" in said_ and "100k tokens" in said_, said_
