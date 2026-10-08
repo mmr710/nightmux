@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `nightmux --demo [port]`: serves the office with a made-up night across three projects — working, asking, hitting limits — no Telegram bot, config or API keys needed.
+
 - The office has a lounge: idle agents walk to the coffee machine, TV or toilet and back; an agent on a usage limit goes to bed until the window resets. Demo GIF re-recorded.
 
 - Token savings and a prompt coach: auto-compact on by default (200k), `!fresh` (memory → /clear → re-read after a green `!goal`), `!lint` (holds vague prompts; ✨ improve rewrites them from your first-try prompts), correction detection feeding `!route stats` and learned routing, `!coach`, and `!ladder` (haiku/sonnet/opus by task class, stepping up when the agent struggles).
