@@ -1,0 +1,1 @@
+First release: the office, chat and dashboard, alerts, notification answers, a home-screen widget, ambient mode and QR pairing.

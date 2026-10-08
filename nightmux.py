@@ -1129,11 +1129,14 @@ def clock(cfg, ts):
     Only display is shifted, never parsing: a banner the TUI printed is in the
     server's clock, and reinterpreting it would move every reset time.
     """
+    return time.strftime("%H:%M", local_time(cfg, ts))
+
+
+def local_time(cfg, ts):
     off = cfg.get("tz_offset")
     if off is None:
-        return time.strftime("%H:%M", time.localtime(ts))
-    secs = tz_shift(off, ts) if isinstance(off, str) else off * 3600
-    return time.strftime("%H:%M", time.gmtime(ts + secs))
+        return time.localtime(ts)
+    return time.gmtime(ts + (tz_shift(off, ts) if isinstance(off, str) else off * 3600))
 
 
 def left(secs):
@@ -3408,6 +3411,9 @@ def start_session(cfg, state, lock, topic, arg, key):
     if not name:
         return f"usage: !{key} <name> [dir] [flags] [@branch]"
     if has_session(name):
+        if name in bench_of(cfg, topic).values() or name == cfg["topics"].get(topic):
+            return (f"'{name}' is already this topic's session. To run {key} here "
+                    f"too, send just !{key}: it starts beside it in the same folder.")
         return f"'{name}' exists; use !bind {name}"
     if rest.startswith(("~", "/", ".")):        # dir first, anything after is flags
         cwd, _, flags = rest.partition(" ")
@@ -3602,7 +3608,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!shift", "!center", "!all",
-              "!update",   # runs installers on the host: no business in a read-only topic
+              "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
@@ -3668,6 +3674,148 @@ def run_plugin(cwd, name, arg):
     return body or f"!{name} produced no output (exit {out.returncode})"
 
 
+# ---------- !help ----------
+# (key, title, lines). !help is the index, !help <key> one section, !help <word>
+# every line that mentions it, !help all the lot. {agents} and {plugins} fill in.
+HELP = [
+    ("start", "🚀 Sessions and agents", [
+        "!new <name> [dir] [flags] [@branch] = start a session here ({agents})",
+        "!<agent> = add that agent to this topic (same folder) or switch to it; "
+        "the one you leave keeps running",
+        "!<agent> <name> [dir] = a new session with its own name",
+        "!agents = this topic's agents · @<agent> <text> = one prompt to one of "
+        "them, without switching",
+        "!bind <session> | !unbind | !sessions | !kill",
+        "!resume [agent] / !restore = relaunch this topic's dir with --continue",
+        "!failover <agent> = out of usage? hand the held work to another agent now",
+        "!server [peer|local] = which machine runs this topic, or move it",
+        "!worktrees = git worktrees of this repo, and who is in each",
+        "!update [agent] = run each agent's own updater · !version",
+        "!upgrade [here] = update nightmux itself, here and on every peer, and restart "
+        "(agents keep running)",
+    ]),
+    ("talk", "💬 Talking to the agent", [
+        "anything else, and /slash commands -> typed into the agent",
+        "photo/file/voice -> saved, path typed in (voice is transcribed)",
+        "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode",
+        "!keys <tmux keys> | !raw <text> (types even with a menu open)",
+        "!model <name> | !effort <low|medium|high>",
+        "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
+        "explain, tidy, ship); !p save <name> <text>",
+        "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!pane [lines] | !verbose | !ctl · type / for autocomplete",
+    ]),
+    ("night", "🌙 Overnight and schedules", [
+        "!goal [n] <check> | off = run a check (tests, build) after every turn "
+        "and send failures back until it passes",
+        "!shift then one prompt per line = a sequential overnight plan",
+        "!plan <big task> = the agent splits it into steps, run one at a time",
+        "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]",
+        "!queue [clear|now] = prompts waiting for the agent",
+        "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
+        "./check.sh, looped until green",
+        "!qa 03:00 [url] | now | off = the agent clicks through the app at night "
+        "and files bugs as issues",
+        "!loopguard [ping|auto|off] = notice an agent going in circles",
+        "!briefing [HH:MM|now|off] = one morning message: done, waiting, limits",
+        "!digest [HH:MM|off] = what happened while you slept",
+    ]),
+    ("team", "👥 Several agents at once", [
+        "!consult <question> = ask them separately, let them read each other, "
+        "get one prompt back · !use [agent] runs it",
+        "!pair <agent> [rounds] | off = a second agent reviews every change",
+        "!race [claude,codex] <task> = each in its own worktree; you pick the winner",
+        "!route auto|off|stats = send each task to the agent that fits it, "
+        "learned from results",
+        "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
+        "!center [off] = this topic watches every session · !board = all at a glance",
+    ]),
+    ("tokens", "🪙 Tokens and limits", [
+        "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!autocompact <pct|150k|off> = /compact at a share or a token count "
+        "(default 200k) · !idlectx <pct|off>",
+        "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when "
+        "it struggles",
+        "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
+        "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
+        "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
+        "first-try prompts have in common",
+        "!memory [update|on|off] = project notes every agent reads on start",
+        "!stats [days] = tokens, cache and prompts per agent · !saved",
+    ]),
+    ("code", "🔧 Git, PRs and production", [
+        "!git | !diff | !get <path> = the session's repo and files",
+        "!undo = snapshot branches + restore commands (never runs them)",
+        "!watch pr [n] | merge | off = feed CI failures and review comments "
+        "to the agent; merge button when green",
+        "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
+        "fix, PR",
+        "!errors [auto|ask|off|expose] = production errors (Sentry or any JSON) "
+        "become fixes",
+        "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages",
+    ]),
+    ("see", "👀 Watch and share", [
+        "!office = the live office: a room per topic, a desk per agent",
+        "!status | !board | !log (daemon journal) | !grep <text> [days]",
+        "!preview = the app this session serves, on your phone · "
+        "!shot [:port][/path|url] = phone-size screenshot",
+        "!tools [add|rm browser [all] | restart] = give the agent a browser",
+        "!desktop [open <app>|shot|off] = a virtual desktop agents can drive",
+        "!apk [install] · !android connect|pair <ip:port> [code] · !shot android",
+        "!reel [hours] | daily HH:MM | off = the night as a GIF",
+        "!wrapped [days] = a shareable card · !public on|expose|off = "
+        "read-only office link · !leaderboard [post]",
+    ]),
+    ("setup", "⚙️ Setup", [
+        "!reload = re-read the config · !tz = timezone",
+        "!plugins = executables in {plugins}; each file is a command",
+        "!version = build, python, and which hooks are wired",
+    ]),
+]
+
+
+def help_text(cfg, arg=""):
+    """(text, button rows). Rows only for the index, so a tap opens a section."""
+    fill = lambda l: l.replace("{agents}", ", ".join(agents(cfg))).replace("{plugins}", PLUGIN_DIR)
+    section = lambda k, t, ls: t + "\n" + "\n".join("• " + fill(l) for l in ls)
+    q = arg.strip().lower().lstrip("!")
+    if q == "all":
+        return "\n\n".join(section(*h) for h in HELP), None
+    for k, t, ls in HELP:
+        if q == k:
+            return section(k, t, ls) + "\n\n!help = all sections", None
+    if q:
+        hits = [fill(l) for _, _, ls in HELP for l in ls if q in l.lower()]
+        return ("\n".join("• " + l for l in hits) if hits
+                else f"nothing about '{arg}'. !help for the sections"), None
+    lines = ["nightmux — tap a section, or !help <section|command|all>", ""]
+    lines += [f"{t}  ·  !help {k}" for k, t, _ in HELP]
+    lines += ["", "quick start: !new <name> <dir> · then just type · !<agent> adds "
+              "another agent here · !goal <tests> keeps it going until they pass"]
+    rows = [[(t, f"!help {k}") for k, t, _ in HELP[i:i + 2]] for i in range(0, len(HELP), 2)]
+    rows.append([("📖 everything", "!help all")])
+    return "\n".join(lines), rows
+
+
+def commands_md():
+    """docs/COMMANDS.md, from HELP — selfcheck fails when the two drift apart."""
+    out = ["# Commands", "", "<!-- generated by `nightmux --commands`; edit HELP in nightmux.py -->",
+           "", "Everything works as `!cmd`; the common ones are also `/cmd` so Telegram "
+           "autocompletes them. Anything else, including the agent's own `/compact` or "
+           "`/clear`, is typed into the session. In Telegram, `!help` shows these as buttons.", ""]
+    for k, t, ls in HELP:
+        out += [f"## {t}", "", f"`!help {k}`", ""]
+        for l in ls:
+            l = re.sub(r"((?<![\w`])[!@/][\w<>-]+(?: <[^>]+>| \[[^\]]+\])*)", r"`\1`",
+                       l.replace("{agents}", "claude, codex, agy, opencode, …")
+                       .replace("{plugins}", "~/.nightmux/plugins"))
+            # outside code spans a bare <word> is an HTML tag to GitHub
+            out.append("- " + "`".join(p if i % 2 else p.replace("<", "&lt;")
+                                       for i, p in enumerate(l.split("`"))))
+        out.append("")
+    return "\n".join(out)
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -3695,6 +3843,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
+    if cmd == "!upgrade":
+        return upgrade_cmd(cfg, topic, arg)
     if cmd == "!update":
         if _updating.locked():
             return "an agent update is already running"
@@ -3803,108 +3953,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     "agent now · installed: " + ", ".join(installed_agents(cfg)))
         return failover(cfg, state, lock, topic, arg.split()[0].lower())
     if cmd == "!help":
-        return ("!bind <session> | !unbind | !sessions\n"
-                f"!new <name> [dir] [flags] [@branch], or !<agent>: "
-                f"{', '.join(agents(cfg))}\n"
-                "!agents = this topic's agents; bare !<agent> switches between them\n"
-                "@claude <text> / @agy <text> = send one prompt to one of them, "
-                "without switching\n"
-                "!consult <question> = ask them separately, let them read each "
-                "other, get one prompt back\n"
-                "!use [agent] = run the prompt a consult settled on, in this "
-                "topic's agent\n"
-                "!plan <big task> = agent breaks it into steps, runs them one "
-                "at a time like !shift\n"
-                "!autoyes <agent|off> = answer that agent's own permission menus "
-                "for it\n"
-                "!resume [agy] / !restore = relaunch this topic's dir with --continue\n"
-                "!worktrees = git worktrees of this topic's repo, and who is in each\n"
-                "!status (all topics) | !pane [lines] | !verbose | !kill | !ctl\n"
-                "!git | !diff (session's cwd) | !get <path> | !log (daemon journal)\n"
-                "!undo = list snapshot branches + restore commands (never runs them)\n"
-                "!queue [clear|now] | !usage | !ctx | !cost [days] | !tz | !reload\n"
-                "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]\n"
-                "!shift then one prompt per line = a sequential overnight plan\n"
-                "!digest [HH:MM|off] = what happened while you slept, on demand or daily\n"
-                "!center [off] = make this topic watch/control every session\n"
-                "!board = every topic at a glance (works anywhere)\n"
-                "!all <sess1,sess2|--all> <prompt> = send one prompt to several sessions\n"
-                "!version = build, python, and which hooks are wired\n"
-                "!stats [days] = token, cache and prompt statistics per agent from "
-                "this machine's transcripts, with what to change\n"
-                "!preview = open the app this session is serving on your phone "
-                "(tailnet only) · !shot [:port][/path|url] = phone-size screenshot\n"
-                "!watch pr [n] | merge | off = feed this PR's CI failures and review "
-                "comments to the agent; ping with a merge button when green\n"
-                "!idea [@agent] <what to build> = new folder + git + agent writing "
-                "SPEC.md, building the MVP and a ./check.sh, looped until green\n"
-                "!p [name] [args] = saved prompts as buttons (review, fix-tests, "
-                "spec, explain, tidy, ship); !p save <name> <text>\n"
-                "!route auto|off = send each new task to the bench agent that fits it "
-                "(routine → light, design/debug → heavy), learning from !goal results "
-                "and corrections; !route stats = first-try rate per agent\n"
-                "!lint on|off = hold a vague prompt ('fix it') for ✨ improve or send as is\n"
-                "!coach = what your prompts that land first try have in common\n"
-                "!saved = what nightmux saved you · !wrapped [days] = a shareable card\n"
-                "!public on|expose|off = a read-only office link for anyone\n"
-                "!qa 03:00 [url] | now | off = the agent clicks through the app at night and "
-                "files bugs as issues\n"
-                "!leaderboard [post] = your counts on the public board (opt-in)\n"
-                "!race [claude,codex] <task> = several agents do it, each in its own "
-                "worktree; you pick the winner\n"
-                "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
-                "struggles\n!fresh now|on|off = after a green !goal: notes to memory, "
-                "/clear, re-read\n"
-                "!reel [hours] | daily HH:MM | off = the night as a GIF of the office, "
-                "with what each agent did\n"
-                "!pair <agent> [rounds] | off = a second agent reviews every change "
-                "this one makes; real issues go back to the coder, LGTM stays quiet\n"
-                "!loopguard [ping|auto|off] = notice an agent going in circles (same "
-                "error, same file churned, apologies) and ping you, or step it back\n"
-                "!apk [install] = build the project's debug APK and send it here (or "
-                "install it on your phone) · !android connect|pair <ip:port> [code] = "
-                "your phone over wireless debugging · !shot android\n"
-                "!issues [auto [label]|auto off] = open GitHub issues as buttons; tap "
-                "one and the agent branches, fixes, opens a PR that nightmux watches\n"
-                "!errors [auto|ask|off|expose] = Sentry (or any JSON) webhook: new "
-                "production errors become fix buttons or go straight to the agent\n"
-                "!desktop [open <app>|shot|off] = a virtual desktop agents can drive "
-                "(!tools add desktop) and you can watch from the phone\n"
-                "!tools [add|rm browser [all] | restart] = give the agent a headless "
-                "browser it drives itself (Playwright MCP)\n"
-                "!briefing [HH:MM|now|off] = one morning message: done overnight, "
-                "waiting for you (questions, green PRs, errors), limits, queued\n"
-                "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages "
-                "(npm, pip-audit, govulncheck), upgraded by the agent on a tap\n"
-                "!forecast = when each agent's usage window fills at the current pace "
-                "(you are warned ahead of time where it matters)\n"
-                "!memory [update|on|off] = the project's notes (.nightmux/memory.md) "
-                "that every agent reads when it starts here; kept up to date after quiet spells\n"
-                "!goal [n] <check> | off = run a check (tests, build) after every "
-                "turn and send failures back until it passes\n"
-                "!server [peer|local] = which machine this topic runs on; move it "
-                "to another nightmux (see README: two servers)\n"
-                "!office = link to the live office page: a room per topic, a desk "
-                "per agent\n"
-                "!failover <agent> = hit a usage limit? hand the held work to "
-                "another agent now; \"failover\": \"codex\" in the config does it "
-                "unasked\n"
-                "!update [agent] = run each installed agent's own updater "
-                "(claude, codex, agy, opencode…); \"auto_update\": true in the "
-                "config does it daily\n"
-                "!grep <text> [days] searches every transcript\n"
-                f"!plugins = list executables in {PLUGIN_DIR}; any file there "
-                "is a command, its name the trigger\n"
-                "!autocompact <pct|150k|off> = /compact at a share of the window, "
-                "or at a token count (default 200k)\n!idlectx <pct|off>\n"
-                "!spendcap <turns|500k|2M|off> = interrupt a loop that runs up "
-                "turns, or tokens, in 5m\n"
-                "type / for the same commands with autocomplete\n"
-                "!model <name> | !effort <low|medium|high>\n"
-                "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode\n"
-                "!keys <tmux keys> | !raw <text> (type even with a menu open)\n"
-                "photo/file/voice -> saved, path typed in\n"
-                "/slash and anything else -> typed into Claude")
+        text, rows = help_text(cfg, arg)
+        if rows:
+            send(cfg, topic, text, mode="plain", buttons=kb(rows))
+            return ""
+        return text
     if cmd == "!log":
         return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
     if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
@@ -5995,36 +6048,95 @@ def tweet_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:675px;background:#07090f;color:#cdd6f4;
-font:28px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
-justify-content:space-between;padding:56px 64px;box-sizing:border-box;
-background-image:radial-gradient(circle at 85% 15%,#2a1d4a 0,#07090f 55%)}
+body{margin:0;width:1200px;height:1000px;background:#07090f;color:#cdd6f4;
+font:26px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
+justify-content:space-between;padding:52px 64px;box-sizing:border-box;
+background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%)}
 h1{margin:0;font-size:40px;color:#e0af68;letter-spacing:2px}.sub{color:#8b93a7;font-size:22px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}
-.n{font-size:64px;font-weight:700;color:#9ece6a}.l{font-size:20px;color:#a9b1d6}
+h2{margin:0 0 10px;font-size:18px;color:#7aa2f7;letter-spacing:3px;font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.n{font-size:56px;font-weight:700;color:#9ece6a}.l{font-size:19px;color:#a9b1d6}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:48px}
+.p{display:flex;align-items:center;gap:12px;font-size:20px;margin:6px 0}
+.p em{width:230px;font-style:normal;overflow:hidden;white-space:nowrap}
+.p b{display:inline-block;height:14px;background:#bb9af7;border-radius:3px}
+.p span{color:#565f89;margin-left:auto}
+ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:#e0af68;font-style:normal}
 .foot{display:flex;justify-content:space-between;color:#565f89;font-size:20px}
-.moon{font-size:44px}
 </style></head><body>
 <div><h1><svg width="34" height="34" viewBox="0 0 16 16" style="vertical-align:-5px"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg> my night crew · {period}</h1><div class="sub">{agents}</div></div>
 <div class="grid">{cells}</div>
+<div class="two"><div><h2>PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
 <div class="foot"><span>made with nightmux</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
 
 
-def wrapped_cells(days):
+def wrapped_data(cfg, days):
+    """Everything on the card: headline numbers, projects, the hours, and what they say."""
     d, r = sav_data(), analyze_chats(days)
-    ag = r.get("agents") or {}
-    prompts = sum(a["prompts"] or 0 for a in ag.values())
-    toks = sum(sum(a["tokens"].values()) for a in ag.values())
-    cells = [(_k(toks), "tokens through my agents"), (str(prompts), "prompts sent"),
+    ag, w = r.get("agents") or {}, r.get("when") or {}
+    proj, w = w.get("projects") or [], when_summary(cfg, w)
+    tok = {k: sum(a["tokens"][k] for a in ag.values())
+           for k in ("input", "cache_read", "cache_write", "output")}
+    toks, prompts = sum(tok.values()), sum(a["prompts"] or 0 for a in ag.values())
+    cells = [(_k(toks), "tokens through my agents"),
+             (_k(d.get("tokens", 0)), "tokens saved, not re-read"),
+             (str(prompts), "prompts sent"), (str(len(proj)), "projects worked in"),
              (str(d.get("night_turns", 0)), "turns while I slept"),
              (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
-             (_k(d.get("tokens", 0)), "tokens not re-read"),
              (str(d.get("greens", 0)), "checks turned green"),
-             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions"),
-             (str(len(ag)), "agents on the crew")]
+             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions")]
     cells = [c for c in cells if c[0] not in ("0", "0k")][:6]   # a fresh install has zeros
-    return cells, sorted(ag, key=lambda a: -ag[a]["prompts"])
+    ins = []
+    if w.get("peak_hour") is not None:
+        h = w["peak_hour"]
+        ins.append(("peak hour", f"{h:02d}:00–{(h + 1) % 24:02d}:00"))
+    if w.get("night_pct"):
+        ins.append(("after midnight", f"{w['night_pct']:.0%} of prompts"))
+    if w.get("streak", 0) > 1:
+        ins.append(("longest streak", f"{w['streak']} days in a row"))
+    if w.get("busiest"):
+        day, n = w["busiest"]
+        ins.append(("busiest day", time.strftime("%b %d", time.strptime(day, "%Y-%m-%d"))
+                    + f" · {n} prompts"))
+    ctx = tok["input"] + tok["cache_read"] + tok["cache_write"]
+    if ctx:
+        ins.append(("from cache", f"{tok['cache_read'] / ctx:.0%} of context"))
+    if prompts and toks:
+        ins.append(("per prompt", f"{_k(toks // prompts)} tokens"))
+    models = {}
+    for a in ag.values():
+        for m, n in a["models"].items():
+            models[m] = models.get(m, 0) + n
+    if models:
+        ins.append(("top model", max(models, key=models.get)))
+    nud = sum(round((a["nudge_pct"] or 0) * (a["prompts"] or 0)) for a in ag.values())
+    if prompts >= 10:
+        ins.append(("one-word nudges", f"{nud / prompts:.0%}"))
+    return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]),
+            "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
+
+
+def wrapped_page(days, w):
+    e = html.escape
+    top = max([n for _, n in w["projects"]] or [1])
+    projects = "".join(f'<div class="p"><em>{e(p[:20])}</em><b style="width:{max(4, 200 * n // top)}px">'
+                       f'</b><span>{n}</span></div>' for p, n in w["projects"]) or \
+        '<div class="p">—</div>'
+    hi = max(w["hours"]) or 1
+    hours = ('<svg width="500" height="70" viewBox="0 0 480 70">' + "".join(
+        f'<rect x="{i * 20}" y="{60 - 56 * n // hi}" width="16" height="{max(1, 56 * n // hi)}" '
+        f'fill="{"#e0af68" if i < 6 else "#7aa2f7"}"/>' for i, n in enumerate(w["hours"]))
+        + '<text x="0" y="70" font-size="10" fill="#565f89">0h</text>'
+          '<text x="234" y="70" font-size="10" fill="#565f89">12h</text>'
+          '<text x="460" y="70" font-size="10" fill="#565f89">23h</text></svg>')
+    return (WRAPPED_HTML.replace("{period}", f"last {days} days")
+            .replace("{agents}", e(" · ".join(w["agents"])))
+            .replace("{cells}", "".join(f'<div><div class="n">{e(n)}</div><div class="l">{e(l)}'
+                                        '</div></div>' for n, l in w["cells"]))
+            .replace("{projects}", projects).replace("{hours}", hours)
+            .replace("{insights}", "".join(f"<li><i>{e(k)}</i> {e(v)}</li>"
+                                           for k, v in w["insights"][:6])))
 
 
 def wrapped_cmd(cfg, topic, arg):
@@ -6034,17 +6146,14 @@ def wrapped_cmd(cfg, topic, arg):
         return 'no Chromium found — install one or set "browser" in the config'
 
     def go():
-        cells, ags = wrapped_cells(days)
-        page = WRAPPED_HTML.replace("{period}", f"last {days} days").replace(
-            "{agents}", html.escape(" · ".join(ags) or "")).replace("{cells}", "".join(
-                f'<div><div class="n">{html.escape(n)}</div><div class="l">{html.escape(l)}</div></div>'
-                for n, l in cells))
+        w = wrapped_data(cfg, days)
+        page = wrapped_page(days, w)
         os.makedirs(STATE_DIR, exist_ok=True)
         src, out = os.path.join(STATE_DIR, "wrapped.html"), os.path.join(STATE_DIR, "wrapped.png")
         with open(src, "w") as f:
             f.write(page)
         run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-            "--window-size=1200,675", "--virtual-time-budget=2000", f"--screenshot={out}",
+            "--window-size=1200,1000", "--virtual-time-budget=2000", f"--screenshot={out}",
             "file://" + src, timeout=60)
         try:
             with open(out, "rb") as f:
@@ -6053,9 +6162,11 @@ def wrapped_cmd(cfg, topic, arg):
         except OSError:
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
-        top = ", ".join(f"{n} {l}" for n, l in cells[:4] if n not in ("0", "0k"))
+        cells = w["cells"]
+        top = ", ".join(f"{n} {l}" for n, l in cells[:4])
         send_file(cfg, topic, "wrapped.png", png, kind="photo",
-                  caption=f"🌙 your last {days} days with nightmux",
+                  caption=f"🌙 your last {days} days with nightmux\n" + "\n".join(
+                      f"• {k}: {v}" for k, v in w["insights"]),
                   buttons=kb([[("🐦 post it", tweet_url(
                       f"My AI coding agents, last {days} days: {top}. Run by nightmux "
                       f"{REPO_URL} #ClaudeCode #vibecoding"))]]))
@@ -7539,7 +7650,7 @@ def office_snapshot(cfg, state):
             scr = st.get("scr") or []
             desk = {"agent": key, "session": sess, "live": sess == cur, "state": mode,
                     "screen": [redact(l)[:90] for l in strip_noise(scr)
-                               if l.strip()][-8:],
+                               if l.strip()][-24:],
                     "doing": redact(st.get("prog_text") or "")[-500:]
                     if mode == "busy" else "",
                     "queued": len(st.get("queue") or []),
@@ -8032,10 +8143,30 @@ def _chat_bucket(stats, agent):
     return stats.setdefault(agent, {
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
-        "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {}})
+        "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
+        "projects": {}, "at": {}})
 
 
-def _chat_prompt(b, text):
+def _chat_when(b, ts, cwd):
+    """Where and when one prompt happened: the project's folder name and the UTC
+    hour — kept raw so it can be shown in the phone's timezone, not the server's."""
+    if cwd:
+        n = os.path.basename(cwd.rstrip("/")) or cwd
+        b["projects"][n] = b["projects"].get(n, 0) + 1
+    if ts:
+        h = int(ts // 3600)
+        b["at"][h] = b["at"].get(h, 0) + 1
+
+
+def _iso_ts(s):
+    try:
+        return calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_prompt(b, text, ts=None, cwd=None):
+    _chat_when(b, ts, cwd)
     b["prompts"] += 1
     b["prompt_chars"] += len(text)
     if NUDGE.match(text):
@@ -8083,7 +8214,7 @@ def _scan_claude(stats, home, since):
                         c = m.get("content")
                         if (isinstance(c, str) and not d.get("isMeta")
                                 and not d.get("isSidechain") and not c.startswith("<")):
-                            _chat_prompt(b, c)
+                            _chat_prompt(b, c, _iso_ts(d.get("timestamp")), d.get("cwd"))
                     elif m.get("usage") and d.get("requestId") not in seen:
                         seen.add(d.get("requestId"))
                         u = m["usage"]
@@ -8105,20 +8236,23 @@ def _scan_codex(stats, home, since):
         if os.path.getmtime(p) < since:
             continue
         b["sessions"] += 1
-        model, last = None, None
+        model, last, cwd = None, None, None
         with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
-                if '"turn_context"' not in line and '"event_msg"' not in line:
+                if ('"turn_context"' not in line and '"event_msg"' not in line
+                        and '"session_meta"' not in line):
                     continue
                 try:
                     d = json.loads(line)
                 except ValueError:
                     continue
                 pl = d.get("payload") or {}
-                if d.get("type") == "turn_context":
+                if d.get("type") == "session_meta":
+                    cwd = pl.get("cwd")
+                elif d.get("type") == "turn_context":
                     model = pl.get("model") or model
                 elif pl.get("type") == "user_message":
-                    _chat_prompt(b, pl.get("message") or "")
+                    _chat_prompt(b, pl.get("message") or "", _iso_ts(d.get("timestamp")), cwd)
                 elif pl.get("type") == "error":
                     b["errors"] += 1
                 elif pl.get("type") == "token_count" and pl.get("info"):
@@ -8154,13 +8288,14 @@ def _scan_opencode(stats, home, since):
                 _chat_call(b, d.get("modelID"), t.get("input") or 0, c.get("read") or 0,
                            c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
         b["sessions"] += len(sess)
-        for (data,) in con.execute(
-                "SELECT p.data FROM part p JOIN message m ON m.id = p.message_id "
+        for data, at, cwd in con.execute(
+                "SELECT p.data, m.time_created, s.directory FROM part p "
+                "JOIN message m ON m.id = p.message_id LEFT JOIN session s ON s.id = m.session_id "
                 "WHERE m.time_created >= ? AND m.data LIKE '%\"role\":\"user\"%'",
                 (int(since * 1000),)):
             d = json.loads(data)
             if d.get("type") == "text" and not d.get("synthetic"):
-                _chat_prompt(b, d.get("text") or "")
+                _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
     finally:
         con.close()
 
@@ -8174,9 +8309,13 @@ def _scan_agy(stats, home, since):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for (steps,) in con.execute("SELECT step_count FROM conversation_summaries "
-                                    "WHERE last_modified_time >= ?", (cut,)):
+        for steps, ws in con.execute("SELECT step_count, workspace_uris FROM "
+                                     "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
             b["sessions"] += 1
+            m = re.search(r"file://(/[^\"',\s]+)", ws or "")
+            if m:      # no prompts on disk: a conversation counts once for its project
+                n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
+                b["projects"][n] = b["projects"].get(n, 0) + 1
             b["requests"] += steps or 0     # agy keeps no token counts on disk
     finally:
         con.close()
@@ -8274,10 +8413,42 @@ def analyze_chats(days=30, home=None):
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
-           "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips]}
+           "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips],
+           "when": chat_when(stats)}
     if home is None:
         _analysis[days] = out
     return out
+
+
+def chat_when(stats):
+    """Prompts per project and per UTC hour, summed over every agent."""
+    proj, at = {}, {}
+    for s in stats.values():
+        for k, v in s["projects"].items():
+            proj[k] = proj.get(k, 0) + v
+        for k, v in s["at"].items():
+            at[k] = at.get(k, 0) + v
+    return {"projects": sorted(proj.items(), key=lambda kv: -kv[1]), "at": at}
+
+
+def when_summary(cfg, w):
+    """Hours, days and streaks in the user's timezone."""
+    hours, days = [0] * 24, {}
+    for h, n in (w.get("at") or {}).items():
+        t = local_time(cfg, int(h) * 3600)
+        hours[t.tm_hour] += n
+        d = time.strftime("%Y-%m-%d", t)
+        days[d] = days.get(d, 0) + n
+    run_ = best = 0
+    prev = None
+    for d in sorted(days):
+        t = calendar.timegm(time.strptime(d, "%Y-%m-%d"))
+        run_ = run_ + 1 if prev is not None and t - prev == 86400 else 1
+        best, prev = max(best, run_), t
+    return {"hours": hours, "active_days": len(days), "streak": best,
+            "busiest": max(days.items(), key=lambda kv: kv[1]) if days else None,
+            "peak_hour": hours.index(max(hours)) if any(hours) else None,
+            "night_pct": round(sum(hours[:6]) / sum(hours), 3) if any(hours) else None}
 
 
 def _k(n):
@@ -8462,6 +8633,88 @@ def version_report():
             + f"\npython {sys.version.split()[0]}\n{HERE}\nwired: "
             + (", ".join(on) if on
                else "nothing — falling back to scraping the pane"))
+
+
+_upgrading = threading.Lock()
+
+
+def self_upgrade(here=None):
+    """Update nightmux's own code in place: (changed, what happened).
+
+    A git checkout fast-forwards (or, detached, moves to origin's default
+    branch) and refuses over local edits; a pip or pipx install upgrades the
+    package. New code that does not compile is rolled back. The caller restarts.
+    """
+    here = here or HERE
+
+    def sh(*a):
+        try:
+            p = subprocess.run(a, capture_output=True, text=True, timeout=300)
+            return p.returncode, (p.stdout + p.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return 1, str(e)
+    me = os.path.join(here, "nightmux.py")
+    if os.path.isdir(os.path.join(here, ".git")):
+        g = lambda *a: sh("git", "-C", here, *a)
+        rc, dirty = g("status", "--porcelain", "--untracked-files=no")
+        if rc or dirty:
+            return False, f"local edits in {here} — commit or stash them first"
+        old = g("rev-parse", "--short", "HEAD")[1]
+        rc, out = g("fetch", "-q", "origin")
+        if rc:
+            return False, "git fetch failed: " + out[-300:]
+        if g("symbolic-ref", "-q", "HEAD")[0] == 0:
+            rc, out = g("merge", "-q", "--ff-only", "@{u}")
+        else:
+            to = "origin/HEAD" if g("rev-parse", "-q", "--verify", "origin/HEAD")[0] == 0 else "origin/main"
+            rc, out = g("checkout", "-q", "--detach", to)
+        if rc:
+            return False, "update failed: " + out[-300:]
+        new = g("rev-parse", "--short", "HEAD")[1]
+        if new == old:
+            return False, f"already up to date ({old})"
+        if sh(sys.executable, "-m", "py_compile", me)[0]:
+            g("reset", "-q", "--hard", old)        # the tree was clean: nothing of yours is lost
+            return False, f"{new} does not compile here — stayed on {old}"
+        return True, f"{old} → {new}"
+    rc, out = sh(*(("pipx", "upgrade", "nightmux") if "pipx" in sys.executable else
+                   (sys.executable, "-m", "pip", "install", "-q", "-U", "nightmux")))
+    if rc:
+        return False, "upgrade failed: " + out[-300:]
+    new = sh(sys.executable, me, "--version")[1].split("\n")[0].replace("nightmux ", "")
+    return (False, f"already up to date ({VERSION})") if new == VERSION else (True, f"{VERSION} → {new}")
+
+
+def restart_self(delay=3):
+    """Re-exec this process on its new code once the reply has gone out. tmux
+    sessions are not ours, so every agent keeps running through it."""
+    def go():
+        time.sleep(delay)
+        sav_save()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=go, daemon=True).start()
+
+
+def upgrade_cmd(cfg, topic, arg):
+    if _upgrading.locked():
+        return "an upgrade is already running"
+
+    def go():
+        with _upgrading:
+            rows = []
+            if arg != "here":
+                for name in sorted(cfg.get("peers") or {}):
+                    r = peer_call(cfg, name, "upgrade", {}, timeout=330)
+                    rows.append(f"{name}: " + (r.get("msg", "?") if isinstance(r, dict) else
+                                               "no answer, or older than 1.4 — there run "
+                                               "pip install -U nightmux (or git pull) and restart"))
+            changed, msg = self_upgrade()
+            rows.insert(0, f"{host_name(cfg)}: {msg}" + (" · restarting" if changed else ""))
+            send(cfg, topic, "⬆️ " + "\n".join(rows), mode="plain")
+            if changed:
+                restart_self()
+    threading.Thread(target=go, daemon=True).start()
+    return "⬆️ upgrading nightmux" + ("" if arg == "here" or not cfg.get("peers") else " here and on every peer") + "…"
 
 
 def setup_chat(upd):
@@ -9232,6 +9485,8 @@ pre{background:#05070d;border:1px solid #1b2133;padding:8px;margin:8px 0;white-s
 form{display:flex;gap:6px}
 input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2px solid #2b3452;padding:8px}
 .x{float:right}
+button.snd{background:none;border:0;font-size:18px;cursor:pointer;padding:0 4px}
+#sheet pre.term{max-height:40vh;overflow:auto;background:#050608;color:#a9b1d6;font-size:11px}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
 body.pub .nav,body.pub #sheet{display:none}
@@ -9244,6 +9499,7 @@ body.demo #stage{display:block}
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
 <span class="meter" id="clock"></span>
+<button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <span class="meter" id="srvs"></span>
 <nav class="nav"><a href="/">⚙ dashboard</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="offline"></div>
@@ -9318,11 +9574,12 @@ function skyline(w) {
 }
 
 function backdrop(R, g, w, f, o) {
-  const dawn = o.dawn || 0, sk = skyline(w);
+  const dawn = o.dawn || 0, day = o.day || 0, sk = skyline(w);
   R('#141a2e', 0, 0, w, 70);
   for (let y = 8; y < 52; y++) {                                   // sky through the window
     const t = (y - 8) / 44;
-    R(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn), 8, y, w - 16, 1);
+    R(mix(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn),
+          mix('#4f8fd9', '#bfe3ff', t), day), 8, y, w - 16, 1);
   }
   for (const [x, y, p] of sk.stars) if (dawn < .7 && (f + p) % 11 > 1)
     R(mix('#e0e6ff', mix('#3d5aa8', '#ffb86b', (y - 8) / 44), dawn * 1.4 > 1 ? 1 : dawn * 1.4), x, y, 1, 1);
@@ -9341,7 +9598,7 @@ function backdrop(R, g, w, f, o) {
     g.globalAlpha = 1;
   }
   if (dawn > 0) {                                                 // the sun comes up with the reset
-    const sx = 52, sy = 58 - dawn * 30;
+    const sx = 52, sy = 58 - dawn * 30 - day * 14;          // and keeps climbing by day
     const glow = g.createRadialGradient(sx, sy, 2, sx, sy, 30);
     glow.addColorStop(0, 'rgba(255,207,112,' + .5 * dawn + ')'); glow.addColorStop(1, 'rgba(255,207,112,0)');
     g.fillStyle = glow; g.fillRect(8, 8, w - 16, 44);
@@ -9349,8 +9606,8 @@ function backdrop(R, g, w, f, o) {
       if (dx * dx + dy * dy <= 36 && sy + dy < 52) R('#ffcf70', sx + dx, sy + dy, 1, 1);
   }
   for (const [x, bw, bh, lit] of sk.blds) {
-    R(mix('#0b0e1f', '#3a2c4a', dawn), x, 52 - bh, bw, bh);
-    R(mix('#141833', '#4d3b5e', dawn), x, 52 - bh, bw, 1);
+    R(mix(mix('#0b0e1f', '#3a2c4a', dawn), '#6b7a99', day * .7), x, 52 - bh, bw, bh);
+    R(mix(mix('#141833', '#4d3b5e', dawn), '#8a97b3', day * .7), x, 52 - bh, bw, 1);
     for (const [wx, wy, p] of lit) if ((f / 8 + p | 0) % 13 && dawn < .9) R(mix('#f2c46d', '#7a6a7a', dawn), wx, wy, 1, 1);
   }
   R('#2b3452', 6, 6, w - 12, 2); R('#2b3452', 6, 52, w - 12, 3); R('#3a4466', 4, 55, w - 8, 2);  // frame + sill
@@ -9586,6 +9843,8 @@ function effects(R, room, pad, f, fx) {
       for (let k = 1; k < 5; k++) { const [tx, ty] = at(Math.max(0, t - k * .05)); R('rgba(246,211,101,' + (.5 - k * .1) + ')', tx + 2, ty + 2, 3, 2); }
       const [x, y] = at(t);
       R('#0b0d14', x - 1, y - 1, 9, 7); R('#e0af68', x, y, 7, 5); R('#c48a3a', x, y, 3, 1); R('#f6d365', x + 1, y + 2, 5, 1);
+      if (age < 7) bubble(R, a + 20, 50, '>', '#e0af68', 0);        // "yours"
+      if (age > 11) bubble(R, b + 20, 50, '!', '#2f8f3a', 0);       // "got it"
     }
     if ((e.type === 'sparkle' || e.type === 'check') && age >= 0 && age < 16) {
       const x = deskX(room, e.on, pad); if (x == null) continue;
@@ -9612,8 +9871,14 @@ function drawRoom(cv, room, f, o) {
   lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
   room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
+  for (const spot of ['coffee', 'tv']) {            // two on a break together get talking
+    const here = away.filter(a => a && a.spot === spot && a.pose !== 'walk');
+    if (here.length < 2 || f % 40 >= 28) continue;
+    const k = Math.floor(f / 40), a = here[k % here.length];
+    bubble(R, a.x - 4, spot === 'tv' ? 66 : 58, '?!·#'[k % 4], '#3b4261', (f >> 2) % 2);
+  }
   effects(R, room, pad, f, o.fx);
-  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
+  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn * (1 - (o.day || 0))) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
   g.fillStyle = vg; g.fillRect(0, 0, w, RH);
@@ -9679,6 +9944,9 @@ function track() {
       if (prev[k] !== d.state) since[k] = frame;
       d.since = since[k] || 0;
       if (prev[k] === 'busy' && d.state === 'idle') (fx[r.topic] = fx[r.topic] || []).push({type: 'sparkle', on: d.session, start: frame});
+      if (prev[k] && prev[k] !== d.state)
+        beep(d.state === 'waiting' ? SOUND.waiting : d.state === 'limit' ? SOUND.limit
+             : d.state === 'idle' && prev[k] === 'busy' ? SOUND.done : []);
       prev[k] = d.state;
       if (d.state === 'limit' && d.until) d.prog = 1 - (d.until - Date.now() / 1000) / 18000;
     }
@@ -9694,6 +9962,31 @@ function label(d) {
           unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
 }
 const hhmm = () => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+// The window follows the viewer's clock: night, dawn from 5, day from 7, dusk to 21. ?hour=14 previews.
+function sky() {
+  const n = new Date(), h = Q.has('hour') ? +Q.get('hour') : n.getHours() + n.getMinutes() / 60;
+  const ramp = (a, b) => Math.max(0, Math.min(1, Math.min((h - a) / 2, (b - h) / 2)));
+  return {dawn: ramp(5, 21), day: ramp(7, 19)};
+}
+// Sounds, off until the 🔈 button turns them on (remembered per browser).
+let audio = null, sound = false;
+try { sound = localStorage.getItem('nm-sound') === '1'; } catch (e) {}
+function beep(notes) {
+  if (!sound) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    notes.forEach(([hz, at], i) => { const o = audio.createOscillator(), v = audio.createGain(), t = audio.currentTime + at;
+      o.type = 'square'; o.frequency.value = hz; v.gain.setValueAtTime(.04, t); v.gain.exponentialRampToValueAtTime(.0001, t + .18);
+      o.connect(v); v.connect(audio.destination); o.start(t); o.stop(t + .2); });
+  } catch (e) {}
+}
+const SOUND = {done: [[660, 0], [880, .1]], waiting: [[988, 0], [988, .16]], limit: [[330, 0], [247, .14]]};
+function toggleSound() {
+  sound = !sound;
+  try { localStorage.setItem('nm-sound', sound ? '1' : '0'); } catch (e) {}
+  document.getElementById('snd').textContent = sound ? '🔊' : '🔈';
+  beep(SOUND.done);
+}
 
 function build() {
   const main = document.getElementById('rooms');
@@ -9750,7 +10043,7 @@ function sheet() {
   add('div', [label(d), d.ctx != null ? 'ctx ' + Math.round(d.ctx) + '%' : '', d.queued ? d.queued + ' queued' : '',
               r.name].filter(Boolean).join(' · '), 'meta');
   if (d.doing) add('pre', d.doing);
-  else if (d.screen.length) add('pre', d.screen.join('\n'));
+  if (d.screen.length) { const t = add('pre', d.screen.join('\n'), 'term'); t.scrollTop = t.scrollHeight; }
   const acts = [];
   if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
   if (!d.live) acts.push(['★ make live', '!' + d.agent]);
@@ -9809,7 +10102,7 @@ function draw() {
     return;
   }
   document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
-    if (r) cv.pad = drawRoom(cv, r, frame, {clock: hhmm(), fx: fx[r.topic]}); });
+    if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
 }
 
 // GIF capture drives frames itself, one exact frame per call.
@@ -9817,6 +10110,7 @@ window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
+if (sound) document.getElementById('snd').textContent = '🔊';
 else { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
@@ -10471,6 +10765,13 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
+        if self.peer and self.path == "/upgrade":       # the primary's !upgrade
+            with _upgrading:
+                changed, msg = self_upgrade()
+            if changed:
+                restart_self()
+            return self.reply(json.dumps({"ok": changed, "msg": msg + (" · restarting" if changed else "")}),
+                              "application/json")
         if self.peer and self.path == "/update":        # forwarded by the primary
             try:
                 upd = json.loads(body)
@@ -10831,7 +11132,7 @@ def process(cfg, state, lock, allow, upd):
         print(f"  drop: user {user} not in allow_users", flush=True)
         return
     peer = peer_of(cfg, topic)
-    if peer and not re.match(r"!server\b", text):
+    if peer and not re.match(r"!(server|upgrade)\b", text):   # these act on every machine
         if peer_call(cfg, peer, "update", dict(upd, _peer=True)) is None:
             send(cfg, topic, f"⚠️ {peer} did not answer — not delivered. Send it again "
                  "once it is back, or !server local to run this topic here", mode="plain")
@@ -10896,6 +11197,10 @@ def stubbed(**globs):
 
 
 def selfcheck():
+    cmd_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "COMMANDS.md")
+    if os.path.exists(cmd_md):              # a git checkout, not a pip install
+        with open(cmd_md) as f:
+            assert f.read() == commands_md(), "docs/COMMANDS.md is stale: nightmux --commands > docs/COMMANDS.md"
     assert chunks("a\nb") == ["a\nb"]
     assert chunks("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
     big = "\n".join("y" * 100 for _ in range(100))
@@ -12012,7 +12317,7 @@ def selfcheck():
         os.makedirs(os.path.join(h_, ".claude", "projects", "p"))
         with open(os.path.join(h_, ".claude", "projects", "p", "s.jsonl"), "w") as f:
             for i in range(30):
-                f.write(json.dumps({"type": "user", "timestamp": now_, "message": {
+                f.write(json.dumps({"type": "user", "timestamp": now_, "cwd": "/w/shop", "message": {
                     "content": "continue" if i % 2 else f"SECRETPROMPT refactor {i}"}},
                     separators=(",", ":")) + "\n")       # as Claude writes it
                 u_ = {"input_tokens": 5, "cache_read_input_tokens": 10000,
@@ -12040,6 +12345,19 @@ def selfcheck():
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
         assert "SECRETPROMPT" not in json.dumps(r_) + stats_report(r_)
+        assert r_["when"]["projects"] == [("shop", 30)], r_["when"]
+        w_ = when_summary({}, r_["when"])
+        assert sum(w_["hours"]) == 30 and w_["streak"] == 1, w_   # codex line has no timestamp
+        h0_ = int(time.time() // 3600)
+        w_ = when_summary({"tz_offset": 3}, {"at": {h0_: 1, h0_ - 24: 2, h0_ - 72: 4}})
+        assert w_["streak"] == 2 and w_["busiest"][1] == 4 and w_["active_days"] == 3, w_
+        assert w_["peak_hour"] == time.gmtime(h0_ * 3600 + 3 * 3600).tm_hour, w_
+        with stubbed(analyze_chats=lambda d: r_, sav_data=lambda: {"tokens": 5000000}):
+            wd_ = wrapped_data({}, 30)
+        pg_ = wrapped_page(30, wd_)
+        assert ("5.0M", "tokens saved, not re-read") in wd_["cells"], wd_["cells"]
+        assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
+        assert "peak hour" in pg_ and "from cache" in pg_ and "SECRETPROMPT" not in pg_
         said_ = " ".join(t["tip"] for t in r_["tips"] if t["agent"] == "claude")
         assert "cache hit 10%" in said_ and "nudges" in said_ and "100k tokens" in said_, said_
         lim_cfg = {"topics": {"5": "o"}, "bench": {"5": {"claude": "o", "codex": "o-codex"}}}
@@ -13375,6 +13693,67 @@ def selfcheck():
                                             "codex")
     assert spawned[-1][2] == "codex --sandbox", spawned[-1]
     assert cfg2["topics"]["9"] == "box" and cfg2["started"]["9"] == "codex"
+    # "!agy box ~" in box's own topic: point at bare !agy, not at !bind.
+    globals()["has_session"] = lambda n: n == "box"
+    assert "send just !agy" in start_session(cfg2, {}, lk, "9", "box ~", "agy")
+    assert "use !bind box" in start_session(cfg2, {}, lk, "8", "box ~", "agy")
+    globals()["has_session"] = lambda n: False
+    # !help: an index with a button per section, sections, search, everything.
+    hi_, rows_ = help_text(cfg2)
+    assert len([b for r in rows_ for b in r]) == len(HELP) + 1 and "!help night" in hi_
+    assert help_text(cfg2, "night")[0].startswith("🌙") and help_text(cfg2, "night")[1] is None
+    assert "!goal [n]" in help_text(cfg2, "!goal")[0] and "nothing about" in help_text(cfg2, "zzz")[0]
+    all_ = help_text(cfg2, "all")[0]
+    assert "opencode" in all_ and "{agents}" not in all_ and PLUGIN_DIR in all_
+    # Every command the old flat list named is still somewhere in a section.
+    for c_ in ("!bind", "!consult", "!use", "!shift", "!at", "!queue", "!usage", "!grep", "!plugins",
+               "!autocompact", "!keys", "!raw", "!model", "!worktrees", "!center", "!failover",
+               "!update", "!reload", "!tz", "!digest", "!idea", "!errors", "!desktop", "!memory"):
+        assert c_ in all_, c_
+    # !upgrade: a git checkout fast-forwards, refuses over local edits, rolls
+    # back code that does not compile; a branch and a detached deploy both move.
+    import tempfile
+    with tempfile.TemporaryDirectory() as ud_:
+        g_ = lambda d, *a: subprocess.run(("git", "-C", d) + a, capture_output=True, text=True)
+        org_, wk_, dep_ = (os.path.join(ud_, x) for x in ("o", "w", "d"))
+        subprocess.run(("git", "init", "-q", "-b", "main", org_), capture_output=True)
+        for d_ in (org_,):
+            g_(d_, "config", "user.email", "t@t")
+            g_(d_, "config", "user.name", "t")
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("x = 1\n")
+        g_(org_, "add", "-A")
+        g_(org_, "commit", "-qm", "one")
+        subprocess.run(("git", "clone", "-q", org_, wk_), capture_output=True)
+        subprocess.run(("git", "clone", "-q", org_, dep_), capture_output=True)
+        g_(dep_, "checkout", "-q", "--detach")
+        assert self_upgrade(wk_)[1].startswith("already up to date"), self_upgrade(wk_)
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("x = 2\n")
+        g_(org_, "commit", "-qam", "two")
+        with open(os.path.join(wk_, "nightmux.py"), "w") as f:
+            f.write("mine\n")
+        assert "local edits" in self_upgrade(wk_)[1]
+        g_(wk_, "checkout", "-q", "--", ".")
+        assert self_upgrade(wk_)[0] and self_upgrade(dep_)[0]
+        assert open(os.path.join(dep_, "nightmux.py")).read() == "x = 2\n"
+        with open(os.path.join(org_, "nightmux.py"), "w") as f:
+            f.write("def (:\n")
+        g_(org_, "commit", "-qam", "broken")
+        ch_, msg_ = self_upgrade(wk_)
+        assert not ch_ and "does not compile" in msg_, msg_
+        assert open(os.path.join(wk_, "nightmux.py")).read() == "x = 2\n"
+    usaid_, ure_ = [], []
+    with stubbed(self_upgrade=lambda: (True, "a → b"), restart_self=lambda: ure_.append(1),
+                 peer_call=lambda c, n, p, b=None, timeout=10: {"msg": "1.3 → 1.4 · restarting"} if n == "box" else None,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: usaid_.append(x)):
+        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "")
+        for _ in range(100):
+            if usaid_:
+                break
+            time.sleep(0.02)
+    assert ure_ and "me: a → b · restarting" in usaid_[0] and "box: 1.3 → 1.4" in usaid_[0], usaid_
+    assert "old: no answer" in usaid_[0] and writes({}, "!upgrade", ""), usaid_
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag
@@ -13945,6 +14324,8 @@ def cli():
         sys.exit(0 if doctor() else 1)
     elif "--version" in sys.argv:
         print(version_report())
+    elif "--commands" in sys.argv:
+        print(commands_md(), end="")
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
     elif "--demo" in sys.argv:
