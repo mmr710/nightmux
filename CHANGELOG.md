@@ -8,12 +8,32 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Night replay: the office records a frame whenever a desk changes state (states only, no screen text, the last 24 hours in `~/.nightmux-state/replay.jsonl`), and **⏪ last night** (`/office?replay`) scrubs or plays through it with the room's clock and sky following along. It opens at 22:00 last night.
+- `/nightmux <what to do>` in a GitHub comment: with `!issues auto` on, a comment on an issue starts it like a tapped issue (with your ask appended), and on a PR the agent works on and pushes to that PR's branch. Only the repo's owner, members and collaborators are listened to; nightmux reacts 👀 when it takes one. Only comments made after `!issues auto` count.
+- `!relay <planner>[,<reviewer>] <task>`: one agent writes the plan, this topic's agent builds it step by step, and an optional third reviews every change. `!plan`, `!shift` and `!pair` pointed at one task — the planner is started on the bench if it is not running.
+- `!arena`: every `!race` you judged, added up — wins, win rate, checks passed and average time per agent, and which agent wins which kind of task (tests, bug fix, refactor, UI, docs, feature). Kept with the other counters; the last 500 races.
+- `!briefing voice`: the morning briefing also arrives as a voice note. Uses whatever speaks on the machine — a `"tts"` command from the config (text on stdin, writes `{out}`; e.g. piper), macOS `say`, espeak-ng, or ffmpeg's built-in flite — and ffmpeg for Opus.
+- `!events <url>`: a JSON POST on `needs_input`, `done`, `limit`, `resumed` and `budget` — for Home Assistant, smart lights, or anything with a webhook. First line only, redacted; fire-and-forget on its own thread. `!events test` / `off`. Guide has a Home Assistant automation.
+- `nightmux --mcp`: nightmux as a stdio MCP server. Any MCP client can `list_topics`, `read_terminal`, `read_chat` and `send_prompt` (queued like a prompt from your phone); `!` commands are not exposed. A thin client over the running daemon's local API. See the guide.
+- `!budget <50M> [day|week|month]`: a token allowance per project, in the same base-equivalent tokens as `!cost`. A warning at 80%; at 100% the turn in flight finishes and new prompts queue (on every agent of the topic) until the period rolls over in your `tz_offset`. `!budget` shows where you are, `!budget off` lifts it. Claude Code sessions only — the tokens come from their transcripts.
+- A full terminal page, `/term/<topic>`: up to 5,000 lines of the session's scrollback, refreshed live, with find-in-page and a switch between the topic's agents. Read-only and redacted like the office. Opened from ⌨️ on the dashboard or *full terminal ↗* in the office; remote topics are fetched from their peer.
+- `!upgrade` updates nightmux itself on this machine and every peer, then restarts in place — agents keep running. A git checkout fast-forwards (a detached deploy moves to origin's default branch) and refuses over local edits; pip/pipx installs upgrade the package; new code that does not compile is rolled back. `!upgrade here` skips the peers.
+- The office: the window follows your clock (night, dawn, day, dusk; `?hour=` previews), agents on a break together chat, hand-offs get a "yours" / "got it", optional sounds (🔈) for done, asking and limit, and tapping an agent shows its last 24 terminal lines.
+- Android app: several servers (⚙ to switch, add, forget), pinch-zoom, and store listing metadata in `fastlane/metadata/android/` for F-Droid and Play.
+
 - An Android app (`android/`, `nightmux.apk` on every release): office, chat and dashboard in one app, opt-in alerts when an agent finishes, needs you or hits its limit, answering a menu from the notification, a home-screen widget, and an ambient mode that keeps the office on screen. `/app` on the dashboard pairs it with a QR code.
 
 ### Changed
 
+- README cut to the essentials (quickstart, comparison, feature grid, install); the long form moved to [docs/GUIDE.md](docs/GUIDE.md). [docs/COMMANDS.md](docs/COMMANDS.md) is generated from `!help` by `nightmux --commands`, and selfcheck fails when it goes stale. Added ROADMAP, CODE_OF_CONDUCT and a PR template.
+- `!wrapped` card is taller and says more: tokens saved by compactions, how many projects you worked in and the top six with bars, a 24-hour chart of when you prompt (in your `tz_offset`), peak hour, share after midnight, longest daily streak, busiest day, cache hit, tokens per prompt and top model. The chat analysis now records each prompt's project folder and hour — never its text.
+- `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+
 ### Fixed
 
+- `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
+
+- The `/public` office never fetched anything since `!public` landed: a line inserted above the poll turned it into an `else`. Both offices poll again, and selfcheck pins it.
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
 ## [1.3.0] — 2026-10-08
