@@ -38,6 +38,8 @@ pre{background:#05070d;border:1px solid #1b2133;padding:8px;margin:8px 0;white-s
 form{display:flex;gap:6px}
 input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2px solid #2b3452;padding:8px}
 .x{float:right}
+button.snd{background:none;border:0;font-size:18px;cursor:pointer;padding:0 4px}
+#sheet pre.term{max-height:40vh;overflow:auto;background:#050608;color:#a9b1d6;font-size:11px}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
 body.pub .nav,body.pub #sheet{display:none}
@@ -50,6 +52,7 @@ body.demo #stage{display:block}
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
 <span class="meter" id="clock"></span>
+<button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <span class="meter" id="srvs"></span>
 <nav class="nav"><a href="/">⚙ dashboard</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="offline"></div>
@@ -124,11 +127,12 @@ function skyline(w) {
 }
 
 function backdrop(R, g, w, f, o) {
-  const dawn = o.dawn || 0, sk = skyline(w);
+  const dawn = o.dawn || 0, day = o.day || 0, sk = skyline(w);
   R('#141a2e', 0, 0, w, 70);
   for (let y = 8; y < 52; y++) {                                   // sky through the window
     const t = (y - 8) / 44;
-    R(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn), 8, y, w - 16, 1);
+    R(mix(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn),
+          mix('#4f8fd9', '#bfe3ff', t), day), 8, y, w - 16, 1);
   }
   for (const [x, y, p] of sk.stars) if (dawn < .7 && (f + p) % 11 > 1)
     R(mix('#e0e6ff', mix('#3d5aa8', '#ffb86b', (y - 8) / 44), dawn * 1.4 > 1 ? 1 : dawn * 1.4), x, y, 1, 1);
@@ -147,7 +151,7 @@ function backdrop(R, g, w, f, o) {
     g.globalAlpha = 1;
   }
   if (dawn > 0) {                                                 // the sun comes up with the reset
-    const sx = 52, sy = 58 - dawn * 30;
+    const sx = 52, sy = 58 - dawn * 30 - day * 14;          // and keeps climbing by day
     const glow = g.createRadialGradient(sx, sy, 2, sx, sy, 30);
     glow.addColorStop(0, 'rgba(255,207,112,' + .5 * dawn + ')'); glow.addColorStop(1, 'rgba(255,207,112,0)');
     g.fillStyle = glow; g.fillRect(8, 8, w - 16, 44);
@@ -155,8 +159,8 @@ function backdrop(R, g, w, f, o) {
       if (dx * dx + dy * dy <= 36 && sy + dy < 52) R('#ffcf70', sx + dx, sy + dy, 1, 1);
   }
   for (const [x, bw, bh, lit] of sk.blds) {
-    R(mix('#0b0e1f', '#3a2c4a', dawn), x, 52 - bh, bw, bh);
-    R(mix('#141833', '#4d3b5e', dawn), x, 52 - bh, bw, 1);
+    R(mix(mix('#0b0e1f', '#3a2c4a', dawn), '#6b7a99', day * .7), x, 52 - bh, bw, bh);
+    R(mix(mix('#141833', '#4d3b5e', dawn), '#8a97b3', day * .7), x, 52 - bh, bw, 1);
     for (const [wx, wy, p] of lit) if ((f / 8 + p | 0) % 13 && dawn < .9) R(mix('#f2c46d', '#7a6a7a', dawn), wx, wy, 1, 1);
   }
   R('#2b3452', 6, 6, w - 12, 2); R('#2b3452', 6, 52, w - 12, 3); R('#3a4466', 4, 55, w - 8, 2);  // frame + sill
@@ -392,6 +396,8 @@ function effects(R, room, pad, f, fx) {
       for (let k = 1; k < 5; k++) { const [tx, ty] = at(Math.max(0, t - k * .05)); R('rgba(246,211,101,' + (.5 - k * .1) + ')', tx + 2, ty + 2, 3, 2); }
       const [x, y] = at(t);
       R('#0b0d14', x - 1, y - 1, 9, 7); R('#e0af68', x, y, 7, 5); R('#c48a3a', x, y, 3, 1); R('#f6d365', x + 1, y + 2, 5, 1);
+      if (age < 7) bubble(R, a + 20, 50, '>', '#e0af68', 0);        // "yours"
+      if (age > 11) bubble(R, b + 20, 50, '!', '#2f8f3a', 0);       // "got it"
     }
     if ((e.type === 'sparkle' || e.type === 'check') && age >= 0 && age < 16) {
       const x = deskX(room, e.on, pad); if (x == null) continue;
@@ -418,8 +424,14 @@ function drawRoom(cv, room, f, o) {
   lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
   room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
+  for (const spot of ['coffee', 'tv']) {            // two on a break together get talking
+    const here = away.filter(a => a && a.spot === spot && a.pose !== 'walk');
+    if (here.length < 2 || f % 40 >= 28) continue;
+    const k = Math.floor(f / 40), a = here[k % here.length];
+    bubble(R, a.x - 4, spot === 'tv' ? 66 : 58, '?!·#'[k % 4], '#3b4261', (f >> 2) % 2);
+  }
   effects(R, room, pad, f, o.fx);
-  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
+  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn * (1 - (o.day || 0))) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
   g.fillStyle = vg; g.fillRect(0, 0, w, RH);
@@ -485,6 +497,9 @@ function track() {
       if (prev[k] !== d.state) since[k] = frame;
       d.since = since[k] || 0;
       if (prev[k] === 'busy' && d.state === 'idle') (fx[r.topic] = fx[r.topic] || []).push({type: 'sparkle', on: d.session, start: frame});
+      if (prev[k] && prev[k] !== d.state)
+        beep(d.state === 'waiting' ? SOUND.waiting : d.state === 'limit' ? SOUND.limit
+             : d.state === 'idle' && prev[k] === 'busy' ? SOUND.done : []);
       prev[k] = d.state;
       if (d.state === 'limit' && d.until) d.prog = 1 - (d.until - Date.now() / 1000) / 18000;
     }
@@ -500,6 +515,31 @@ function label(d) {
           unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
 }
 const hhmm = () => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+// The window follows the viewer's clock: night, dawn from 5, day from 7, dusk to 21. ?hour=14 previews.
+function sky() {
+  const n = new Date(), h = Q.has('hour') ? +Q.get('hour') : n.getHours() + n.getMinutes() / 60;
+  const ramp = (a, b) => Math.max(0, Math.min(1, Math.min((h - a) / 2, (b - h) / 2)));
+  return {dawn: ramp(5, 21), day: ramp(7, 19)};
+}
+// Sounds, off until the 🔈 button turns them on (remembered per browser).
+let audio = null, sound = false;
+try { sound = localStorage.getItem('nm-sound') === '1'; } catch (e) {}
+function beep(notes) {
+  if (!sound) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    notes.forEach(([hz, at], i) => { const o = audio.createOscillator(), v = audio.createGain(), t = audio.currentTime + at;
+      o.type = 'square'; o.frequency.value = hz; v.gain.setValueAtTime(.04, t); v.gain.exponentialRampToValueAtTime(.0001, t + .18);
+      o.connect(v); v.connect(audio.destination); o.start(t); o.stop(t + .2); });
+  } catch (e) {}
+}
+const SOUND = {done: [[660, 0], [880, .1]], waiting: [[988, 0], [988, .16]], limit: [[330, 0], [247, .14]]};
+function toggleSound() {
+  sound = !sound;
+  try { localStorage.setItem('nm-sound', sound ? '1' : '0'); } catch (e) {}
+  document.getElementById('snd').textContent = sound ? '🔊' : '🔈';
+  beep(SOUND.done);
+}
 
 function build() {
   const main = document.getElementById('rooms');
@@ -556,7 +596,8 @@ function sheet() {
   add('div', [label(d), d.ctx != null ? 'ctx ' + Math.round(d.ctx) + '%' : '', d.queued ? d.queued + ' queued' : '',
               r.name].filter(Boolean).join(' · '), 'meta');
   if (d.doing) add('pre', d.doing);
-  else if (d.screen.length) add('pre', d.screen.join('\n'));
+  if (d.screen.length) { const t = add('pre', d.screen.join('\n'), 'term'); t.scrollTop = t.scrollHeight; }
+  if (!window.PUB) { const a = add('a', 'full terminal ↗', 'meta'); a.href = '/term/' + open.topic + '?agent=' + d.agent; a.target = '_blank'; }
   const acts = [];
   if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
   if (!d.live) acts.push(['★ make live', '!' + d.agent]);
@@ -615,7 +656,7 @@ function draw() {
     return;
   }
   document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
-    if (r) cv.pad = drawRoom(cv, r, frame, {clock: hhmm(), fx: fx[r.topic]}); });
+    if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
 }
 
 // GIF capture drives frames itself, one exact frame per call.
@@ -623,6 +664,7 @@ window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
+if (sound) document.getElementById('snd').textContent = '🔊';
 else { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
