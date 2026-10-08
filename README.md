@@ -609,6 +609,19 @@ the cache hit rate, the average context each call carried, how often you
 nudged with "continue"/"yes" — and what to change to get better output for
 fewer tokens. The same report is `!stats [days]` in Telegram.
 
+## Share it
+
+- `!saved` — what nightmux did for you, counted: tokens of context not
+  re-read after compactions and fresh starts, turns worked between midnight
+  and 7, queues resumed after limits, hand-offs, green checks, loops caught.
+- `!wrapped [days]` — the same as a 1200×675 card with your agent stats, and a
+  🐦 button that opens a ready-to-post tweet.
+- The night reel is signed with the repo link and gets the same 🐦 button.
+- `!public on` — a read-only office at `/public/<token>`: agent states only,
+  no screen text, prompts or buttons. Tailnet-only until `!public expose`,
+  which puts just that path on the internet with Tailscale Funnel.
+  `!public off` kills the link.
+
 ## Race agents on one task
 
 `!race claude,codex add rate limiting to the login endpoint` gives the same

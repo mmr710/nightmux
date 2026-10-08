@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!saved` counts what nightmux did for you (context not re-read, night turns, limit resumes, green checks); `!wrapped [days]` draws a shareable card with a tweet button; the night reel is signed and gets one too; `!public on|expose|off` serves a read-only office (states only) at /public/<token>.
+
 - `!race [claude,codex] <task>`: several agents do the same task, each in its own git worktree; one card compares changes and `!goal` results, a 🏆 tap stages the winner. Voice notes are transcribed with your own `transcribe_cmd` (e.g. whisper.cpp) and shown back as 🎙.
 
 - Built-in agents: `!cursor` (Cursor CLI), `!amp`, `!goose`, `!qwen` (Qwen Code) — start, resume, `!update` and their own look in the office.

@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shlex
 import shutil
 import struct
@@ -178,7 +179,8 @@ def kb(rows):
     as typing it.
     """
     return json.dumps({"inline_keyboard": [
-        [{"text": t, "callback_data": d} for t, d in row] for row in rows]})
+        [{"text": t, "url": d} if d.startswith("https://") else {"text": t, "callback_data": d}
+         for t, d in row] for row in rows]})
 
 
 CODE_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
@@ -930,6 +932,8 @@ def tail_transcript(st, path):
                           + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
                           + u.get("output_tokens", 0) * WEIGHT["out"])
                 if u:
+                    sav_ctx(st, u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                            + u.get("cache_read_input_tokens", 0))
                     # What this turn carried in: the context size, in tokens, as
                     # the model billed it. The status line only gives a percentage
                     # of a window whose size it never states.
@@ -1318,6 +1322,7 @@ def failover_tick(cfg, state, lock):
         if (st.get("limit_until", 0) > time.time() and st.get("queue")
                 and not st.get("failed_over")):
             st["failed_over"] = True     # once per hold, whatever the outcome
+            sav_add("failovers")
             send(cfg, topic, "⏭ auto-failover\n" + failover(cfg, state, lock, topic, key),
                  mode="plain")
 
@@ -1907,6 +1912,8 @@ def drain(cfg, state, topic, sess):
     q = st.get("queue")
     if q and open_window:
         held = st.pop("resumed", None)
+        if held:
+            sav_add("resumes")
         text = q.pop(0)
         send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
              f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
@@ -2148,6 +2155,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                 and not pair_review_capture(topic, sess, body) \
                 and not mem_reply_capture(cfg, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
+            sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
             mem_capture(cfg, topic, sess)
@@ -2518,6 +2526,7 @@ def watcher(cfg, state, lock):
             deps_tick(cfg)
             briefing_tick(cfg, state, lock)
             reel_tick(cfg, state, lock)
+            sav_save()
             save_queue(state)
         except Exception as e:
             print(f"watch: {e}", file=sys.stderr)
@@ -3607,6 +3616,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!route",    # switches the topic's agent per prompt
               "!lint",     # types the held prompt
               "!race",     # starts agents, applies a racer's changes
+              "!public",   # can publish a page to the internet
               "!ladder",   # switches the agent's model
               "!fresh",    # clears the agent's context
               "!tools",    # changes agent config, restarts the agent
@@ -3713,6 +3723,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
         return route_cmd(cfg, lock, topic, arg)
+    if cmd == "!saved":
+        return saved_report()
+    if cmd == "!wrapped":
+        return wrapped_cmd(cfg, topic, arg)
+    if cmd == "!public":
+        return public_cmd(cfg, lock, topic, arg)
     if cmd == "!race":
         return race_cmd(cfg, state, lock, topic, arg)
     if cmd == "!lint":
@@ -3823,6 +3839,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "and corrections; !route stats = first-try rate per agent\n"
                 "!lint on|off = hold a vague prompt ('fix it') for ✨ improve or send as is\n"
                 "!coach = what your prompts that land first try have in common\n"
+                "!saved = what nightmux saved you · !wrapped [days] = a shareable card\n"
+                "!public on|expose|off = a read-only office link for anyone\n"
                 "!race [claude,codex] <task> = several agents do it, each in its own "
                 "worktree; you pick the winner\n"
                 "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
@@ -5448,6 +5466,7 @@ def coach(cfg, state, lock, topic, sess, text):
         why = lint_why(text)
         if why:
             _lint_hold[topic] = {"text": text}
+            sav_add("lint")
             send(cfg, topic, "✏️ held: this leaves the agent guessing — no " + ", no ".join(why)
                  + ". Guessing means exploring, and exploring re-reads the context.",
                  mode="plain",
@@ -5863,7 +5882,9 @@ def reel_start(cfg, topic, hours):
                 return
             cap = [f"🌙 the last {hours}h · {name}"] + reel_caption(cfg, since)
             send_file(cfg, topic, "night.gif", data, caption="\n".join(cap),
-                      kind="animation")
+                      kind="animation", buttons=kb([[("🐦 post it", tweet_url(
+                          "My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name])
+                          + f" — run by nightmux {REPO_URL} #ClaudeCode"))]]))
         finally:
             _reel["busy"] = False
     threading.Thread(target=go, daemon=True).start()
@@ -5882,6 +5903,203 @@ def reel_cmd(cfg, lock, topic, arg):
         return f"🎬 daily reel at {m.group(1)}" if m else "🎬 daily reel off"
     hours = int(arg) if arg.isdigit() and 0 < int(arg) <= 48 else 12
     return reel_start(cfg, topic, hours)
+
+
+# ---------- what nightmux saved you: counted, not guessed ----------
+# tokens: when a session's context drops by 20k+ (a /compact, /clear, !fresh),
+# every later turn is that many tokens not re-read — counted per turn until the
+# next drop. The rest are plain counts of things that happened.
+_sav = {"d": None, "dirty": False}
+_sav_lock = threading.Lock()
+SAV_DROP = 20000
+REPO_URL = "https://github.com/mmr710/nightmux"
+
+
+def sav_path():
+    return os.path.join(STATE_DIR, "savings.json")
+
+
+def sav_data():
+    if _sav["d"] is None:
+        try:
+            with open(sav_path()) as f:
+                _sav["d"] = json.load(f)
+        except (OSError, ValueError):
+            _sav["d"] = {"since": int(time.time())}
+    return _sav["d"]
+
+
+def sav_add(key, n=1):
+    with _sav_lock:
+        d = sav_data()
+        d[key] = d.get(key, 0) + n
+        _sav["dirty"] = True
+
+
+def sav_save():
+    with _sav_lock:
+        if not _sav["dirty"]:
+            return
+        _sav["dirty"] = False
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(sav_path() + ".tmp", "w") as f:
+                json.dump(sav_data(), f)
+            os.replace(sav_path() + ".tmp", sav_path())
+        except OSError:
+            pass
+
+
+def sav_ctx(st, new):
+    """Called with each turn's context size: a big drop starts a saving."""
+    old = st.get("ctx_tok")
+    if old and old - new >= SAV_DROP:
+        st["sav_rate"] = old - new
+        sav_add("drops")
+
+
+def sav_turn(cfg, st):
+    sav_add("turns")
+    if st.get("sav_rate"):
+        sav_add("tokens", st["sav_rate"])
+    if int(clock(cfg, time.time())[:2]) < 7:      # the phone's night, not the server's
+        sav_add("night_turns")
+
+
+def saved_report():
+    d = sav_data()
+    days = max(1, (time.time() - d.get("since", time.time())) / 86400)
+    return (f"💰 since {time.strftime('%b %d', time.localtime(d.get('since', time.time())))} "
+            f"({days:.0f}d)\n"
+            f"• {_k(d.get('tokens', 0))} tokens of context not re-read "
+            f"({d.get('drops', 0)} compactions / fresh starts)\n"
+            f"• {d.get('turns', 0)} agent turns, {d.get('night_turns', 0)} of them between "
+            "midnight and 7\n"
+            f"• {d.get('resumes', 0)} queues resumed after a usage limit, "
+            f"{d.get('failovers', 0)} hand-offs\n"
+            f"• {d.get('greens', 0)} !goal checks turned green, {d.get('loops', 0)} loops caught, "
+            f"{d.get('lint', 0)} vague prompts held")
+
+
+def tweet_url(text):
+    return "https://x.com/intent/post?text=" + urllib.parse.quote(text)
+
+
+WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;width:1200px;height:675px;background:#07090f;color:#cdd6f4;
+font:28px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
+justify-content:space-between;padding:56px 64px;box-sizing:border-box;
+background-image:radial-gradient(circle at 85% 15%,#2a1d4a 0,#07090f 55%)}
+h1{margin:0;font-size:40px;color:#e0af68;letter-spacing:2px}.sub{color:#8b93a7;font-size:22px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}
+.n{font-size:64px;font-weight:700;color:#9ece6a}.l{font-size:20px;color:#a9b1d6}
+.foot{display:flex;justify-content:space-between;color:#565f89;font-size:20px}
+.moon{font-size:44px}
+</style></head><body>
+<div><h1><svg width="34" height="34" viewBox="0 0 16 16" style="vertical-align:-5px"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg> my night crew · {period}</h1><div class="sub">{agents}</div></div>
+<div class="grid">{cells}</div>
+<div class="foot"><span>made with nightmux</span><span>github.com/mmr710/nightmux</span></div>
+</body></html>"""
+
+
+def wrapped_cells(days):
+    d, r = sav_data(), analyze_chats(days)
+    ag = r.get("agents") or {}
+    prompts = sum(a["prompts"] or 0 for a in ag.values())
+    toks = sum(sum(a["tokens"].values()) for a in ag.values())
+    cells = [(_k(toks), "tokens through my agents"), (str(prompts), "prompts sent"),
+             (str(d.get("night_turns", 0)), "turns while I slept"),
+             (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
+             (_k(d.get("tokens", 0)), "tokens not re-read"),
+             (str(d.get("greens", 0)), "checks turned green"),
+             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions"),
+             (str(len(ag)), "agents on the crew")]
+    cells = [c for c in cells if c[0] not in ("0", "0k")][:6]   # a fresh install has zeros
+    return cells, sorted(ag, key=lambda a: -ag[a]["prompts"])
+
+
+def wrapped_cmd(cfg, topic, arg):
+    days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
+    b = browser_bin(cfg)
+    if not b:
+        return 'no Chromium found — install one or set "browser" in the config'
+
+    def go():
+        cells, ags = wrapped_cells(days)
+        page = WRAPPED_HTML.replace("{period}", f"last {days} days").replace(
+            "{agents}", html.escape(" · ".join(ags) or "")).replace("{cells}", "".join(
+                f'<div><div class="n">{html.escape(n)}</div><div class="l">{html.escape(l)}</div></div>'
+                for n, l in cells))
+        os.makedirs(STATE_DIR, exist_ok=True)
+        src, out = os.path.join(STATE_DIR, "wrapped.html"), os.path.join(STATE_DIR, "wrapped.png")
+        with open(src, "w") as f:
+            f.write(page)
+        run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+            "--window-size=1200,675", "--virtual-time-budget=2000", f"--screenshot={out}",
+            "file://" + src, timeout=60)
+        try:
+            with open(out, "rb") as f:
+                png = f.read()
+            os.remove(out)
+        except OSError:
+            send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
+            return
+        top = ", ".join(f"{n} {l}" for n, l in cells[:4] if n not in ("0", "0k"))
+        send_file(cfg, topic, "wrapped.png", png, kind="photo",
+                  caption=f"🌙 your last {days} days with nightmux",
+                  buttons=kb([[("🐦 post it", tweet_url(
+                      f"My AI coding agents, last {days} days: {top}. Run by nightmux "
+                      f"{REPO_URL} #ClaudeCode #vibecoding"))]]))
+    threading.Thread(target=go, daemon=True).start()
+    return f"🎁 drawing your {days}-day card…"
+
+
+# ---------- !public: a read-only office anyone can open ----------
+# Off by default. On, /public/<token> shows the office with states only — no
+# screen text, no prompts, no buttons that act. Tailnet-only until
+# `!public expose`, which puts just that path on the internet with Funnel.
+def public_snapshot(cfg, state):
+    snap = office_snapshot(cfg, state)
+    keep = ("agent", "session", "live", "state", "queued", "until")
+    return {"rooms": [{"topic": r["topic"], "name": r["name"],
+                       "desks": [{k: d.get(k) for k in keep} for d in r["desks"]]}
+                      for r in snap["rooms"]],
+            "installed": [], "usage": snap.get("usage") or {}, "now": snap.get("now")}
+
+
+def public_ok(cfg, tok):
+    want = (cfg.get("public") or {}).get("token")
+    return bool(want and tok and hmac.compare_digest(str(want), str(tok)))
+
+
+def public_cmd(cfg, lock, topic, arg):
+    pub = cfg.get("public") or {}
+    port = cfg.get("webhook_port") or 9090
+    if arg == "on":
+        with lock:
+            cfg["public"] = {"token": pub.get("token") or secrets.token_urlsafe(9)}
+            save_cfg(cfg)
+        pub = cfg["public"]
+    elif arg == "off":
+        with lock:
+            cfg.pop("public", None)
+            save_cfg(cfg)
+        run("tailscale", "funnel", f"--https={HOOK_PORT}", "--set-path", "/public", "off")
+        return "🔒 public office off — the link is dead"
+    elif arg in ("expose", "unexpose"):
+        if not pub.get("token"):
+            return "!public on first"
+        out = run("tailscale", "funnel", "--bg", f"--https={HOOK_PORT}", "--set-path", "/public",
+                  f"http://127.0.0.1:{port}/public" if arg == "expose" else "off", timeout=30)
+        return (("🌐 on the internet: " if arg == "expose" else "🔒 tailnet-only again\n")
+                + out[-400:])
+    if not pub.get("token"):
+        return ("🌍 public office: off\n!public on = a read-only link to your office (agent "
+                "states only: no screens, prompts or code); !public expose puts that one "
+                "path on the internet")
+    return (f"🌍 public office: /public/{pub['token']} on the dashboard's address\n"
+            "states only — no screen text, prompts or buttons\n"
+            "!public expose = on the internet (Funnel, that path only) · !public off")
 
 
 # ---------- ghost pair: a second model reviews every change ----------
@@ -6254,6 +6472,7 @@ def loop_tick(cfg, state, lock):
         if len(why) < 2 or now - lp["at"] < LOOP_COOL:
             continue
         lp["at"], lp["fired"] = now, lp["fired"] + 1
+        sav_add("loops")
         auto = cfg.get("loopguard") == "auto" and lp["fired"] == 1
         ladder_up(cfg, state, topic, sess, "looks stuck")
         if auto:
@@ -7010,6 +7229,7 @@ def goal_tick(cfg, state):
             n = gs["rounds"]
             _goal[topic] = {"rounds": 0, "same": 0}
             route_learn(cfg, topic, +1)
+            sav_add("greens")
             send(cfg, topic, f"✅ goal green: {cmd}"
                  + (f" — after {n} fix round{'s' * (n != 1)}" if n else ""), mode="plain")
             fresh_after(cfg, state, topic, run["sess"], "task done")
@@ -7976,7 +8196,7 @@ def analyze_chats(days=30, home=None):
 
 
 def _k(n):
-    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+    return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
 
 
 def stats_report(r):
@@ -8925,6 +9145,7 @@ input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2p
 .x{float:right}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
+body.pub .nav,body.pub #sheet{display:none}
 body.demo{display:flex;align-items:center;justify-content:center;min-height:100vh}
 body.demo header,body.demo main,body.demo #sheet{display:none}
 #stage{display:none}
@@ -9307,6 +9528,10 @@ function drawRoom(cv, room, f, o) {
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
   g.fillStyle = vg; g.fillRect(0, 0, w, RH);
+  if (REEL || window.PUB) {                                     // the reel travels: sign it
+    const m = 'GITHUB.COM/MMR710/NIGHTMUX';
+    text(R, m, w - tw(m) - 4, RH - 7, 'rgba(224,175,104,.75)');
+  }
   if (o.caption != null) {
     R('#07090f', 0, RH, w, 16); R('#1b2133', 0, RH, w, 1);
     const [head, rest] = o.caption.split('|');
@@ -9420,7 +9645,7 @@ function render() {
   if (open) sheet();
 }
 
-function pick(topic, i) { const r = data.rooms.find(x => x.topic === topic);
+function pick(topic, i) { if (window.PUB) return; const r = data.rooms.find(x => x.topic === topic);
   open = {topic, session: r.desks[i].session}; sheet(); }
 
 function sheet() {
@@ -9469,7 +9694,7 @@ async function send(topic, text) {
 
 async function poll() {
   try {
-    data = await (await fetch('/api/office', {cache: 'no-store'})).json();
+    data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
     const sv = data.servers || [];
@@ -9502,6 +9727,7 @@ function draw() {
 window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
+if (window.PUB) document.body.classList.add('pub');
 else { poll(); setInterval(poll, 2000); }
 setInterval(() => { if (auto) { frame++; draw(); } }, 110);
 draw();
@@ -9831,6 +10057,18 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.peer_gate():
             return
+        if self.path.startswith("/public/"):
+            tok, _, rest = self.path[len("/public/"):].partition("/")
+            if self.peer or not public_ok(self.server.cfg, tok):
+                self.send_response(404)
+                self.end_headers()
+                return
+            if rest == "api":
+                with self.server.lock:
+                    data = public_snapshot(self.server.cfg, self.server.state)
+                return self.reply(json.dumps(data), "application/json")
+            return self.reply(OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>"
+                                                  % json.dumps(tok), 1), "text/html; charset=utf-8")
         if self.path in ("/", ""):
             return self.reply(DASHBOARD_HTML, "text/html; charset=utf-8")
         if self.path == "/api/metrics":
@@ -11688,6 +11926,19 @@ def selfcheck():
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
         rcfg_["route_stats"] = {"light": {"codex": [9, 10], "claude": [1, 10]}}
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "codex"
+    assert json.loads(kb([[("x", "https://a.b")]]))["inline_keyboard"][0][0] == {"text": "x", "url": "https://a.b"}
+    _sav["d"] = {"since": 0}
+    sst_ = {"ctx_tok": 150000}
+    sav_ctx(sst_, 40000)
+    sav_turn({}, sst_)
+    sav_turn({}, sst_)
+    assert _sav["d"]["tokens"] == 220000 and _sav["d"]["drops"] == 1 and "220k tokens" in saved_report()
+    pcfg_ = {"public": {"token": "abc"}}
+    assert public_ok(pcfg_, "abc") and not public_ok(pcfg_, "abd") and not public_ok({}, "")
+    with stubbed(office_snapshot=lambda c, s: {"rooms": [{"topic": "1", "name": "x", "desks": [
+            {"agent": "claude", "state": "busy", "screen": ["secret"], "doing": "d"}]}], "usage": {}}):
+        ps_ = public_snapshot(pcfg_, {})
+        assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
     assert transcribe({"transcribe_cmd": "echo hello"}, "/x.ogg") == "hello /x.ogg"
     assert transcribe({}, "/x.ogg") is None or os.environ.get("NIGHTMUX_TRANSCRIBE")
     with tempfile.TemporaryDirectory() as rr_:
