@@ -8,6 +8,14 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.3.0] — 2026-10-08
+
+### Added
+
 - `!qa HH:MM [url]|now|off` (nightly browser QA pass that files issues), `!leaderboard [post]` (opt-in counts on a public board), a GitHub Pages site (landing, live office demo, leaderboard), a Docker image on ghcr.io, a cloud-init for fresh VPSes, an installer that works with `curl | sh`, and a new README top.
 
 - `!saved` counts what nightmux did for you (context not re-read, night turns, limit resumes, green checks); `!wrapped [days]` draws a shareable card with a tweet button; the night reel is signed and gets one too; `!public on|expose|off` serves a read-only office (states only) at /public/<token>.
