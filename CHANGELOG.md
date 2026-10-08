@@ -8,11 +8,20 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- The office: the window follows your clock (night, dawn, day, dusk; `?hour=` previews), agents on a break together chat, hand-offs get a "yours" / "got it", optional sounds (🔈) for done, asking and limit, and tapping an agent shows its last 24 terminal lines.
+- Android app: several servers (⚙ to switch, add, forget), pinch-zoom, and store listing metadata in `fastlane/metadata/android/` for F-Droid and Play.
+
 - An Android app (`android/`, `nightmux.apk` on every release): office, chat and dashboard in one app, opt-in alerts when an agent finishes, needs you or hits its limit, answering a menu from the notification, a home-screen widget, and an ambient mode that keeps the office on screen. `/app` on the dashboard pairs it with a QR code.
 
 ### Changed
 
+- README cut to the essentials (quickstart, comparison, feature grid, install); the long form moved to [docs/GUIDE.md](docs/GUIDE.md). [docs/COMMANDS.md](docs/COMMANDS.md) is generated from `!help` by `nightmux --commands`, and selfcheck fails when it goes stale. Added ROADMAP, CODE_OF_CONDUCT and a PR template.
+- `!wrapped` card is taller and says more: tokens saved by compactions, how many projects you worked in and the top six with bars, a 24-hour chart of when you prompt (in your `tz_offset`), peak hour, share after midnight, longest daily streak, busiest day, cache hit, tokens per prompt and top model. The chat analysis now records each prompt's project folder and hour — never its text.
+- `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+
 ### Fixed
+
+- `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
 
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
 
