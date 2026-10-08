@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!arena`: every `!race` you judged, added up — wins, win rate, checks passed and average time per agent, and which agent wins which kind of task (tests, bug fix, refactor, UI, docs, feature). Kept with the other counters; the last 500 races.
 - `!briefing voice`: the morning briefing also arrives as a voice note. Uses whatever speaks on the machine — a `"tts"` command from the config (text on stdin, writes `{out}`; e.g. piper), macOS `say`, espeak-ng, or ffmpeg's built-in flite — and ffmpeg for Opus.
 - `!events <url>`: a JSON POST on `needs_input`, `done`, `limit`, `resumed` and `budget` — for Home Assistant, smart lights, or anything with a webhook. First line only, redacted; fire-and-forget on its own thread. `!events test` / `off`. Guide has a Home Assistant automation.
 - `nightmux --mcp`: nightmux as a stdio MCP server. Any MCP client can `list_topics`, `read_terminal`, `read_chat` and `send_prompt` (queued like a prompt from your phone); `!` commands are not exposed. A thin client over the running daemon's local API. See the guide.

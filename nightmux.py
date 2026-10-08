@@ -3881,6 +3881,7 @@ HELP = [
         "get one prompt back · !use [agent] runs it",
         "!pair <agent> [rounds] | off = a second agent reviews every change",
         "!race [claude,codex] <task> = each in its own worktree; you pick the winner",
+        "!arena = every race you judged: wins per agent, and who wins which kind of task",
         "!route auto|off|stats = send each task to the agent that fits it, "
         "learned from results",
         "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
@@ -4045,6 +4046,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
         return public_cmd(cfg, lock, topic, arg)
+    if cmd == "!arena":
+        return arena_report()
     if cmd == "!race":
         return race_cmd(cfg, state, lock, topic, arg)
     if cmd == "!lint":
@@ -6637,6 +6640,7 @@ def race_cmd(cfg, state, lock, topic, arg):
                 return (f"🏁 {k}'s changes do not apply to your folder as it is now:\n"
                         + (p.stderr or b"").decode(errors="replace")[-800:]
                         + "\nnothing changed · !race diff " + k + " to look, !race cancel to drop")
+        arena_note(r, k)
         race_clean(r["cwd"], r["racers"])
         for y in r["racers"].values():
             state.pop(y["sess"], None)
@@ -6652,6 +6656,56 @@ def race_cmd(cfg, state, lock, topic, arg):
     if verb in ("cancel", "off", "pick", "diff"):
         return "🏁 no such race or racer here"
     return race_start(cfg, state, topic, arg)
+
+
+# ---------- !arena: every race you judged, added up ----------
+ARENA_KINDS = (("tests", r"\btests?\b|\bspec"), ("bug fix", r"\b(fix|bug|error|crash|broken)"),
+               ("refactor", r"refactor|clean ?up|rename|simplif"),
+               ("UI", r"\b(ui|css|style|page|button|layout|screen)\b"),
+               ("docs", r"\b(docs?|readme|comment)"), ("feature", r"\b(add|implement|build|support)\b"))
+
+
+def race_kind(prompt):
+    return next((k for k, rx in ARENA_KINDS if re.search(rx, prompt, re.I)), "other")
+
+
+def arena_note(r, winner):
+    e = {"at": int(time.time()), "kind": race_kind(r["prompt"]), "winner": winner,
+         "racers": {k: {"took": int(x.get("took") or 0), "ok": (x.get("check") or {}).get("rc")}
+                    for k, x in r["racers"].items()}}
+    with _sav_lock:
+        a = sav_data().setdefault("arena", [])
+        a.append(e)
+        del a[:-500]
+        _sav["dirty"] = True
+
+
+def arena_report():
+    races = list(sav_data().get("arena") or [])
+    if not races:
+        return "🏟 no races judged yet · !race <task> and pick a winner"
+    ag = {}
+    for e in races:
+        for k, x in e["racers"].items():
+            a = ag.setdefault(k, {"n": 0, "w": 0, "ok": 0, "chk": 0, "t": 0})
+            a["n"] += 1
+            a["w"] += e["winner"] == k
+            a["t"] += x["took"]
+            if x["ok"] is not None:
+                a["chk"] += 1
+                a["ok"] += x["ok"] == 0
+    rows = [f"🏟 arena · {len(races)} race{'s' * (len(races) != 1)}"]
+    for k, a in sorted(ag.items(), key=lambda kv: (-kv[1]["w"] / kv[1]["n"], -kv[1]["n"])):
+        rows.append(f"{k:<9}{a['w']}/{a['n']} won ({a['w'] / a['n']:.0%})"
+                    + (f" · checks {a['ok']}/{a['chk']}" if a["chk"] else "")
+                    + f" · avg {left(a['t'] / a['n'])}")
+    kinds = {}
+    for e in races:
+        kinds.setdefault(e["kind"], {}).setdefault(e["winner"], 0)
+        kinds[e["kind"]][e["winner"]] += 1
+    best = [f"{kd} → {max(w, key=w.get)} ({max(w.values())}/{sum(w.values())})"
+            for kd, w in sorted(kinds.items(), key=lambda kv: -sum(kv[1].values()))]
+    return "\n".join(rows + ["", "best by task: " + " · ".join(best)])
 
 
 def transcribe(cfg, path):
@@ -12763,6 +12817,22 @@ def selfcheck():
     assert got_[0]["event"] == "needs_input" and got_[0]["name"] == "shop", got_
     assert got_[0]["text"].startswith("Run rm?") and "more" not in got_[0]["text"], got_
     assert "b" * 36 not in got_[0]["text"] and got_[1]["event"] == "test", got_
+    # !arena: judged races add up per agent and per kind of task.
+    old_sav_ = dict(_sav)
+    _sav["d"] = {"since": 0}
+    try:
+        assert "no races" in arena_report()
+        mk_ = lambda p, w, ok=None: arena_note({"prompt": p, "racers": {
+            "claude": {"took": 300, "check": {"rc": ok}}, "codex": {"took": 600}}}, w)
+        mk_("fix the login crash", "codex")
+        mk_("write tests for cart", "claude", 0)
+        mk_("add tests for checkout", "claude", 1)
+        ar_ = arena_report()
+        assert "3 races" in ar_ and "claude   2/3 won (67%) · checks 1/2 · avg 5m" in ar_, ar_
+        assert "tests → claude (2/2)" in ar_ and "bug fix → codex (1/1)" in ar_, ar_
+        assert race_kind("Refactor the parser") == "refactor" and race_kind("hmm") == "other"
+    finally:
+        _sav.update(old_sav_)
     # Voice briefing: speakable text, and a real voice note where ffmpeg can speak.
     sp_ = spoken("☀️ briefing · since 19:30\n\ndone overnight:\n  shop #12 fix login — ready to merge")
     assert "PR 12" in sp_ and "☀" not in sp_ and "\n" not in sp_, sp_
