@@ -8,6 +8,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!race [claude,codex] <task>`: several agents do the same task, each in its own git worktree; one card compares changes and `!goal` results, a 🏆 tap stages the winner. Voice notes are transcribed with your own `transcribe_cmd` (e.g. whisper.cpp) and shown back as 🎙.
+
 - Built-in agents: `!cursor` (Cursor CLI), `!amp`, `!goose`, `!qwen` (Qwen Code) — start, resume, `!update` and their own look in the office.
 
 - Dashboard-only mode: with no bot token nightmux runs on the dashboard and its chat view alone — `--setup` offers it at the token prompt, + project numbers topics locally, `--doctor` accepts it.

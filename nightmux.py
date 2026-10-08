@@ -2431,7 +2431,8 @@ def watched(cfg):
     """
     seen, out = set(), []
     for topic, sess in cfg["topics"].items():
-        for s in [sess] + sorted(bench_of(cfg, topic).values()):
+        racers = [x["sess"] for x in ((_race.get(topic) or {}).get("racers") or {}).values()]
+        for s in [sess] + sorted(bench_of(cfg, topic).values()) + racers:
             if s and (topic, s) not in seen:
                 seen.add((topic, s))
                 out.append((topic, s))
@@ -2511,6 +2512,7 @@ def watcher(cfg, state, lock):
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
+            race_tick(cfg, state)
             mem_tick(cfg, state)
             forecast_tick(cfg, state)
             deps_tick(cfg)
@@ -3604,6 +3606,7 @@ WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!pair",     # starts a second agent and types to it
               "!route",    # switches the topic's agent per prompt
               "!lint",     # types the held prompt
+              "!race",     # starts agents, applies a racer's changes
               "!ladder",   # switches the agent's model
               "!fresh",    # clears the agent's context
               "!tools",    # changes agent config, restarts the agent
@@ -3710,6 +3713,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return tools_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!route":
         return route_cmd(cfg, lock, topic, arg)
+    if cmd == "!race":
+        return race_cmd(cfg, state, lock, topic, arg)
     if cmd == "!lint":
         return lint_cmd(cfg, state, lock, topic, sess, arg, mid)
     if cmd == "!coach":
@@ -3818,6 +3823,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 "and corrections; !route stats = first-try rate per agent\n"
                 "!lint on|off = hold a vague prompt ('fix it') for ✨ improve or send as is\n"
                 "!coach = what your prompts that land first try have in common\n"
+                "!race [claude,codex] <task> = several agents do it, each in its own "
+                "worktree; you pick the winner\n"
                 "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when it "
                 "struggles\n!fresh now|on|off = after a green !goal: notes to memory, "
                 "/clear, re-read\n"
@@ -5929,6 +5936,164 @@ def pair_reviewer(cfg, topic, key):
     cfg.setdefault("bench", {}).setdefault(str(topic), {})[key] = sess
     save_cfg(cfg)
     return sess, f"started {key} as '{sess}' on the bench"
+
+
+# ---------- !race: one task, several agents, you pick ----------
+# Each racer gets its own git worktree (under .nightmux/race/, out of git
+# status) and a fresh session there, so nobody edits anybody else's files.
+# When all are done — or RACE_MAX passes — the topic gets one card: what each
+# changed, whether the !goal check passes in its tree, and a button per agent.
+# The pick is applied to your working tree as staged changes, the rest are
+# thrown away with their worktrees.
+RACE_MAX, RACE_QUIET = 3600, 20
+_race = {}   # topic -> {"base", "cwd", "prompt", "at", "racers": {key: {...}}}
+
+
+def race_parse(cfg, topic, arg):
+    first, _, rest = arg.partition(" ")
+    keys = [k for k in first.split(",") if k]
+    if keys and all(k in agents(cfg) for k in keys) and rest.strip():
+        return keys, rest.strip()
+    bench = [k for k in bench_of(cfg, topic) if k in agents(cfg)]
+    have = installed_agents(cfg)
+    keys = (bench + [k for k in have if k not in bench])[:2]
+    return keys, arg.strip()
+
+
+def race_start(cfg, state, topic, arg):
+    if topic in _race:
+        return "🏁 a race is already running here · !race to see it, !race cancel to stop it"
+    keys, prompt = race_parse(cfg, topic, arg)
+    keys = list(dict.fromkeys(keys))[:4]
+    if not prompt or len(keys) < 2:
+        return ("usage: !race [claude,codex] <task> — two or more agents do the same task, "
+                "each in its own worktree; you pick the result")
+    cwd = (cfg.get("dirs") or {}).get(topic)
+    base = git_head(cwd)
+    if not base:
+        return "🏁 racing needs this topic's folder to be a git repo with a commit"
+    mem_exclude(cwd)
+    dirty = run("git", "-C", cwd, "status", "--porcelain", "--untracked-files=no").strip()
+    stem = re.sub(r"[^\w-]", "-", cfg.get("topics", {}).get(topic) or f"t{topic}")
+    racers, rid = {}, time.strftime("%H%M%S")
+    for k in keys:
+        wt = os.path.join(cwd, ".nightmux", "race", k)
+        branch = f"nightmux-race/{rid}/{k}"
+        run("git", "-C", cwd, "worktree", "remove", "--force", wt)
+        out = run("git", "-C", cwd, "worktree", "add", "-q", "-b", branch, wt, base, timeout=60)
+        if not os.path.isdir(wt):
+            race_clean(cwd, racers)
+            return f"🏁 could not make a worktree for {k}: {out[-300:]}"
+        sess = f"{stem}-race-{k}"
+        tmux("kill-session", "-t", sess)
+        spawn(sess, wt, agent(cfg, k)[0])
+        state[sess] = {"queue": [prompt + "\n\nWork only in this folder. When it is done, stop."]}
+        racers[k] = {"sess": sess, "wt": wt, "branch": branch, "t0": time.time()}
+    _race[topic] = {"base": base, "cwd": cwd, "prompt": prompt, "at": time.time(),
+                    "racers": racers}
+    return (f"🏁 race: {', '.join(keys)} — each in its own worktree from {base[:7]}\n"
+            + ("⚠️ uncommitted changes are not in the race (they start from HEAD)\n" if dirty else "")
+            + "you get one card when they are done · !race cancel stops it")
+
+
+def race_tick(cfg, state):
+    now = time.time()
+    for topic, r in list(_race.items()):
+        if r.get("posted"):
+            continue
+        goal = ((cfg.get("goals") or {}).get(topic) or {}).get("cmd")
+        for k, x in r["racers"].items():
+            st = state.get(x["sess"]) or {}
+            if "stat" not in x and (now - r["at"] > RACE_MAX or (
+                    st.get("ran") and st.get("mode") == "idle" and not st.get("queue")
+                    and now - st.get("changed", now) > RACE_QUIET)):
+                run("git", "-C", x["wt"], "add", "-A")
+                x["stat"] = run("git", "-C", x["wt"], "diff", "--cached", "--shortstat",
+                                r["base"]).strip() or "no changes"
+                x["took"] = now - x["t0"]
+                if goal:
+                    x["check"] = {}
+                    threading.Thread(target=goal_check, args=(goal, x["wt"], x["check"]),
+                                     daemon=True).start()
+        if all("stat" in x and "rc" in (x.get("check") or {"rc": None})
+               for x in r["racers"].values()):
+            r["posted"] = True
+            lines, picks = [f"🏁 race done: {r['prompt'][:80]}"], []
+            for k, x in r["racers"].items():
+                rc = (x.get("check") or {}).get("rc")
+                ok = "" if rc is None else (f" · ✅ {goal}" if rc == 0 else f" · ❌ {goal}")
+                lines.append(f"{k}: {x['stat']}{ok} · {left(x['took'])}")
+                picks.append((f"🏆 {k}", f"!race pick {k}"))
+            send(cfg, topic, "\n".join(lines), mode="plain", buttons=kb(
+                [picks, [(f"diff {k}", f"!race diff {k}") for k in r["racers"]],
+                 [("cancel", "!race cancel")]]))
+
+
+def race_clean(cwd, racers):
+    for x in racers.values():
+        tmux("kill-session", "-t", x["sess"])
+        run("git", "-C", cwd, "worktree", "remove", "--force", x["wt"])
+        run("git", "-C", cwd, "branch", "-D", x["branch"])
+
+
+def race_cmd(cfg, state, lock, topic, arg):
+    r = _race.get(topic)
+    verb, _, k = arg.partition(" ")
+    if verb in ("cancel", "off") and r:
+        race_clean(r["cwd"], r["racers"])
+        for x in r["racers"].values():
+            state.pop(x["sess"], None)
+        _race.pop(topic, None)
+        return "🏁 race cancelled · worktrees removed, your folder untouched"
+    if verb in ("pick", "diff") and r and k in r["racers"]:
+        x = r["racers"][k]
+        run("git", "-C", x["wt"], "add", "-A")
+        patch = subprocess.run(["git", "-C", x["wt"], "diff", "--cached", "--binary", r["base"]],
+                               capture_output=True, timeout=60).stdout
+        if verb == "diff":
+            return redact(patch.decode(errors="replace"))[-3500:] or "no changes"
+        if patch:
+            p = subprocess.run(["git", "-C", r["cwd"], "apply", "--index", "--3way"],
+                               input=patch, capture_output=True, timeout=60)
+            if p.returncode:
+                return (f"🏁 {k}'s changes do not apply to your folder as it is now:\n"
+                        + (p.stderr or b"").decode(errors="replace")[-800:]
+                        + "\nnothing changed · !race diff " + k + " to look, !race cancel to drop")
+        race_clean(r["cwd"], r["racers"])
+        for y in r["racers"].values():
+            state.pop(y["sess"], None)
+        _race.pop(topic, None)
+        return (f"🏆 {k} wins — its changes are staged in {r['cwd']} (git diff --cached), "
+                "the other worktrees are gone. Commit when happy." if patch else
+                f"🏆 {k} wins — it changed nothing")
+    if not arg:
+        if not r:
+            return "🏁 no race here · !race [claude,codex] <task>"
+        return "🏁 racing: " + ", ".join(
+            f"{k} {'done' if 'stat' in x else 'working'}" for k, x in r["racers"].items())
+    if verb in ("cancel", "off", "pick", "diff"):
+        return "🏁 no such race or racer here"
+    return race_start(cfg, state, topic, arg)
+
+
+def transcribe(cfg, path):
+    """A voice note as text, from cfg["transcribe_cmd"] (the audio path is appended).
+
+    Bring your own: whisper.cpp, faster-whisper, or a curl to a speech API — the
+    choice of where your voice goes is yours. None when unset or it fails, so the
+    note still reaches the agent as a file.
+    """
+    cmd = cfg.get("transcribe_cmd") or os.environ.get("NIGHTMUX_TRANSCRIBE")
+    if not cmd:
+        return None
+    try:
+        p = subprocess.run(shlex.split(os.path.expanduser(cmd)) + [path], capture_output=True,
+                           text=True, timeout=180, stdin=subprocess.DEVNULL)
+        said = re.sub(r"\s+", " ", p.stdout or "").strip()
+        return said if p.returncode == 0 and said else None
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        print(f"transcribe: {e}", file=sys.stderr)
+        return None
 
 
 def pair_tick(cfg, state, lock):
@@ -10158,7 +10323,17 @@ def process(cfg, state, lock, allow, upd):
             send(cfg, topic, "download failed")
             return
         image = att or (doc.get("mime_type") or "").startswith("image/")
-        text = (image and point_fix(cfg, topic, text, path)) or f"{text}\n{path}".strip()
+        said = transcribe(cfg, path) if voice and not doc and not att else None
+        if said and find_secret(said):
+            send(cfg, topic, f"🎙 that voice note reads like a {find_secret(said)} — not sent "
+                 "to the agent", mode="plain")
+            return
+        if said:
+            send(cfg, topic, "🎙 " + said, mode="plain", quiet=True)
+            chat_log(topic, "you", "🎙 " + said)
+            text = f"{text}\n{said}".strip()
+        else:
+            text = (image and point_fix(cfg, topic, text, path)) or f"{text}\n{path}".strip()
     try:
         # cq: the tap already has its own feedback, so no reaction on the button
         reply = handle(cfg, state, lock, topic, text,
@@ -11513,6 +11688,30 @@ def selfcheck():
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "claude"
         rcfg_["route_stats"] = {"light": {"codex": [9, 10], "claude": [1, 10]}}
         assert route_pick(rcfg_, "light", {"claude": "r", "codex": "r-codex"}) == "codex"
+    assert transcribe({"transcribe_cmd": "echo hello"}, "/x.ogg") == "hello /x.ogg"
+    assert transcribe({}, "/x.ogg") is None or os.environ.get("NIGHTMUX_TRANSCRIBE")
+    with tempfile.TemporaryDirectory() as rr_:
+        g_ = ["git", "-C", rr_, "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", rr_])
+        open(os.path.join(rr_, "a.txt"), "w").write("one\n")
+        subprocess.run(g_ + ["add", "."]); subprocess.run(g_ + ["commit", "-qm", "init"])
+        rcf_, rst2_, rsaid_ = {"topics": {"8": "rc"}, "dirs": {"8": rr_}}, {}, []
+        with stubbed(spawn=lambda *a: None, tmux=lambda *a: "", send=lambda c, t, x, **k: rsaid_.append(x),
+                     installed_agents=lambda c: ["claude", "codex"]):
+            assert race_parse(rcf_, "8", "claude,codex fix it") == (["claude", "codex"], "fix it")
+            out_ = race_cmd(rcf_, rst2_, threading.Lock(), "8", "make a.txt say two")
+            assert "race: claude, codex" in out_, out_
+            assert ("8", "rc-race-codex") in watched(rcf_)
+            wt_ = _race["8"]["racers"]["claude"]["wt"]
+            open(os.path.join(wt_, "a.txt"), "w").write("two\n")
+            for x_ in _race["8"]["racers"].values():
+                rst2_[x_["sess"]] = {"ran": True, "mode": "idle", "changed": 0}
+            race_tick(rcf_, rst2_)
+            assert "race done" in rsaid_[-1] and "claude: 1 file changed" in rsaid_[-1], rsaid_
+            assert "two" in race_cmd(rcf_, rst2_, threading.Lock(), "8", "diff claude")
+            assert "wins" in race_cmd(rcf_, rst2_, threading.Lock(), "8", "pick claude")
+            assert open(os.path.join(rr_, "a.txt")).read() == "two\n" and "8" not in _race
+            assert not os.path.isdir(wt_)
     assert _post({}, "sendMessage", b"") == {}       # dashboard-only: never reaches the network
     seen_ = {d["state"] for t_ in range(0, 400, 5) for r in demo_snapshot(t_)["rooms"] for d in r["desks"]}
     assert seen_ == {"busy", "idle", "limit", "waiting"}, seen_     # --demo shows every state
