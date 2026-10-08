@@ -716,3 +716,48 @@ automation:
         target: {entity_id: light.desk}
         data: {color_name: orange, brightness_pct: 40}
 ```
+
+## Discord and Slack (experimental)
+
+The same model on other chat apps: a **Discord forum post** or a **Slack channel** is a
+topic. Everything else — `!new`, buttons, the queue, limits — works the same, and you can
+run them beside Telegram or instead of it (leave `token` out). Incoming messages arrive
+over each app's websocket, so nothing needs a public URL.
+
+Your id on that app must be in `allow_users`, like your Telegram id: a Discord user id
+(Developer Mode → right-click your name → Copy User ID) or a Slack member id (`U…`, from
+your profile → ⋮ → Copy member ID).
+
+**Discord.** Create an application at <https://discord.com/developers/applications>, add a
+bot, turn on **Message Content Intent**, copy the token. Invite it with the scopes `bot`
+and permissions *Send Messages, Send Messages in Threads, Read Message History, Add
+Reactions, Attach Files* (and *Manage Messages* if nightmux should delete a pasted secret).
+Make a **Forum** channel; each post in it is a topic. Copy the forum's channel id.
+
+```json
+"discord": {"token": "<bot token>", "forum": "<forum channel id>"}
+```
+
+**Slack.** Create an app from this manifest at <https://api.slack.com/apps>, install it,
+then make an app-level token with `connections:write`:
+
+```yaml
+display_information: {name: nightmux}
+features: {bot_user: {display_name: nightmux}}
+oauth_config:
+  scopes:
+    bot: [channels:history, groups:history, chat:write, reactions:write, channels:read, groups:read, files:write]
+settings:
+  event_subscriptions: {bot_events: [message.channels, message.groups]}
+  interactivity: {is_enabled: true}
+  socket_mode_enabled: true
+```
+
+```json
+"slack": {"bot_token": "xoxb-…", "app_token": "xapp-…"}
+```
+
+Invite the bot to a channel (`/invite @nightmux`); that channel is a topic.
+
+Not yet: files you send from Discord arrive as links and from Slack not at all; voice notes
+are Telegram-only.

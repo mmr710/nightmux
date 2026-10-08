@@ -113,6 +113,10 @@ _last_send = [0.0]
 
 def _post(cfg, method, body, headers=None):
     """One round trip. Paces outbound calls and honours a 429 back-off once."""
+    if headers is None and (cfg.get("discord") or cfg.get("slack")):
+        p = dict(urllib.parse.parse_qsl(body.decode()))
+        if bridge_wants(p):
+            return bridge_post(cfg, method, p)
     if not cfg.get("token"):
         return {}            # dashboard-only: no bot, the chat view is the channel
     if method not in NO_THROTTLE:
@@ -215,6 +219,10 @@ FILE_AFTER = 2  # more chunks than this and it goes up as one attachment instead
 def send_file(cfg, topic, name, data, caption="", buttons=None, kind="document"):
     """Upload text as a document — one attachment beats six walls of <pre>.
     kind="photo" sends an image Telegram shows inline."""
+    via = bridge_of(topic)
+    if via:
+        chat_log(topic, "bot", f"[📎 {name}] {caption}".strip(), buttons)
+        return bridge_file(cfg, topic, name, data, caption, buttons, via)
     b = "----nightmux-" + str(int(time.time() * 1000))
 
     def field(k, v):
@@ -11724,7 +11732,9 @@ def main():
     restore_startup(cfg, state, lock)
     threading.Thread(target=watcher, args=(cfg, state, lock), daemon=True).start()
 
-    allow = {int(u) for u in cfg["allow_users"]}
+    # Telegram and Discord ids are numbers, Slack's are letters ("U024BE7LH").
+    allow = {int(u) if str(u).lstrip("-").isdigit() else str(u) for u in cfg["allow_users"]}
+    bridges_start(cfg, state, lock, allow)
     if cfg.get("peer_listen"):
         host, _, port = cfg["peer_listen"].rpartition(":")
         threading.Thread(target=run_webhook_server, daemon=True,
@@ -11874,6 +11884,451 @@ def audit_cmd(arg):
         return "no audit log yet — it starts once a role is set (!team) or \"audit\": true"
     return "\n".join(time.strftime("%m-%d %H:%M", time.localtime(r["t"]))
                      + f" {r['name'] or r['user']} #{r['topic']} {r['text'][:80]}" for r in rows)
+
+
+# ---------- Discord and Slack: the same topics, other chat apps ----------
+# Telegram stays the model: a Discord forum post (thread) or a Slack channel is
+# a topic, and everything nightmux sends goes through _post(), which hands
+# these topics to bridge_post() instead. Their ids are mapped above anything
+# Telegram uses — Discord thread ids are 2^40+ snowflakes as they are, Slack's
+# letter ids hash into 2^62+ — so the rest of nightmux never knows. Incoming
+# messages and button taps arrive over each app's websocket (Discord gateway,
+# Slack Socket Mode: no public URL) and are dispatched as Telegram updates.
+BRIDGE_DISCORD, BRIDGE_SLACK = 2 ** 40, 2 ** 62
+_bridge = {"msgs": {}, "n": [2 ** 50], "threads": set(), "lock": threading.Lock()}
+
+
+def bridge_of(topic):
+    t = str(topic or "")
+    if not t.isdigit():
+        return None
+    return "slack" if int(t) >= BRIDGE_SLACK else "discord" if int(t) >= BRIDGE_DISCORD else None
+
+
+def bridge_remember(info, mid=None):
+    """A message id nightmux can hand back to edit, delete or react: Discord's
+    own, or a made-up one for a Slack ts."""
+    with _bridge["lock"]:
+        if mid is None:
+            _bridge["n"][0] += 1
+            mid = _bridge["n"][0]
+        _bridge["msgs"][int(mid)] = info
+        while len(_bridge["msgs"]) > 3000:
+            _bridge["msgs"].pop(next(iter(_bridge["msgs"])))
+    return int(mid)
+
+
+def bridge_wants(p):
+    mid = p.get("message_id", "")
+    return bool(bridge_of(p.get("message_thread_id"))
+                or (mid.isdigit() and int(mid) in _bridge["msgs"])
+                or p.get("callback_query_id", "")[:3] in ("dc:", "sl:"))
+
+
+def tg_md(s, via):
+    """Telegram HTML (what send() builds) -> Discord markdown or Slack mrkdwn."""
+    s = re.sub(r"<pre>(.*?)</pre>", lambda m: "```\n" + m.group(1) + "\n```", s, flags=re.S)
+    s = re.sub(r'<a href="([^"]+)">(.*?)</a>', r"[\2](\1)" if via == "discord" else r"\2 (\1)", s)
+    s = re.sub(r"</?b>", "**" if via == "discord" else "*", s)
+    s = re.sub(r"</?i>", "_", s)
+    s = re.sub(r"</?code>", "`", s)
+    s = html.unescape(re.sub(r"<[^>]+>", "", s))
+    # Slack reads &, < and > as markup and wants them escaped; Discord does not.
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if via == "slack" else s
+
+
+def dc_rows(rows):
+    out = []
+    for row in (rows or [])[:5]:
+        comps = [{"type": 2, "style": 5, "label": b["text"][:80], "url": b["url"]} if b.get("url") else
+                 {"type": 2, "style": 2, "label": b["text"][:80], "custom_id": b["callback_data"][:100]}
+                 for b in row[:5]]
+        if comps:
+            out.append({"type": 1, "components": comps})
+    return out
+
+
+def sl_blocks(text, rows):
+    bl = [{"type": "section", "text": {"type": "mrkdwn", "text": text[i:i + 2900]}}
+          for i in range(0, min(len(text), 2900 * 40), 2900)]
+    for r, row in enumerate(rows or []):
+        el = [dict({"type": "button", "text": {"type": "plain_text", "text": b["text"][:75]},
+                    "action_id": f"nm{r}_{i}"},
+                   **({"url": b["url"]} if b.get("url") else {"value": b["callback_data"][:2000]}))
+              for i, b in enumerate(row[:25])]
+        if el:
+            bl.append({"type": "actions", "elements": el})
+    return bl[:50]
+
+
+def _bridge_http(url, method, body, headers):
+    data = None if body is None else (body if isinstance(body, bytes) else json.dumps(body).encode())
+    for attempt in (1, 2):
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=SEND_TIMEOUT) as r:
+                raw = r.read()
+            return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            wait = float(e.headers.get("Retry-After") or 0)
+            if e.code == 429 and attempt == 1 and wait <= MAX_BACKOFF:
+                time.sleep(wait + 0.5)
+                continue
+            raise OSError(f"{e.code} {e.read()[:200]!r}")
+
+
+def discord_api(cfg, method, path, body=None, raw_type=None):
+    h = {"Authorization": "Bot " + cfg["discord"]["token"],
+         "User-Agent": f"DiscordBot ({REPO_URL}, {VERSION})",
+         "Content-Type": raw_type or "application/json"}
+    return _bridge_http("https://discord.com/api/v10" + path, method, body, h)
+
+
+def slack_api(cfg, method, body=None, token=None):
+    r = _bridge_http("https://slack.com/api/" + method, "POST", body or {},
+                     {"Authorization": "Bearer " + (token or cfg["slack"]["bot_token"]),
+                      "Content-Type": "application/json; charset=utf-8"})
+    if not r.get("ok"):
+        raise ValueError(f"slack {method}: {r.get('error')}")
+    return r
+
+
+def slack_topic(cfg, cid):
+    """A Slack channel's topic id: stable, numeric, out of Telegram's and Discord's way."""
+    import hashlib
+    t = str(BRIDGE_SLACK + int(hashlib.sha1(cid.encode()).hexdigest()[:12], 16))
+    chans = cfg.setdefault("slack_channels", {})
+    if chans.get(t) != cid:
+        chans[t] = cid
+        save_cfg(cfg)
+    return t
+
+
+SLACK_EMOJI = {"👀": "eyes", "👍": "+1", "🤔": "thinking_face"}
+
+
+def bridge_post(cfg, method, p):
+    """A Telegram Bot API call, done on Discord or Slack. Answers Telegram-shaped."""
+    if method == "answerCallbackQuery":
+        return {"ok": True}                  # acknowledged when the tap arrived
+    mid = p.get("message_id", "")
+    m = _bridge["msgs"].get(int(mid)) if mid.isdigit() else None
+    t = p.get("message_thread_id")
+    via = m["via"] if m else bridge_of(t)
+    text = tg_md(p.get("text", ""), via)
+    rows = (json.loads(p["reply_markup"]).get("inline_keyboard") or []) if p.get("reply_markup") else None
+    emoji = ((json.loads(p.get("reaction") or "[]") or [{}])[0]).get("emoji")
+    try:
+        if via == "discord":
+            chan = m["chan"] if m else t
+            if method == "sendMessage":
+                parts, carry = [], ""
+                for i in range(0, max(len(text), 1), 1900):   # Discord's cap is 2000
+                    part, carry = carry + text[i:i + 1900], ""
+                    if part.count("```") % 2:          # a code block cut in two stays code
+                        part, carry = part + "\n```", "```\n"
+                    parts.append(part)
+                for i, part in enumerate(parts):
+                    r = discord_api(cfg, "POST", f"/channels/{chan}/messages", dict(
+                        {"content": part}, **({"components": dc_rows(rows)} if rows and i == len(parts) - 1 else {})))
+                return {"ok": True, "result": {"message_id": bridge_remember(
+                    {"via": "discord", "chan": chan}, r["id"])}}
+            path = f"/channels/{chan}/messages/{mid}"
+            if method == "editMessageText":
+                discord_api(cfg, "PATCH", path, {"content": text[:2000], "components": dc_rows(rows)})
+            elif method == "editMessageReplyMarkup":
+                discord_api(cfg, "PATCH", path, {"components": dc_rows(rows)})
+            elif method == "deleteMessage":
+                discord_api(cfg, "DELETE", path)
+            elif method == "setMessageReaction" and emoji:
+                discord_api(cfg, "PUT", path + f"/reactions/{urllib.parse.quote(emoji)}/@me")
+            else:
+                return {"ok": False, "description": f"{method}: Telegram only"}
+            return {"ok": True, "result": True}
+        cid = m["chan"] if m else (cfg.get("slack_channels") or {}).get(t)
+        if not cid:
+            return {"ok": False, "description": f"no Slack channel for topic {t}"}
+        if method == "sendMessage":
+            r = slack_api(cfg, "chat.postMessage", dict({"channel": cid, "text": text[:3900]},
+                                                       **({"blocks": sl_blocks(text, rows)} if rows else {})))
+            return {"ok": True, "result": {"message_id": bridge_remember(
+                {"via": "slack", "chan": cid, "ts": r["ts"], "text": text})}}
+        if method in ("editMessageText", "editMessageReplyMarkup"):
+            text = text if method == "editMessageText" else m.get("text", "")
+            slack_api(cfg, "chat.update", {"channel": cid, "ts": m["ts"], "text": text[:3900],
+                                           "blocks": sl_blocks(text, rows) if rows else []})
+            m["text"] = text
+        elif method == "deleteMessage":
+            slack_api(cfg, "chat.delete", {"channel": cid, "ts": m["ts"]})
+        elif method == "setMessageReaction" and SLACK_EMOJI.get(emoji):
+            slack_api(cfg, "reactions.add", {"channel": cid, "timestamp": m["ts"],
+                                             "name": SLACK_EMOJI[emoji]})
+        elif method != "setMessageReaction":
+            return {"ok": False, "description": f"{method}: Telegram only"}
+        return {"ok": True, "result": True}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"bridge {via} {method}: {e}", file=sys.stderr, flush=True)
+        return {"ok": False, "description": str(e)}
+
+
+def bridge_file(cfg, topic, name, data, caption, buttons, via):
+    """send_file for a bridged topic: an upload with the caption as its message."""
+    blob = data.encode() if isinstance(data, str) else data
+    rows = (json.loads(buttons).get("inline_keyboard") or []) if buttons else None
+    try:
+        if via == "discord":
+            b = "----nightmux-" + secrets.token_hex(8)
+            pj = json.dumps(dict({"content": caption[:2000]}, **({"components": dc_rows(rows)} if rows else {})))
+            body = (f"--{b}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+                    f"Content-Type: application/json\r\n\r\n{pj}\r\n--{b}\r\nContent-Disposition: "
+                    f"form-data; name=\"files[0]\"; filename=\"{name}\"\r\nContent-Type: "
+                    "application/octet-stream\r\n\r\n").encode() + blob + f"\r\n--{b}--\r\n".encode()
+            r = discord_api(cfg, "POST", f"/channels/{topic}/messages", body,
+                            raw_type=f"multipart/form-data; boundary={b}")
+            return bridge_remember({"via": "discord", "chan": str(topic)}, r["id"])
+        cid = (cfg.get("slack_channels") or {}).get(str(topic))
+        up = slack_api(cfg, "files.getUploadURLExternal?" + urllib.parse.urlencode(
+            {"filename": name, "length": len(blob)}))
+        _bridge_http(up["upload_url"], "POST", blob, {"Content-Type": "application/octet-stream",
+                                                      "Authorization": "Bearer " + cfg["slack"]["bot_token"]})
+        slack_api(cfg, "files.completeUploadExternal", {
+            "files": [{"id": up["file_id"], "title": name}], "channel_id": cid,
+            "initial_comment": tg_md(html.escape(caption), "slack")[:3000]})
+        return None
+    except (OSError, ValueError, KeyError) as e:
+        print(f"bridge {via} file: {e}", file=sys.stderr, flush=True)
+        return None
+
+
+class WS:
+    """Just enough of a websocket client (RFC 6455) for two gateways: text
+    frames, fragments, ping/pong, close. Client frames are masked."""
+
+    def __init__(self, url, timeout=120):
+        import socket
+        import ssl
+        import base64
+        u = urllib.parse.urlsplit(url)
+        raw = socket.create_connection((u.hostname, u.port or (443 if u.scheme == "wss" else 80)), timeout=30)
+        self.s = (ssl.create_default_context().wrap_socket(raw, server_hostname=u.hostname)
+                  if u.scheme == "wss" else raw)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.s.sendall((f"GET {u.path or '/'}{'?' + u.query if u.query else ''} HTTP/1.1\r\n"
+                        f"Host: {u.hostname}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            c = self.s.recv(1)
+            if not c:
+                raise OSError("websocket closed during the handshake")
+            head += c
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise OSError("websocket refused: " + head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        self.s.settimeout(timeout)        # silence longer than this is a dead line
+        self.lock = threading.Lock()
+
+    def _read(self, n):
+        b = b""
+        while len(b) < n:
+            c = self.s.recv(n - len(b))
+            if not c:
+                raise OSError("websocket closed")
+            b += c
+        return b
+
+    def recv(self):
+        """The next text message, or None once the server closes."""
+        msg = b""
+        while True:
+            h = self._read(2)
+            fin, op, n = h[0] & 0x80, h[0] & 0x0F, h[1] & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._read(8))[0]
+            mask = self._read(4) if h[1] & 0x80 else None
+            data = self._read(n)
+            if mask:
+                data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+            if op == 8:
+                return None
+            if op == 9:
+                self.send(data, 0xA)
+                continue
+            if op == 0xA:
+                continue
+            msg += data
+            if fin:
+                return msg.decode("utf-8", "replace")
+
+    def send(self, data, op=1):
+        data = data.encode() if isinstance(data, str) else data
+        n, mask = len(data), os.urandom(4)
+        head = bytes([0x80 | op]) + (bytes([0x80 | n]) if n < 126 else
+                                     bytes([0xFE]) + struct.pack(">H", n) if n < 65536 else
+                                     bytes([0xFF]) + struct.pack(">Q", n))
+        with self.lock:
+            self.s.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+def bridge_upd(cfg, topic, user, text="", mid=None, cq=None, name=None):
+    """A Telegram-shaped update, so process() handles it like any other."""
+    who = {"id": user, "username": name} if name else {"id": user}
+    msg = {"message_thread_id": int(topic), "chat": {"id": cfg["chat_id"]}}
+    if cq:
+        return {"update_id": 0, "callback_query": {"id": cq[0], "data": cq[1], "from": who,
+                                                   "message": dict(msg, message_id=mid)}}
+    return {"update_id": 0, "message": dict(msg, message_id=mid, text=text, **{"from": who})}
+
+
+def discord_event(cfg, state, lock, allow, kind, d):
+    forum = str((cfg.get("discord") or {}).get("forum") or "")
+    if kind == "GUILD_CREATE":
+        _bridge["threads"].update(t["id"] for t in d.get("threads") or [] if t.get("parent_id") == forum)
+    elif kind == "THREAD_CREATE" and d.get("parent_id") == forum:
+        _bridge["threads"].add(d["id"])
+        if d["id"] not in (cfg.get("topic_names") or {}):
+            dispatch(cfg, state, lock, allow, {"update_id": 0, "message": {
+                "message_thread_id": int(d["id"]), "chat": {"id": cfg["chat_id"]},
+                "forum_topic_created": {"name": d.get("name", "")}}}, NoAcks())
+    elif kind == "MESSAGE_CREATE":
+        ch, a = d.get("channel_id", ""), d.get("author") or {}
+        if a.get("bot") or not (ch in _bridge["threads"] or ch in cfg.get("topics", {})):
+            return
+        text = "\n".join([d.get("content") or ""] + [x["url"] for x in d.get("attachments") or []]).strip()
+        mid = bridge_remember({"via": "discord", "chan": ch}, d["id"])
+        dispatch(cfg, state, lock, allow, bridge_upd(cfg, ch, int(a["id"]), text, mid,
+                                                     name=a.get("username")), NoAcks())
+    elif kind == "INTERACTION_CREATE" and d.get("type") == 3:
+        try:   # within 3 s or Discord says the interaction failed
+            _bridge_http(f"https://discord.com/api/v10/interactions/{d['id']}/{d['token']}/callback",
+                         "POST", {"type": 6}, {"Content-Type": "application/json",
+                                               "User-Agent": f"DiscordBot ({REPO_URL}, {VERSION})"})
+        except OSError as e:
+            print(f"discord ack: {e}", file=sys.stderr)
+        u = (d.get("member") or {}).get("user") or d.get("user") or {}
+        mid = bridge_remember({"via": "discord", "chan": d["channel_id"]}, d["message"]["id"])
+        dispatch(cfg, state, lock, allow, bridge_upd(
+            cfg, d["channel_id"], int(u.get("id", 0)), mid=mid,
+            cq=("dc:" + d["id"], d["data"]["custom_id"]), name=u.get("username")), NoAcks())
+
+
+def discord_run(cfg, state, lock, allow):
+    back = 5
+    while True:
+        ws, alive = None, [True]
+        try:
+            ws = WS("wss://gateway.discord.gg/?v=10&encoding=json")
+            every = json.loads(ws.recv())["d"]["heartbeat_interval"] / 1000
+            seq = [None]
+
+            def beat(ws=ws):
+                while alive[0]:
+                    time.sleep(every)
+                    try:
+                        ws.send(json.dumps({"op": 1, "d": seq[0]}))
+                    except OSError:
+                        return
+            threading.Thread(target=beat, daemon=True).start()
+            ws.send(json.dumps({"op": 2, "d": {
+                "token": cfg["discord"]["token"], "intents": 1 | 1 << 9 | 1 << 15,   # guilds, messages, content
+                "properties": {"os": sys.platform, "browser": "nightmux", "device": "nightmux"}}}))
+            while True:
+                raw = ws.recv()
+                if raw is None:
+                    break
+                m = json.loads(raw)
+                seq[0] = m.get("s") or seq[0]
+                if m.get("op") in (7, 9):          # reconnect, or an invalid session
+                    break
+                if m.get("op") == 0:
+                    back = 5
+                    try:
+                        discord_event(cfg, state, lock, allow, m.get("t"), m.get("d") or {})
+                    except Exception as e:
+                        print(f"discord {m.get('t')}: {e}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"discord gateway: {e}", file=sys.stderr, flush=True)
+        finally:
+            alive[0] = False
+            if ws:
+                ws.close()
+        time.sleep(back)
+        back = min(back * 2, 300)
+
+
+def slack_event(cfg, state, lock, allow, env):
+    p = env.get("payload") or {}
+    if env.get("type") == "events_api":
+        ev = p.get("event") or {}
+        if ev.get("type") != "message" or ev.get("bot_id") or ev.get("subtype"):
+            return
+        t = slack_topic(cfg, ev["channel"])
+        if t not in (cfg.get("topic_names") or {}):
+            try:
+                nm = slack_api(cfg, "conversations.info", {"channel": ev["channel"]})["channel"]["name"]
+            except (OSError, ValueError, KeyError):
+                nm = ev["channel"]
+            dispatch(cfg, state, lock, allow, {"update_id": 0, "message": {
+                "message_thread_id": int(t), "chat": {"id": cfg["chat_id"]},
+                "forum_topic_created": {"name": nm}}}, NoAcks())
+        mid = bridge_remember({"via": "slack", "chan": ev["channel"], "ts": ev["ts"]})
+        text = re.sub(r"<(https?://[^|>]+)(?:\|[^>]*)?>", r"\1", ev.get("text") or "")
+        dispatch(cfg, state, lock, allow, bridge_upd(cfg, t, ev.get("user"), html.unescape(text), mid),
+                 NoAcks())
+    elif env.get("type") == "interactive" and p.get("type") == "block_actions":
+        act = (p.get("actions") or [{}])[0]
+        if not act.get("value"):
+            return                               # a link button: Slack opened it
+        cid, ts = p["channel"]["id"], (p.get("message") or {}).get("ts")
+        mid = next((k for k, v in list(_bridge["msgs"].items()) if v.get("ts") == ts), None) or \
+            bridge_remember({"via": "slack", "chan": cid, "ts": ts, "text": ""})
+        dispatch(cfg, state, lock, allow, bridge_upd(
+            cfg, slack_topic(cfg, cid), (p.get("user") or {}).get("id"), mid=mid,
+            cq=("sl:" + str(ts), act["value"])), NoAcks())
+
+
+def slack_run(cfg, state, lock, allow):
+    back = 5
+    while True:
+        ws = None
+        try:
+            url = slack_api(cfg, "apps.connections.open", token=cfg["slack"]["app_token"])["url"]
+            ws = WS(url)
+            while True:
+                raw = ws.recv()
+                if raw is None:
+                    break
+                env = json.loads(raw)
+                if env.get("envelope_id"):          # ack first: Slack retries what is not
+                    ws.send(json.dumps({"envelope_id": env["envelope_id"]}))
+                if env.get("type") == "disconnect":
+                    break
+                back = 5
+                try:
+                    slack_event(cfg, state, lock, allow, env)
+                except Exception as e:
+                    print(f"slack {env.get('type')}: {e}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"slack socket: {e}", file=sys.stderr, flush=True)
+        finally:
+            if ws:
+                ws.close()
+        time.sleep(back)
+        back = min(back * 2, 300)
+
+
+def bridges_start(cfg, state, lock, allow):
+    for key, run_ in (("discord", discord_run), ("slack", slack_run)):
+        if cfg.get(key):
+            threading.Thread(target=run_, args=(cfg, state, lock, allow), daemon=True).start()
+            print(f"{key}: connecting", flush=True)
 
 
 def process(cfg, state, lock, allow, upd):
@@ -13255,6 +13710,109 @@ def selfcheck():
         assert lc_["looks"]["claude"]["hat"] == "cap" and "no agent" in look_cmd(lc_, "bob hat cap")
         assert "default look" in look_cmd(lc_, "claude reset") and lc_["looks"] == {}
     assert "nextSkin" in OFFICE_HTML and "data.looks" in OFFICE_HTML
+    # Discord/Slack bridge: topics above Telegram's range route through
+    # bridge_post, formatting and buttons translate, events become updates.
+    dt_, st_t_ = str(2 ** 41 + 7), str(2 ** 62 + 9)
+    assert bridge_of("5") is None and bridge_of(dt_) == "discord" and bridge_of(st_t_) == "slack"
+    assert tg_md("<pre>a &lt;b&gt; &amp;</pre>", "discord") == "```\na <b> &\n```"
+    assert tg_md("<pre>a &lt;b&gt;</pre>", "slack") == "```\na &lt;b&gt;\n```"
+    assert tg_md('<b>x</b> <a href="https://u">l</a>', "discord") == "**x** [l](https://u)"
+    rows_ = json.loads(kb([[("yes", "!1"), ("site", "https://e.x")]]))["inline_keyboard"]
+    assert dc_rows(rows_) == [{"type": 1, "components": [
+        {"type": 2, "style": 2, "label": "yes", "custom_id": "!1"},
+        {"type": 2, "style": 5, "label": "site", "url": "https://e.x"}]}]
+    assert sl_blocks("t", rows_)[1]["elements"][0]["value"] == "!1" and "url" in sl_blocks("t", rows_)[1]["elements"][1]
+    dcalls_, scalls_, disp_ = [], [], []
+    bcfg_ = {"discord": {"token": "x", "forum": "900"}, "slack": {"bot_token": "b", "app_token": "a"},
+             "chat_id": "c", "topics": {}, "slack_channels": {st_t_: "C1"}}
+    ids_ = iter(range(10 ** 18, 10 ** 18 + 99))
+    # api() and send() are stubbed by now; _post is where the bridge sits
+    bapi_ = lambda m, **kw: _post(bcfg_, m, urllib.parse.urlencode(
+        {k: v for k, v in kw.items() if v is not None}).encode())
+
+    def fake_dapi_(c, m, path, body=None, raw_type=None):
+        dcalls_.append((m, path, body))
+        return {"id": str(next(ids_))} if m == "POST" else {}
+
+    def fake_sapi_(c, m, body=None, token=None):
+        scalls_.append((m, body))
+        return {"ok": True, "ts": "171.0001", "channel": {"name": "shop"}}
+    with stubbed(discord_api=fake_dapi_, slack_api=fake_sapi_, save_cfg=lambda c: None,
+                 dispatch=lambda c, s, l, a, u, k: disp_.append(u)):
+        mid_ = bapi_("sendMessage", chat_id="c", message_thread_id=dt_, text="<pre>" + "x" * 3000
+                   + "</pre>", parse_mode="HTML", reply_markup=kb([[("ok", "!1")]]))["result"]["message_id"]
+        assert [c[0] for c in dcalls_] == ["POST", "POST"] and mid_ == 10 ** 18 + 1, dcalls_
+        assert dcalls_[0][2]["content"].endswith("```") and dcalls_[1][2]["content"].startswith("```")
+        assert "components" in dcalls_[1][2] and "components" not in dcalls_[0][2]
+        bapi_("editMessageText", chat_id="c", message_id=mid_, text="<b>done</b>", parse_mode="HTML")
+        assert dcalls_[-1][0] == "PATCH" and dcalls_[-1][2]["content"] == "**done**", dcalls_[-1]
+        bapi_("setMessageReaction", chat_id="c", message_id=mid_,
+              reaction=json.dumps([{"type": "emoji", "emoji": "👀"}]))
+        assert dcalls_[-1][0] == "PUT" and "/reactions/" in dcalls_[-1][1]
+        assert bapi_("answerCallbackQuery", callback_query_id="dc:1")["ok"]
+        smid_ = bapi_("sendMessage", chat_id="c", message_thread_id=st_t_, text=html.escape("hi & bye"),
+                    parse_mode="HTML", reply_markup=kb([[("ok", "!1")]]))["result"]["message_id"]
+        assert scalls_[-1][0] == "chat.postMessage" and scalls_[-1][1]["channel"] == "C1"
+        assert scalls_[-1][1]["text"] == "hi &amp; bye" and scalls_[-1][1]["blocks"][1]["type"] == "actions"
+        bapi_("deleteMessage", chat_id="c", message_id=smid_)
+        assert scalls_[-1] == ("chat.delete", {"channel": "C1", "ts": "171.0001"})
+        assert bapi_("getMe") == {}             # no Telegram token, not a bridge call
+        # inbound: a new forum post names the topic, its messages and taps dispatch
+        discord_event(bcfg_, {}, None, set(), "THREAD_CREATE", {"id": dt_, "parent_id": "900", "name": "shop"})
+        discord_event(bcfg_, {}, None, set(), "MESSAGE_CREATE", {"id": "55", "channel_id": dt_,
+                      "content": "fix it", "author": {"id": "77", "username": "me"},
+                      "attachments": [{"url": "https://cdn/x.png"}]})
+        discord_event(bcfg_, {}, None, set(), "MESSAGE_CREATE", {"id": "56", "channel_id": "123",
+                      "content": "elsewhere", "author": {"id": "77"}})
+        discord_event(bcfg_, {}, None, set(), "MESSAGE_CREATE", {"id": "57", "channel_id": dt_,
+                      "content": "me again", "author": {"id": "1", "bot": True}})
+        assert disp_[0]["message"]["forum_topic_created"] == {"name": "shop"} and len(disp_) == 2, disp_
+        m_ = disp_[1]["message"]
+        assert (m_["message_thread_id"], m_["from"]["id"], m_["text"]) == (int(dt_), 77, "fix it\nhttps://cdn/x.png")
+        with stubbed(_bridge_http=lambda *a: {}):
+            discord_event(bcfg_, {}, None, set(), "INTERACTION_CREATE", {"type": 3, "id": "9", "token": "t",
+                          "channel_id": dt_, "message": {"id": "58"}, "data": {"custom_id": "!1"},
+                          "member": {"user": {"id": "77"}}})
+        assert disp_[-1]["callback_query"]["data"] == "!1" and disp_[-1]["callback_query"]["id"] == "dc:9"
+        disp_.clear()
+        slack_event(bcfg_, {}, None, set(), {"type": "events_api", "payload": {"event": {
+            "type": "message", "channel": "C9", "user": "U1", "text": "see <https://x.y|x.y> &amp; go",
+            "ts": "1.2"}}})
+        assert disp_[0]["message"]["forum_topic_created"] == {"name": "shop"}
+        assert disp_[1]["message"]["text"] == "see https://x.y & go" and disp_[1]["message"]["from"]["id"] == "U1"
+        assert bridge_of(disp_[1]["message"]["message_thread_id"]) == "slack"
+    # The websocket client against a local server: fragments, a 126-length
+    # frame, ping answered with pong, masked client frames, close.
+    import socket
+    srv_ = socket.socket()
+    srv_.bind(("127.0.0.1", 0))
+    srv_.listen(1)
+    got_ws_ = []
+
+    def ws_server_():
+        c, _ = srv_.accept()
+        h = b""
+        while b"\r\n\r\n" not in h:
+            h += c.recv(1)
+        c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+        body = ("é" * 150).encode()
+        c.sendall(bytes([0x01, 126]) + struct.pack(">H", 100) + body[:100])
+        c.sendall(bytes([0x89, 2]) + b"hi")                          # ping mid-message
+        c.sendall(bytes([0x80, 126]) + struct.pack(">H", len(body) - 100) + body[100:])
+        for _ in range(2):
+            hh = c.recv(2)
+            n = hh[1] & 0x7F
+            mk = c.recv(4)
+            got_ws_.append((hh[0] & 0x0F, bytes(b ^ mk[i % 4] for i, b in enumerate(c.recv(n)))))
+        c.sendall(bytes([0x88, 0]))
+        c.close()
+    threading.Thread(target=ws_server_, daemon=True).start()
+    w_ = WS(f"ws://127.0.0.1:{srv_.getsockname()[1]}/x", timeout=5)
+    assert w_.recv() == "é" * 150
+    w_.send("hello")
+    assert w_.recv() is None and got_ws_ == [(0xA, b"hi"), (1, b"hello")], got_ws_
+    w_.close()
+    srv_.close()
     # team: watch reads, prompt talks but runs no admin commands, audit redacts.
     tc_ = {"allow_users": [1, 2, 3], "roles": {"2": "watch", "3": "prompt"}, "topics": {}}
     assert role_denied(tc_, 1, "!kill") is None

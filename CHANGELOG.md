@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- Discord and Slack (experimental): a Discord forum post or a Slack channel is a topic, beside Telegram or instead of it. Messages, buttons (as Discord components / Slack Block Kit), edits, reactions and file uploads go through the same code; incoming messages and taps arrive over the Discord gateway and Slack Socket Mode with a small stdlib websocket client — no public URL. Setup in the guide.
 - Team roles and an audit log: `!team <user id> watch|prompt|admin` — watch reads only, prompt talks to agents and answers menus but runs no admin commands, admin is everything (and the default). With a role set, every message and tap goes to `~/.nightmux-state/audit.log`, redacted; `!audit [n]` reads it. See SECURITY.md.
 - Office skins and avatars: 🎨 in the office cycles night, sunset, matrix, gameboy, vapor and mono (remembered per browser, or `?skin=`), and `!look <agent> shirt #hex hair #hex skin #hex hat cap|hood|headset|beanie|none` dresses an agent's avatar for everyone; `!look <agent> reset` undoes it.
 - Night replay: the office records a frame whenever a desk changes state (states only, no screen text, the last 24 hours in `~/.nightmux-state/replay.jsonl`), and **⏪ last night** (`/office?replay`) scrubs or plays through it with the room's clock and sky following along. It opens at 22:00 last night.
