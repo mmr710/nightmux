@@ -26,7 +26,6 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 
@@ -53,6 +52,9 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        s.setSupportZoom(true);                  // pinch the office up close
+        s.setBuiltInZoomControls(true);
+        s.setDisplayZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setUserAgentString(s.getUserAgentString() + " NightmuxApp/" + BuildConfig.VERSION_NAME);
         web.setWebViewClient(new Client());
@@ -63,7 +65,7 @@ public class MainActivity extends Activity {
         bar.setBackgroundColor(Color.parseColor("#11151f"));
         for (String[] t : TABS) bar.addView(button(t[0], v -> go(t[1])));
         bar.addView(button("☾", v -> setAmbient(true)));
-        bar.addView(button("⚙", v -> askServer(base())));
+        bar.addView(button("⚙", v -> menu()));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -108,38 +110,66 @@ public class MainActivity extends Activity {
         return u;
     }
 
-    void askServer(String current) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(48, 8, 48, 0);
-        EditText e = new EditText(this);
-        e.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-        e.setHint("https://box.tailnet.ts.net  or  100.64.0.1:9090");
-        e.setText(current);
-        CheckBox alerts = new CheckBox(this);
-        alerts.setText("Alerts: done, needs you, limits (also feeds the widget live)");
-        alerts.setChecked(prefs.getBoolean("alerts", false));
-        box.addView(e);
-        box.addView(alerts);
+    /** Saved servers, one per line; "url" is the one on screen, watched for alerts and the widget. */
+    java.util.List<String> servers() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String u : prefs.getString("servers", "").split("\n")) if (!u.isEmpty() && !out.contains(u)) out.add(u);
+        if (!base().isEmpty() && !out.contains(base())) out.add(0, base());
+        return out;
+    }
+
+    void menu() {
+        java.util.List<String> sv = servers(), items = new java.util.ArrayList<>();
+        for (String u : sv) items.add((u.equals(base()) ? "● " : "○ ") + u.replaceFirst("^https?://", ""));
+        boolean on = prefs.getBoolean("alerts", false);
+        items.add("+ Add a server");
+        items.add(on ? "🔔 Alerts on — turn off" : "🔕 Alerts off — turn on");
+        if (sv.size() > 1) items.add("✕ Forget " + base().replaceFirst("^https?://", ""));
         new AlertDialog.Builder(this)
-                .setTitle("nightmux server")
-                .setMessage("The address of your dashboard. Reach it over Tailscale or your LAN; "
-                        + "nightmux has no login of its own, so never expose it to the open internet.")
-                .setView(box)
-                .setCancelable(!base().isEmpty())
-                .setPositiveButton("Connect", (d, w) -> {
-                    prefs.edit().putBoolean("alerts", alerts.isChecked()).apply();
-                    if (alerts.isChecked() && android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                            != PackageManager.PERMISSION_GRANTED)
-                        requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFY);
-                    save(clean(e.getText().toString()));
+                .setTitle("nightmux")
+                .setItems(items.toArray(new String[0]), (d, w) -> {
+                    if (w < sv.size()) save(sv.get(w));
+                    else if (w == sv.size()) askServer("");
+                    else if (w == sv.size() + 1) setAlerts(!on);
+                    else {
+                        sv.remove(base());
+                        prefs.edit().putString("servers", String.join("\n", sv)).apply();
+                        save(sv.get(0));
+                    }
                 })
                 .show();
     }
 
+    void setAlerts(boolean on) {
+        prefs.edit().putBoolean("alerts", on).apply();
+        if (on && android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFY);
+        else AlertService.sync(this);
+    }
+
+    void askServer(String current) {
+        EditText e = new EditText(this);
+        e.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        e.setHint("https://box.tailnet.ts.net  or  100.64.0.1:9090");
+        e.setText(current);
+        new AlertDialog.Builder(this)
+                .setTitle("nightmux server")
+                .setMessage("The address of your dashboard. Reach it over Tailscale or your LAN; "
+                        + "nightmux has no login of its own, so never expose it to the open internet.\n\n"
+                        + "Quicker: open /app on the dashboard and scan its QR code.")
+                .setView(e)
+                .setCancelable(!base().isEmpty())
+                .setPositiveButton("Connect", (d, w) -> save(clean(e.getText().toString())))
+                .show();
+    }
+
+    /** Switch to url, remembering it. Alerts and the widget follow the server on screen. */
     void save(String url) {
         if (url.isEmpty()) { askServer(""); return; }
-        prefs.edit().putString("url", url).apply();
+        java.util.List<String> sv = servers();
+        if (!sv.contains(url)) sv.add(url);
+        prefs.edit().putString("url", url).putString("servers", String.join("\n", sv)).apply();
         AlertService.sync(this);
         web.clearHistory();
         go(prefs.getString("tab", "/office"));
