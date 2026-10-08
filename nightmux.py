@@ -11672,7 +11672,7 @@ def selfcheck():
             api=fake_api, spawn=lambda n, *a: up_.add(n), save_cfg=lambda c: None,
             has_session=lambda n: n in up_,
             send=lambda *a, **k: None, tmux=lambda *a: killed_.append(a)):
-        mcfg_, mst_, mlk_ = {"chat_id": -9, "topics": {}, "projects_root": mr_}, {}, threading.Lock()
+        mcfg_, mst_, mlk_ = {"chat_id": -9, "token": "t", "topics": {}, "projects_root": mr_}, {}, threading.Lock()
         ok_, msg_, t_ = topic_new(mcfg_, mst_, mlk_, "Habit tracker", "habit-tracker", "", "claude",
                                   idea="streaks")
         assert ok_ and t_ == "321" and mcfg_["topics"]["321"] == "habit-tracker", msg_
