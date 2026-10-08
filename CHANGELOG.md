@@ -7,6 +7,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- `!wrapped` now sends two cards: one with project names for you, and a shareable one that shows projects as counts only. The tweet button is on the shareable one. It also shows tokens used, plus the share saved as a percentage for the card's own window, from a new daily savings ledger.
 
 - Discord and Slack (experimental): a Discord forum post or a Slack channel is a topic, beside Telegram or instead of it. Messages, buttons (as Discord components / Slack Block Kit), edits, reactions and file uploads go through the same code; incoming messages and taps arrive over the Discord gateway and Slack Socket Mode with a small stdlib websocket client — no public URL. Setup in the guide.
 - Team roles and an audit log: `!team <user id> watch|prompt|admin` — watch reads only, prompt talks to agents and answers menus but runs no admin commands, admin is everything (and the default). With a role set, every message and tap goes to `~/.nightmux-state/audit.log`, redacted; `!audit [n]` reads it. See SECURITY.md.
