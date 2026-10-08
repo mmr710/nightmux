@@ -3872,7 +3872,8 @@ HELP = [
         "!qa 03:00 [url] | now | off = the agent clicks through the app at night "
         "and files bugs as issues",
         "!loopguard [ping|auto|off] = notice an agent going in circles",
-        "!briefing [HH:MM|now|off] = one morning message: done, waiting, limits",
+        "!briefing [HH:MM|now|voice|off] = one morning message: done, waiting, limits "
+        "(voice: also read aloud)",
         "!digest [HH:MM|off] = what happened while you slept",
     ]),
     ("team", "👥 Several agents at once", [
@@ -8227,6 +8228,44 @@ def briefing_text(cfg, state, since):
     return "\n".join(lines)
 
 
+def spoken(text):
+    """The briefing as something to read aloud: no emoji, no bullets, PRs said as PRs."""
+    t = re.sub(r"#(\d+)", r"PR \1", text.replace("·", ",").replace("—", ","))
+    t = re.sub(r"[^\w\s.,:;%'()/+-]", " ", t)
+    t = re.sub(r":\n", ". ", t)
+    return re.sub(r"[ \t]+", " ", re.sub(r"\n+", ". ", t)).replace(" .", ".").strip()[:1500]
+
+
+def tts_ogg(cfg, text):
+    """Text -> OGG/Opus for a Telegram voice note, with whatever speaks on this
+    machine: the "tts" command (text on stdin, writes {out}), say, espeak-ng,
+    espeak, or ffmpeg's own flite. None when nothing can."""
+    import tempfile
+    if not shutil.which("ffmpeg"):
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        txt, wav, ogg = (os.path.join(d, n) for n in ("t.txt", "t.wav", "t.ogg"))
+        with open(txt, "w") as f:
+            f.write(text)
+        es = shutil.which("espeak-ng") or shutil.which("espeak")
+        if cfg.get("tts"):
+            with open(txt) as f:
+                subprocess.run(cfg["tts"].replace("{out}", shlex.quote(wav)), shell=True, stdin=f,
+                               capture_output=True, timeout=180)
+        elif shutil.which("say"):
+            run("say", "-f", txt, "-o", wav, "--data-format=LEI16@22050", timeout=180)
+        elif es:
+            run(es, "-f", txt, "-w", wav, timeout=180)
+        src = (["-i", wav] if os.path.exists(wav) and os.path.getsize(wav) else
+               ["-f", "lavfi", "-i", f"flite=textfile={txt}:voice=slt"])
+        run("ffmpeg", "-y", "-loglevel", "error", *src, "-c:a", "libopus", "-b:a", "32k", ogg,
+            timeout=180)
+        if os.path.exists(ogg) and os.path.getsize(ogg):
+            with open(ogg, "rb") as f:
+                return f.read()
+    return None
+
+
 def briefing_send(cfg, state, topic, since):
     if _brief["busy"]:
         return
@@ -8234,8 +8273,16 @@ def briefing_send(cfg, state, topic, since):
 
     def go():
         try:
-            send(cfg, topic, briefing_text(cfg, state, since), mode="mono",
+            text = briefing_text(cfg, state, since)
+            send(cfg, topic, text, mode="mono",
                  buttons=kb([[("🎬 night reel", "!reel 12"), ("📊 stats", "!stats 1")]]))
+            if (cfg.get("briefing") or {}).get("voice"):
+                ogg = tts_ogg(cfg, "Good morning. " + spoken(text.split("\n", 1)[-1]))
+                if ogg:
+                    send_file(cfg, topic, "briefing.ogg", ogg, kind="voice")
+                else:
+                    send(cfg, topic, "🔇 nothing here can speak: install espeak-ng (or ffmpeg "
+                         'with flite), or set "tts" in the config', mode="plain")
         finally:
             _brief["busy"] = False
     threading.Thread(target=go, daemon=True).start()
@@ -8257,6 +8304,12 @@ def briefing_tick(cfg, state, lock):
 
 
 def briefing_cmd(cfg, state, lock, topic, arg):
+    if arg == "voice":
+        with lock:
+            b = cfg.setdefault("briefing", {})
+            b["voice"] = not b.get("voice")
+            save_cfg(cfg)
+        return "☀️ briefing " + ("also as a voice note" if b["voice"] else "as text only")
     if arg == "off":
         with lock:
             cfg.pop("briefing", None)
@@ -8264,7 +8317,7 @@ def briefing_cmd(cfg, state, lock, topic, arg):
         return "☀️ briefing off"
     if re.match(r"^\d{1,2}:\d{2}$", arg):
         with lock:
-            cfg["briefing"] = {"at": arg, "topic": str(topic)}
+            cfg["briefing"] = dict(cfg.get("briefing") or {}, at=arg, topic=str(topic))
             save_cfg(cfg)
         return f"☀️ a briefing every morning at {arg}, here — !briefing now for one now"
     briefing_send(cfg, state, topic, time.time() - 12 * 3600)
@@ -12710,6 +12763,16 @@ def selfcheck():
     assert got_[0]["event"] == "needs_input" and got_[0]["name"] == "shop", got_
     assert got_[0]["text"].startswith("Run rm?") and "more" not in got_[0]["text"], got_
     assert "b" * 36 not in got_[0]["text"] and got_[1]["event"] == "test", got_
+    # Voice briefing: speakable text, and a real voice note where ffmpeg can speak.
+    sp_ = spoken("☀️ briefing · since 19:30\n\ndone overnight:\n  shop #12 fix login — ready to merge")
+    assert "PR 12" in sp_ and "☀" not in sp_ and "\n" not in sp_, sp_
+    with stubbed(save_cfg=lambda c: None):
+        bc_ = {}
+        assert "voice note" in briefing_cmd(bc_, {}, threading.Lock(), "5", "voice")
+        briefing_cmd(bc_, {}, threading.Lock(), "5", "07:30")
+        assert bc_["briefing"] == {"voice": True, "at": "07:30", "topic": "5"}, bc_
+    og_ = tts_ogg({}, "good morning")
+    assert og_ is None or og_[:4] == b"OggS", og_[:8]
     # --mcp: the tools read the daemon's own API and refuse nightmux commands.
     base_ = f"http://127.0.0.1:{port_}"
     assert "5: o" in nm_call("list_topics", {}, base_)[0]["text"]

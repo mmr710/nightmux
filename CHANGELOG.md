@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!briefing voice`: the morning briefing also arrives as a voice note. Uses whatever speaks on the machine — a `"tts"` command from the config (text on stdin, writes `{out}`; e.g. piper), macOS `say`, espeak-ng, or ffmpeg's built-in flite — and ffmpeg for Opus.
 - `!events <url>`: a JSON POST on `needs_input`, `done`, `limit`, `resumed` and `budget` — for Home Assistant, smart lights, or anything with a webhook. First line only, redacted; fire-and-forget on its own thread. `!events test` / `off`. Guide has a Home Assistant automation.
 - `nightmux --mcp`: nightmux as a stdio MCP server. Any MCP client can `list_topics`, `read_terminal`, `read_chat` and `send_prompt` (queued like a prompt from your phone); `!` commands are not exposed. A thin client over the running daemon's local API. See the guide.
 - `!budget <50M> [day|week|month]`: a token allowance per project, in the same base-equivalent tokens as `!cost`. A warning at 80%; at 100% the turn in flight finishes and new prompts queue (on every agent of the topic) until the period rolls over in your `tz_offset`. `!budget` shows where you are, `!budget off` lifts it. Claude Code sessions only — the tokens come from their transcripts.
