@@ -8,6 +8,9 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- The office: the window follows your clock (night, dawn, day, dusk; `?hour=` previews), agents on a break together chat, hand-offs get a "yours" / "got it", optional sounds (🔈) for done, asking and limit, and tapping an agent shows its last 24 terminal lines.
+- Android app: several servers (⚙ to switch, add, forget), pinch-zoom, and store listing metadata in `fastlane/metadata/android/` for F-Droid and Play.
+
 - An Android app (`android/`, `nightmux.apk` on every release): office, chat and dashboard in one app, opt-in alerts when an agent finishes, needs you or hits its limit, answering a menu from the notification, a home-screen widget, and an ambient mode that keeps the office on screen. `/app` on the dashboard pairs it with a QR code.
 
 ### Changed
