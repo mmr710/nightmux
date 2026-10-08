@@ -265,10 +265,12 @@ function station(R, g, x0, d, f, o) {
   if (!sip && sit) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
     if (st === 'idle' && f % 6 < 3) R('rgba(230,233,242,.5)', x0 + 24, 83 + f % 3, 1, 2); }
   if (sit) {
-    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72;
+    const ph = (d.agent.length * 17 + x0) % 61, look = st === 'busy' && (f + ph) % 45 < 4 ? 1 : 0;
+    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72 + look;
+    const blink = !sleep && (f + ph) % 52 === 0;
     const sx = tx + 6, sy = ty + 2, sk = L.skin;
     if (sleep) { R(L.shirt, x0 + 21, 88, 12, 3); R(L.shade, x0 + 21, 90, 12, 1); }
-    spr(R, sleep ? HEAD.map(r => r.replace('E', 'S')) : HEAD, hx, hy, pal);
+    spr(R, sleep || blink ? SHUT : HEAD, hx, hy, pal);
     hat(R, L, hx, hy);
     if (st === 'busy') { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 6, 2); R(sk, sx + 7, sy + 5 - f % 2, 2, 2); R(L.shade, sx + 3, sy + 6, 4, 1); R(sk, sx + 10, sy + 6 - (f + 1) % 2, 2, 1); }
     else if (st === 'waiting') { R(L.shirt, sx, sy - 14, 2, 16); R(sk, sx + (f % 6 < 3 ? 0 : 1), sy - 16, 2, 2); }
@@ -301,12 +303,20 @@ function station(R, g, x0, d, f, o) {
 // the frame and when the state last changed, so reel and demo frames replay.
 const LW = 112, SPEED = DEMO ? 3 : 2, GRACE = DEMO ? 6 : 24, DWELL = DEMO ? [4, 20] : [30, 70];
 const SPOT = {wc: 9, coffee: 30, tv1: 52, tv2: 68, bed: 90, couch: 50};
+// A walk speeds up out of the chair and slows into the spot (half pace at either
+// end, half again in the middle), and each agent has its own stride.
+const RISE = 4;
+function stroll(a, b, u, pace) {                // where a walk from a to b is u frames in, or null
+  const dist = Math.abs(b - a), w = dist / pace;
+  if (u >= w) return null;
+  const s = u / w, e = s - Math.sin(2 * Math.PI * s) / (4 * Math.PI);
+  return {x: a + Math.sign(b - a) * dist * e, pose: 'walk', dir: Math.sign(b - a), walked: dist * e};
+}
 function plan(d, i, f, L0, x0) {
-  const t = f - (d.since || 0), home = x0 + 15;
-  const go = (tx, u, pose, spot) => {          // walk there, do the thing
-    const dist = Math.abs(tx - home), w = dist / SPEED;
-    return u < w ? {x: home + Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(tx - home)}
-                 : {x: tx, pose, spot};
+  const t = f - (d.since || 0), home = x0 + 15, pace = SPEED * (.85 + (i * 0.13) % .3);
+  const go = (tx, u, pose, spot) => {          // stand up, walk there, do the thing
+    if (u < RISE) return {x: home, pose: 'rise', dir: Math.sign(tx - home)};
+    return stroll(home, tx, u - RISE, pace) || {x: tx, pose, spot};
   };
   if (d.state === 'limit') {
     if (t < 14) return null;                     // slumps first, then gives up and goes to bed
@@ -317,17 +327,19 @@ function plan(d, i, f, L0, x0) {
   let u = u0 % P;
   const spot = ['coffee', 'tv', 'wc', 'tv', 'coffee', 'wc'][(c + i * 2) % 6];
   const tx = L0 + SPOT[spot === 'tv' ? (i % 2 ? 'tv2' : 'tv1') : spot];
-  const walk = Math.abs(tx - home) / SPEED, desk = DWELL[0] + (i * 37) % DWELL[1];
+  const walk = Math.abs(tx - home) / pace + RISE, desk = DWELL[0] + (i * 37) % DWELL[1];
   const stay = P - desk - 2 * walk;
   if (stay < 40 || u < desk) return null;
   u -= desk;
   if (u < walk + stay) return go(tx, u, spot === 'tv' ? 'sit' : spot === 'wc' ? 'in' : 'stand', spot);
   u -= walk + stay;
-  return u < walk ? {x: tx - Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(home - tx)} : null;
+  return stroll(tx, home, u, pace);
 }
 
-function hat(R, L, hx, hy) {
-  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
+const SHUT = HEAD.map(r => r.replace('E', 'S'));
+const HEADL = HEAD.map(r => [...r].reverse().join(''));         // facing left
+function hat(R, L, hx, hy, left) {
+  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, left ? hx - 1 : hx + 5, hy + 2, 3, 1); }
   if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
   if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
   if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
@@ -383,12 +395,23 @@ function actor(R, d, a, f, i) {
     if (f % 60 < 30) R(L.skin, x + 7, 96, 2, 2);             // hand to the snacks
     return;
   }
-  const step = a.pose === 'walk' ? (Math.floor(x / 3) % 2) : 0;
-  spr(R, HEAD, x, 77, pal); hat(R, L, x, 77);
-  spr(R, TORSO.slice(0, 8), x - 1, 85, pal); R('#2a2f45', x - 1, 93, 8, 3);
-  R('#2a2f45', x + (step ? 0 : 1), 96, 3, 17); R('#2a2f45', x + (step ? 4 : 3), 96, 3, 17);
-  R('#0b0d14', x + (step ? -1 : 0), 113, 4, 2); R('#0b0d14', x + (step ? 4 : 3), 113, 4, 2);
-  if (a.pose === 'walk') R(L.skin, x + (a.dir > 0 ? 6 : -1), 90 + step, 2, 2);
+  // Four-beat stride from the distance covered, so feet never skate: contact,
+  // passing (body up a pixel), the other contact, passing. Arms swing opposite.
+  const ph = a.pose === 'walk' ? Math.floor((a.walked || 0) / 2.5) % 4 : -1, up = ph % 2 === 1 ? 1 : 0,
+    left = a.dir < 0, y0 = (a.pose === 'rise' ? 1 : 0) - up, fwd = left ? -1 : 1;
+  const legs = ph === 0 ? [2, -1] : ph === 2 ? [-1, 2] : [0, 0];
+  R('rgba(0,0,0,.3)', x - 2 + (ph === 0 || ph === 2 ? -1 : 0), 114, 11 + (ph === 0 || ph === 2 ? 2 : 0), 2);
+  spr(R, left ? HEADL : HEAD, x, 77 + y0, pal); hat(R, L, x, 77 + y0, left);
+  spr(R, TORSO.slice(0, 8), x - 1, 85 + y0, pal); R('#2a2f45', x - 1, 93 + y0, 8, 3);
+  for (const [k, lx] of [[0, 1], [1, 3]]) {
+    const o = legs[k] * fwd, lift = ph >= 0 && legs[k] < 0 ? 1 : 0;
+    R('#2a2f45', x + lx + o, 96 + y0, 3, 17 - y0 - lift); R('#0b0d14', x + lx + o + (left ? -1 : 0), 113 - lift, 4, 2);
+  }
+  if (a.pose === 'walk') {
+    const sw = ph === 0 ? -1 : ph === 2 ? 1 : 0;
+    R(L.shade, x + (left ? 5 : 0) + sw * fwd, 88 + y0, 2, 5); R(L.skin, x + (left ? 5 : 0) + sw * fwd, 93 + y0, 2, 2);
+    R(L.skin, x + (left ? -1 : 6) - sw * fwd, 90 + y0 + (sw ? 0 : 1), 2, 2);
+  }
   if (a.pose === 'stand') { const sip = f % 40 < 14;           // coffee in hand
     R(L.shirt, x + 6, sip ? 84 : 88, 2, sip ? 6 : 4); R('#e6e9f2', x + 7, sip ? 82 : 91, 3, 4); }
 }
@@ -421,7 +444,8 @@ function effects(R, room, pad, f, fx) {
   }
 }
 
-function drawRoom(cv, room, f, o) {
+function drawRoom(cv, room, F, o) {
+  const f = Math.floor(F);   // poses and flicker step by frame; walking and dust use F
   const n = room.desks.length, w = Math.max(256, n * SW + LW), h = RH + (o.caption != null ? 16 : 0);
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const g = cv.getContext('2d');
@@ -429,20 +453,26 @@ function drawRoom(cv, room, f, o) {
   const R = (c, x, y, ww, hh) => { if (ww > 0 && hh > 0) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh)); } };
   const pad = Math.round((w - n * SW - LW) / 2), L0 = pad + n * SW;
   o.pad = pad;
-  const away = room.desks.map((d, i) => (d.away = plan(d, i, f, L0, pad + i * SW)));
+  const away = room.desks.map((d, i) => (d.away = plan(d, i, F, L0, pad + i * SW)));
   const occ = {wc: away.some(a => a && a.pose === 'in'), coffee: away.some(a => a && a.pose === 'stand'),
                tv: away.some(a => a && a.pose === 'sit')};
   backdrop(R, g, w, f, o);
   lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
   room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
+  room.desks.forEach((d, i) => { if (!d.live) return;          // dust drifting through the lamp light
+    const x0 = pad + i * SW;
+    for (let k = 0; k < 5; k++) {
+      const y = 12 + ((F * .25 + k * 11) % 44), x = x0 + 33 + Math.sin(F * .03 + k * 2.1) * (6 + y / 5);
+      R('rgba(255,226,170,' + (.45 * Math.sin(Math.PI * (y - 12) / 44)).toFixed(2) + ')', x, 56 + y, 1, 1);
+    } });
   for (const spot of ['coffee', 'tv']) {            // two on a break together get talking
     const here = away.filter(a => a && a.spot === spot && a.pose !== 'walk');
     if (here.length < 2 || f % 40 >= 28) continue;
     const k = Math.floor(f / 40), a = here[k % here.length];
     bubble(R, a.x - 4, spot === 'tv' ? 66 : 58, '?!·#'[k % 4], '#3b4261', (f >> 2) % 2);
   }
-  effects(R, room, pad, f, o.fx);
+  effects(R, room, pad, F, o.fx);
   if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn * (1 - (o.day || 0))) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
@@ -720,7 +750,14 @@ if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
-setInterval(() => { if (auto) { frame++; draw(); } }, 110);
+// The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
+// walk moves a pixel at a time instead of hopping two.
+let lastT = 0;
+(function loop(now) {
+  requestAnimationFrame(loop);
+  if (!auto || now - lastT < 33) { if (!auto) lastT = now; return; }
+  frame += Math.min(now - lastT, 250) / 110; lastT = now; draw();
+})(0);
 draw();
 </script>
 </body></html>
