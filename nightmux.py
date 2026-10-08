@@ -3953,7 +3953,9 @@ HELP = [
         "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages",
     ]),
     ("see", "👀 Watch and share", [
-        "!office = the live office: a room per topic, a desk per agent",
+        "!office = the live office: a room per topic, a desk per agent · 🎨 there "
+        "cycles skins",
+        "!look <agent> shirt #hex hat cap | reset = dress that agent's avatar",
         "!events <url> | test | off = POST needs_input/done/limit/resumed to a URL "
         "(Home Assistant, lights)",
         "!status | !board | !log (daemon journal) | !grep <text> [days]",
@@ -4085,6 +4087,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
         return public_cmd(cfg, lock, topic, arg)
+    if cmd == "!look":
+        return look_cmd(cfg, arg)
     if cmd == "!relay":
         return relay_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!arena":
@@ -8088,6 +8092,40 @@ def replay_tick(cfg, state, now=None):
         print(f"replay: {e}", file=sys.stderr)
 
 
+LOOK_HATS = ("none", "hood", "cap", "headset", "beanie")
+
+
+def look_cmd(cfg, arg):
+    """!look <agent> [shirt|hair|skin #hex] [hat <kind>] | reset: dress a desk in the office."""
+    w = arg.split()
+    looks = cfg.setdefault("looks", {})
+    if not w:
+        return ("👕 !look <agent> shirt #d97757 hair #4a2f22 skin #f2c79b hat cap · "
+                "!look <agent> reset\nhats: " + ", ".join(LOOK_HATS)
+                + "".join(f"\n{k}: " + " ".join(f"{a} {b}" for a, b in v.items()) for k, v in looks.items()))
+    key = w[0].lower()
+    if key not in agents(cfg):
+        return f"no agent '{key}' — have: {', '.join(agents(cfg))}"
+    if w[1:] == ["reset"]:
+        looks.pop(key, None)
+    else:
+        new = dict(looks.get(key) or {})
+        for part, val in zip(w[1::2], w[2::2]):
+            part, val = part.lower(), val.lower()
+            if part in ("shirt", "hair", "skin") and re.fullmatch(r"#[0-9a-f]{6}", val):
+                new[part] = val
+                if part == "shirt":    # the shadow side of the shirt, a step darker
+                    new["shade"] = "#" + "".join(f"{int(int(val[i:i + 2], 16) * .7):02x}" for i in (1, 3, 5))
+            elif part == "hat" and val in LOOK_HATS:
+                new["hat"] = val
+            else:
+                return f"can't set {part} to {val} · colours are #rrggbb, hats: {', '.join(LOOK_HATS)}"
+        looks[key] = new
+    save_cfg(cfg)
+    return f"👕 {key}: " + (" ".join(f"{a} {b}" for a, b in looks[key].items()) if key in looks else "default look") \
+        + " · the office picks it up on its next refresh"
+
+
 def office_snapshot(cfg, state):
     """Every topic as a room, every agent on its bench as a desk.
 
@@ -8126,7 +8164,7 @@ def office_snapshot(cfg, state):
             desks.append(desk)
         rooms.append({"topic": topic, "name": names.get(topic) or cur, "desks": desks})
     fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
-    return {"rooms": rooms, "installed": installed_agents(cfg), "now": now,
+    return {"rooms": rooms, "installed": installed_agents(cfg), "now": now, "looks": cfg.get("looks") or {},
             "usage": {k: (window(fresh, k) or {}).get("used_percentage")
                       for k in ("five_hour", "seven_day")}}
 
@@ -9988,6 +10026,11 @@ main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(a
 .room h2{font-size:12px;margin:0;padding:6px 10px;background:#141a2e;display:flex;justify-content:space-between;gap:8px}
 .room h2 .tid{color:#565f89}
 canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer}
+[data-skin=sunset] canvas{filter:sepia(.45) saturate(1.5) hue-rotate(-20deg)}
+[data-skin=matrix] canvas{filter:grayscale(1) sepia(1) hue-rotate(70deg) saturate(3) brightness(.9)}
+[data-skin=gameboy] canvas{filter:grayscale(1) sepia(.8) hue-rotate(45deg) saturate(1.6) contrast(1.2)}
+[data-skin=vapor] canvas{filter:hue-rotate(200deg) saturate(1.5)}
+[data-skin=mono] canvas{filter:grayscale(1) contrast(1.15)}
 .chips{display:flex;flex-wrap:wrap;gap:4px;padding:6px}
 button{font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer}
 button.go{border-color:#9ece6a}
@@ -10017,6 +10060,7 @@ body.demo #stage{display:block}
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
 <span class="meter" id="clock"></span>
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
+<button class="snd" title="skin" onclick="nextSkin()">🎨</button>
 <span class="meter" id="srvs"></span>
 <nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
@@ -10502,6 +10546,17 @@ function beep(notes) {
   } catch (e) {}
 }
 const SOUND = {done: [[660, 0], [880, .1]], waiting: [[988, 0], [988, .16]], limit: [[330, 0], [247, .14]]};
+// Skins: a colour grade over every canvas — the art stays, the mood changes.
+const SKINS = ['night', 'sunset', 'matrix', 'gameboy', 'vapor', 'mono'];
+let skin = Q.get('skin') || '';
+try { skin = skin || localStorage.getItem('nm-skin') || 'night'; } catch (e) { skin = skin || 'night'; }
+document.body.dataset.skin = skin;
+function nextSkin() {
+  skin = SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length];
+  document.body.dataset.skin = skin;
+  try { localStorage.setItem('nm-skin', skin); } catch (e) {}
+  toast('skin: ' + skin);
+}
 function toggleSound() {
   sound = !sound;
   try { localStorage.setItem('nm-sound', sound ? '1' : '0'); } catch (e) {}
@@ -10599,6 +10654,7 @@ async function send(topic, text) {
 async function poll() {
   try {
     data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
+    for (const [k, v] of Object.entries(data.looks || {})) LOOK[k] = Object.assign({}, look(k), v);
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
     const sv = data.servers || [];
@@ -13102,6 +13158,13 @@ def selfcheck():
         assert sum(1 for _ in open(replay_path())) == 4 and _replay["file_n"] == 4
     _replay.update(old_rp_)
     assert "?replay" in OFFICE_HTML and "/api/office/replay" in OFFICE_HTML
+    with stubbed(save_cfg=lambda c: None):
+        lc_ = {}
+        assert "👕 claude: shirt #ff0000 shade #b20000 hat cap" in look_cmd(lc_, "claude shirt #FF0000 hat cap")
+        assert "can't set" in look_cmd(lc_, "claude hat crown") and "can't set" in look_cmd(lc_, "claude shirt red")
+        assert lc_["looks"]["claude"]["hat"] == "cap" and "no agent" in look_cmd(lc_, "bob hat cap")
+        assert "default look" in look_cmd(lc_, "claude reset") and lc_["looks"] == {}
+    assert "nextSkin" in OFFICE_HTML and "data.looks" in OFFICE_HTML
     # !arena: judged races add up per agent and per kind of task.
     old_sav_ = dict(_sav)
     _sav["d"] = {"since": 0}
