@@ -1228,6 +1228,7 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     # Telegram message it is inferred from is not where you look at 3am.
     print(f"limit {sess}: {hit}, until {int(until)}, resume={cont!r}, "
           f"{st.get('why', 'mode=' + str(st.get('mode')))}", file=sys.stderr, flush=True)
+    event(cfg, "limit", topic, sess, hit)
     send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
          f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
          + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
@@ -1686,6 +1687,7 @@ def budget_tick(cfg, state, topic, sess):
             o = state.setdefault(s, {})
             o["limit_until"] = max(o.get("limit_until", 0), end)
         save_queue(state)
+        event(cfg, "budget", topic, sess)
         send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {_k(used)} of {_k(cap)} — "
              f"the turn in flight finishes, new prompts queue until {clock(cfg, end)}.\n"
              "!budget off or a bigger !budget to lift it", mode="plain")
@@ -1724,6 +1726,53 @@ def budget_cmd(cfg, state, topic, sess, arg):
     return (f"💸 {_k(used)} of {_k(b['tokens'])} this {b['per']} ({used / b['tokens']:.0%}) · "
             f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\nbase-equivalent tokens: "
             "cache reads count 0.1, output 5 — the same scale as !cost")
+
+
+# ---------- events: a webhook for lights, Home Assistant, anything ----------
+# One JSON POST per moment worth a glance — needs_input, done, limit, resumed,
+# budget — to "events_url". Fire and forget on its own thread: a slow lamp
+# must never stall the watcher. The text is the first line, redacted.
+EVENTS = ("needs_input", "done", "limit", "resumed", "budget", "test")
+
+
+def event(cfg, kind, topic, sess, text=""):
+    url = cfg.get("events_url")
+    if not url:
+        return None
+    body = json.dumps({"event": kind, "topic": str(topic), "session": sess,
+                       "name": (cfg.get("topic_names") or {}).get(str(topic)) or sess,
+                       "text": redact((text or "").strip().split("\n")[0])[:160],
+                       "ts": int(time.time())}).encode()
+
+    def go():
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"}), timeout=5).close()
+        except (OSError, ValueError) as e:
+            print(f"event {kind} -> {url}: {e}", file=sys.stderr, flush=True)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t
+
+
+def events_cmd(cfg, topic, sess, arg):
+    if arg == "off":
+        cfg.pop("events_url", None)
+        save_cfg(cfg)
+        return "events off"
+    if arg == "test":
+        if not cfg.get("events_url"):
+            return "no events_url yet · !events <url>"
+        event(cfg, "test", topic, sess, "hello from nightmux").join(6)
+        return f"sent a test event to {cfg['events_url']} — the journal says if it failed"
+    if arg:
+        if not re.match(r"https?://\S+$", arg):
+            return "usage: !events <http(s) url> | test | off"
+        cfg["events_url"] = arg
+        save_cfg(cfg)
+    return ((f"events → {cfg['events_url']}\n" if cfg.get("events_url") else "no events_url · ")
+            + "POSTs JSON {event, topic, name, session, text, ts} on " + ", ".join(EVENTS[:-1])
+            + "\n!events <url> | test | off")
 
 
 def digest_report(cfg, state, topic, sess, since):
@@ -2018,6 +2067,8 @@ def drain(cfg, state, topic, sess):
         if held:
             sav_add("resumes")
         text = q.pop(0)
+        if held:
+            event(cfg, "resumed", topic, sess)
         send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
              f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
         # Every prompt that reaches here was sent by the daemon, not typed live
@@ -2260,6 +2311,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                 and not pair_review_capture(topic, sess, body) \
                 and not mem_reply_capture(cfg, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
+            event(cfg, "done", topic, sess, body)
             sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
@@ -2317,6 +2369,7 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     buttons = menu_buttons(lines, sess)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
+    event(cfg, "needs_input", topic, sess, body)
     if mid:
         msgs.append((topic, mid))
     center = cfg.get("center_topic")
@@ -3709,7 +3762,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!shift", "!center", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -3860,6 +3913,8 @@ HELP = [
     ]),
     ("see", "👀 Watch and share", [
         "!office = the live office: a room per topic, a desk per agent",
+        "!events <url> | test | off = POST needs_input/done/limit/resumed to a URL "
+        "(Home Assistant, lights)",
         "!status | !board | !log (daemon journal) | !grep <text> [days]",
         "!preview = the app this session serves, on your phone · "
         "!shot [:port][/path|url] = phone-size screenshot",
@@ -4285,6 +4340,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return (f"idle sessions above {at}% context flagged after "
                 f"{IDLE_PARK // 3600}h" if at else
                 f"idle-context hints off — !idlectx {IDLE_CTX} to enable")
+    if cmd == "!events":
+        return events_cmd(cfg, topic, sess, arg)
     if cmd == "!budget":
         return budget_cmd(cfg, state, topic, sess, arg)
     if cmd == "!cost":
@@ -12629,6 +12686,30 @@ def selfcheck():
         assert tl_["lines"][0] == "one" and "ghp_" + "a" * 36 not in json.dumps(tl_), tl_
         assert tl_["mode"] == "busy" and len(tl_["lines"]) == 2, tl_
     assert term_lines({"topics": {}}, {}, "7")["error"] == "topic not bound"
+    # events: one JSON POST per moment, redacted, and !events manages the URL.
+    got_ = []
+
+    class EvH(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got_.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    evs_ = http.server.HTTPServer(("127.0.0.1", 0), EvH)
+    threading.Thread(target=evs_.serve_forever, daemon=True).start()
+    ecfg_ = {"topics": {"5": "o"}, "topic_names": {"5": "shop"}}
+    with stubbed(save_cfg=lambda c: None):
+        assert "usage" in events_cmd(ecfg_, "5", "o", "ftp://x")
+        events_cmd(ecfg_, "5", "o", f"http://127.0.0.1:{evs_.server_port}/hook")
+        event(ecfg_, "needs_input", "5", "o", "Run rm? key ghp_" + "b" * 36 + "\nmore").join(6)
+        assert "test event" in events_cmd(ecfg_, "5", "o", "test")
+        assert events_cmd(ecfg_, "5", "o", "off") == "events off" and event(ecfg_, "done", "5", "o") is None
+    evs_.shutdown()
+    assert got_[0]["event"] == "needs_input" and got_[0]["name"] == "shop", got_
+    assert got_[0]["text"].startswith("Run rm?") and "more" not in got_[0]["text"], got_
+    assert "b" * 36 not in got_[0]["text"] and got_[1]["event"] == "test", got_
     # --mcp: the tools read the daemon's own API and refuse nightmux commands.
     base_ = f"http://127.0.0.1:{port_}"
     assert "5: o" in nm_call("list_topics", {}, base_)[0]["text"]

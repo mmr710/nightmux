@@ -89,6 +89,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 `!help see`
 
 - `!office` = the live office: a room per topic, a desk per agent
+- `!events <url>` | test | off = POST needs_input/done/limit/resumed to a URL (Home Assistant, lights)
 - `!status` | `!board` | `!log` (daemon journal) | `!grep <text> [days]`
 - `!preview` = the app this session serves, on your phone · `!shot [:port]`[`/path`|url] = phone-size screenshot
 - `!tools [add|rm browser [all]` | restart] = give the agent a browser

@@ -8,6 +8,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ### Added
 
+- `!events <url>`: a JSON POST on `needs_input`, `done`, `limit`, `resumed` and `budget` — for Home Assistant, smart lights, or anything with a webhook. First line only, redacted; fire-and-forget on its own thread. `!events test` / `off`. Guide has a Home Assistant automation.
 - `nightmux --mcp`: nightmux as a stdio MCP server. Any MCP client can `list_topics`, `read_terminal`, `read_chat` and `send_prompt` (queued like a prompt from your phone); `!` commands are not exposed. A thin client over the running daemon's local API. See the guide.
 - `!budget <50M> [day|week|month]`: a token allowance per project, in the same base-equivalent tokens as `!cost`. A warning at 80%; at 100% the turn in flight finishes and new prompts queue (on every agent of the topic) until the period rolls over in your `tz_offset`. `!budget` shows where you are, `!budget off` lifts it. Claude Code sessions only — the tokens come from their transcripts.
 - A full terminal page, `/term/<topic>`: up to 5,000 lines of the session's scrollback, refreshed live, with find-in-page and a switch between the topic's agents. Read-only and redacted like the office. Opened from ⌨️ on the dashboard or *full terminal ↗* in the office; remote topics are fetched from their peer.

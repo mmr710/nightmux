@@ -689,3 +689,30 @@ nightmux's own `!` commands are not exposed: an MCP client can prompt agents, no
 { "mcpServers": { "nightmux": { "command": "nightmux", "args": ["--mcp"] } } }
 ```
 (or `"command": "python3", "args": ["/path/to/nightmux.py", "--mcp"]` for a git checkout)
+
+## Lights and Home Assistant
+
+`!events <url>` POSTs one small JSON body per moment worth a glance:
+
+```json
+{"event": "needs_input", "topic": "5", "name": "shop", "session": "shop",
+ "text": "Bash(git push origin main)", "ts": 1760000000}
+```
+
+`event` is `needs_input`, `done`, `limit`, `resumed` or `budget`; `text` is the first
+line, redacted. `!events test` sends one now, `!events off` stops.
+
+With Home Assistant, point it at a webhook trigger
+(`!events http://homeassistant.local:8123/api/webhook/nightmux`) and turn a lamp amber
+when an agent needs you:
+
+```yaml
+automation:
+  - alias: nightmux needs me
+    trigger: {platform: webhook, webhook_id: nightmux, local_only: true}
+    condition: "{{ trigger.json.event == 'needs_input' }}"
+    action:
+      - service: light.turn_on
+        target: {entity_id: light.desk}
+        data: {color_name: orange, brightness_pct: 40}
+```
