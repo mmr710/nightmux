@@ -6,29 +6,42 @@
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:#07090f;color:#cdd6f4;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
-header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:2px solid #1b2133;position:sticky;top:0;background:#07090f;z-index:2}
-h1{font-size:14px;margin:0;letter-spacing:1px}
+body{margin:0;background:radial-gradient(circle at 50% 0%, #151a2a, #07090f 70%);color:#cdd6f4;font:14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif}
+pre, canvas, .nav a, .meter, h1 {font-family: ui-monospace, Menlo, Consolas, monospace}
+header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:16px 24px;border-bottom:1px solid rgba(255,255,255,0.05);position:sticky;top:0;background:rgba(7,9,15,0.85);backdrop-filter:blur(16px);z-index:2;box-shadow:0 4px 30px rgba(0,0,0,0.4)}
+h1{font-size:16px;margin:0;letter-spacing:1px;font-weight:600;text-shadow:0 0 10px rgba(255,255,255,0.1)}
 .nav{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
-.nav a{font-size:12px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:6px;padding:4px 9px;background:#131722}
+.nav a{font-size:13px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:8px;padding:6px 12px;background:linear-gradient(180deg, #1b2133, #131722);transition:all 0.2s;box-shadow:0 2px 5px rgba(0,0,0,0.2)}
+.nav a:hover{background:linear-gradient(180deg, #2d3346, #1b2133);border-color:#565f89;transform:translateY(-1px)}
 .sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 8px}
 #offline:empty{display:none}
+#rp{display:flex;gap:10px;align-items:center;margin:10px 16px 0;font-size:12px;color:#a9b1d6}
+#rp[hidden]{display:none}#rps{flex:1;min-width:0;accent-color:#e0af68}
 #offline{margin:10px 16px 0;padding:10px 12px;border:1px solid #f8514955;border-radius:8px;background:#1a1012;font-size:12px;color:#f0a0a0}
 #offline a{color:#79c0ff}
 .meter{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7}
-.bar{display:inline-block;width:64px;height:8px;background:#1b2133}
-.bar i{display:block;height:100%;width:0;background:#7aa2f7}
+.bar{display:inline-block;width:72px;height:8px;background:#1b2133;border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg, #3d59a1, #7aa2f7);border-radius:4px;box-shadow:0 0 8px rgba(122,162,247,0.5)}
 .bar.hot i{background:#f7768e}
-main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
-.room{background:#0d1120;border:2px solid #1b2133}
-.room h2{font-size:12px;margin:0;padding:6px 10px;background:#141a2e;display:flex;justify-content:space-between;gap:8px}
+main{display:grid;gap:24px;padding:24px;min-height:100vh;grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
+.room{background:linear-gradient(145deg, #101423 0%, #0d1120 100%);border:1px solid rgba(122,162,247,0.15);border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);position:relative;transition:all 0.3s cubic-bezier(0.25,0.8,0.25,1);animation:float 6s ease-in-out infinite}
+@keyframes float { 0% { transform:translateY(0px); } 50% { transform:translateY(-6px);box-shadow:0 15px 50px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05); } 100% { transform:translateY(0px); } }
+.room:hover{transform:translateY(-2px);box-shadow:0 12px 40px rgba(0,0,0,0.6)}
+.room h2{font-size:15px;font-weight:600;margin:0;padding:14px 18px;background:linear-gradient(90deg, rgba(20,26,46,0.8), rgba(27,33,51,0.9));backdrop-filter:blur(12px);display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(122,162,247,0.1);color:#7aa2f7;text-shadow:0 0 10px rgba(122,162,247,0.3)}
 .room h2 .tid{color:#565f89}
-canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer}
-.chips{display:flex;flex-wrap:wrap;gap:4px;padding:6px}
-button{font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer}
+canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=sunset] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=matrix] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=gameboy] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=vapor] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=mono] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;padding:16px;background:rgba(0,0,0,0.25)}
+button.chip{font:inherit;background:linear-gradient(180deg, #1b2133, #151a28);color:#cdd6f4;border:1px solid #2b3452;border-radius:16px;padding:6px 12px;cursor:pointer;font-size:12px;box-shadow:0 2px 5px rgba(0,0,0,0.2);transition:all 0.2s}
+button.chip:hover{background:linear-gradient(180deg, #2b3452, #1b2133);border-color:#3a4466}
+button:not(.chip){font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer;border-radius:6px}
 button.go{border-color:#9ece6a}
-.chip.alert{border-color:#e0af68;animation:blink 1s steps(2) infinite}
-@keyframes blink{50%{background:#3a2f17}}
+.chip.alert{border-color:#e0af68;animation:glow 1.5s infinite alternate}
+@keyframes glow { 0%{box-shadow:0 0 5px rgba(224,175,104,0.2);} 100%{box-shadow:0 0 15px rgba(224,175,104,0.6);border-color:#ffc777;} }}
 #sheet{position:fixed;left:0;right:0;bottom:0;max-height:72vh;overflow:auto;background:#0d1120;border-top:3px solid #7aa2f7;padding:12px 16px calc(14px + env(safe-area-inset-bottom));transform:translateY(105%);transition:transform .18s;z-index:3}
 #sheet.open{transform:none}
 #sheet h3{margin:0 0 4px;font-size:14px}
@@ -38,6 +51,8 @@ pre{background:#05070d;border:1px solid #1b2133;padding:8px;margin:8px 0;white-s
 form{display:flex;gap:6px}
 input{flex:1;min-width:0;font:inherit;background:#05070d;color:#cdd6f4;border:2px solid #2b3452;padding:8px}
 .x{float:right}
+button.snd{background:none;border:0;font-size:18px;cursor:pointer;padding:0 4px}
+#sheet pre.term{max-height:40vh;overflow:auto;background:#050608;color:#a9b1d6;font-size:11px}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
 body.pub .nav,body.pub #sheet{display:none}
@@ -49,16 +64,24 @@ body.demo #stage{display:block}
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
+<span class="meter" id="agy_stat" style="display:none" title="">agy <span class="bar" id="agy_b"><i></i></span></span>
+<span class="meter" id="oc_stat" style="display:none" title="">opencode <span class="bar" id="oc_b"><i></i></span></span>
 <span class="meter" id="clock"></span>
+<button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
+<button class="snd" title="skin" onclick="nextSkin()">🎨</button>
 <span class="meter" id="srvs"></span>
-<nav class="nav"><a href="/">⚙ dashboard</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
+<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span></div>
 <div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
 <canvas id="stage"></canvas>
 <div id="sheet"></div><div id="toast"></div>
 <script>
 // ---------- pixel kit ----------
-const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo'), REEL = Q.has('reel');
+const RH = 128, SW = 64, Q = new URLSearchParams(location.search), DEMO = Q.has('demo'), REEL = Q.has('reel'),
+  REPLAY = Q.has('replay');
+let T = null;   // replay: the recorded moment on screen, in ms
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 function mix(c1, c2, t) {
   const a = parseInt(c1.slice(1), 16), b = parseInt(c2.slice(1), 16), m = (x, y) => Math.round(x + (y - x) * t);
@@ -124,11 +147,12 @@ function skyline(w) {
 }
 
 function backdrop(R, g, w, f, o) {
-  const dawn = o.dawn || 0, sk = skyline(w);
+  const dawn = o.dawn || 0, day = o.day || 0, sk = skyline(w);
   R('#141a2e', 0, 0, w, 70);
   for (let y = 8; y < 52; y++) {                                   // sky through the window
     const t = (y - 8) / 44;
-    R(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn), 8, y, w - 16, 1);
+    R(mix(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn),
+          mix('#4f8fd9', '#bfe3ff', t), day), 8, y, w - 16, 1);
   }
   for (const [x, y, p] of sk.stars) if (dawn < .7 && (f + p) % 11 > 1)
     R(mix('#e0e6ff', mix('#3d5aa8', '#ffb86b', (y - 8) / 44), dawn * 1.4 > 1 ? 1 : dawn * 1.4), x, y, 1, 1);
@@ -147,7 +171,7 @@ function backdrop(R, g, w, f, o) {
     g.globalAlpha = 1;
   }
   if (dawn > 0) {                                                 // the sun comes up with the reset
-    const sx = 52, sy = 58 - dawn * 30;
+    const sx = 52, sy = 58 - dawn * 30 - day * 14;          // and keeps climbing by day
     const glow = g.createRadialGradient(sx, sy, 2, sx, sy, 30);
     glow.addColorStop(0, 'rgba(255,207,112,' + .5 * dawn + ')'); glow.addColorStop(1, 'rgba(255,207,112,0)');
     g.fillStyle = glow; g.fillRect(8, 8, w - 16, 44);
@@ -155,8 +179,8 @@ function backdrop(R, g, w, f, o) {
       if (dx * dx + dy * dy <= 36 && sy + dy < 52) R('#ffcf70', sx + dx, sy + dy, 1, 1);
   }
   for (const [x, bw, bh, lit] of sk.blds) {
-    R(mix('#0b0e1f', '#3a2c4a', dawn), x, 52 - bh, bw, bh);
-    R(mix('#141833', '#4d3b5e', dawn), x, 52 - bh, bw, 1);
+    R(mix(mix('#0b0e1f', '#3a2c4a', dawn), '#6b7a99', day * .7), x, 52 - bh, bw, bh);
+    R(mix(mix('#141833', '#4d3b5e', dawn), '#8a97b3', day * .7), x, 52 - bh, bw, 1);
     for (const [wx, wy, p] of lit) if ((f / 8 + p | 0) % 13 && dawn < .9) R(mix('#f2c46d', '#7a6a7a', dawn), wx, wy, 1, 1);
   }
   R('#2b3452', 6, 6, w - 12, 2); R('#2b3452', 6, 52, w - 12, 3); R('#3a4466', 4, 55, w - 8, 2);  // frame + sill
@@ -249,10 +273,12 @@ function station(R, g, x0, d, f, o) {
   if (!sip && sit) { R('#e6e9f2', x0 + 23, 87, 3, 4); R('#c3c8d6', x0 + 26, 88, 1, 2);
     if (st === 'idle' && f % 6 < 3) R('rgba(230,233,242,.5)', x0 + 24, 83 + f % 3, 1, 2); }
   if (sit) {
-    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72;
+    const ph = (d.agent.length * 17 + x0) % 61, look = st === 'busy' && (f + ph) % 45 < 4 ? 1 : 0;
+    const hx = sleep ? x0 + 25 : x0 + 16 + lean, hy = sleep ? 83 : 72 + look;
+    const blink = !sleep && (f + ph) % 52 === 0;
     const sx = tx + 6, sy = ty + 2, sk = L.skin;
     if (sleep) { R(L.shirt, x0 + 21, 88, 12, 3); R(L.shade, x0 + 21, 90, 12, 1); }
-    spr(R, sleep ? HEAD.map(r => r.replace('E', 'S')) : HEAD, hx, hy, pal);
+    spr(R, sleep || blink ? SHUT : HEAD, hx, hy, pal);
     hat(R, L, hx, hy);
     if (st === 'busy') { R(L.shirt, sx, sy, 2, 5); R(L.shirt, sx + 1, sy + 5, 6, 2); R(sk, sx + 7, sy + 5 - f % 2, 2, 2); R(L.shade, sx + 3, sy + 6, 4, 1); R(sk, sx + 10, sy + 6 - (f + 1) % 2, 2, 1); }
     else if (st === 'waiting') { R(L.shirt, sx, sy - 14, 2, 16); R(sk, sx + (f % 6 < 3 ? 0 : 1), sy - 16, 2, 2); }
@@ -285,12 +311,20 @@ function station(R, g, x0, d, f, o) {
 // the frame and when the state last changed, so reel and demo frames replay.
 const LW = 112, SPEED = DEMO ? 3 : 2, GRACE = DEMO ? 6 : 24, DWELL = DEMO ? [4, 20] : [30, 70];
 const SPOT = {wc: 9, coffee: 30, tv1: 52, tv2: 68, bed: 90, couch: 50};
+// A walk speeds up out of the chair and slows into the spot (half pace at either
+// end, half again in the middle), and each agent has its own stride.
+const RISE = 4;
+function stroll(a, b, u, pace) {                // where a walk from a to b is u frames in, or null
+  const dist = Math.abs(b - a), w = dist / pace;
+  if (u >= w) return null;
+  const s = u / w, e = s - Math.sin(2 * Math.PI * s) / (4 * Math.PI);
+  return {x: a + Math.sign(b - a) * dist * e, pose: 'walk', dir: Math.sign(b - a), walked: dist * e};
+}
 function plan(d, i, f, L0, x0) {
-  const t = f - (d.since || 0), home = x0 + 15;
-  const go = (tx, u, pose, spot) => {          // walk there, do the thing
-    const dist = Math.abs(tx - home), w = dist / SPEED;
-    return u < w ? {x: home + Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(tx - home)}
-                 : {x: tx, pose, spot};
+  const t = f - (d.since || 0), home = x0 + 15, pace = SPEED * (.85 + (i * 0.13) % .3);
+  const go = (tx, u, pose, spot) => {          // stand up, walk there, do the thing
+    if (u < RISE) return {x: home, pose: 'rise', dir: Math.sign(tx - home)};
+    return stroll(home, tx, u - RISE, pace) || {x: tx, pose, spot};
   };
   if (d.state === 'limit') {
     if (t < 14) return null;                     // slumps first, then gives up and goes to bed
@@ -301,17 +335,19 @@ function plan(d, i, f, L0, x0) {
   let u = u0 % P;
   const spot = ['coffee', 'tv', 'wc', 'tv', 'coffee', 'wc'][(c + i * 2) % 6];
   const tx = L0 + SPOT[spot === 'tv' ? (i % 2 ? 'tv2' : 'tv1') : spot];
-  const walk = Math.abs(tx - home) / SPEED, desk = DWELL[0] + (i * 37) % DWELL[1];
+  const walk = Math.abs(tx - home) / pace + RISE, desk = DWELL[0] + (i * 37) % DWELL[1];
   const stay = P - desk - 2 * walk;
   if (stay < 40 || u < desk) return null;
   u -= desk;
   if (u < walk + stay) return go(tx, u, spot === 'tv' ? 'sit' : spot === 'wc' ? 'in' : 'stand', spot);
   u -= walk + stay;
-  return u < walk ? {x: tx - Math.sign(tx - home) * u * SPEED, pose: 'walk', dir: Math.sign(home - tx)} : null;
+  return stroll(tx, home, u, pace);
 }
 
-function hat(R, L, hx, hy) {
-  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, hx + 5, hy + 2, 3, 1); }
+const SHUT = HEAD.map(r => r.replace('E', 'S'));
+const HEADL = HEAD.map(r => [...r].reverse().join(''));         // facing left
+function hat(R, L, hx, hy, left) {
+  if (L.hat === 'cap') { R(L.shirt, hx + 1, hy, 5, 2); R(L.shade, hx + 1, hy + 1, 5, 1); R(L.shade, left ? hx - 1 : hx + 5, hy + 2, 3, 1); }
   if (L.hat === 'beanie') { R(L.shade, hx + 1, hy, 5, 3); R(L.shirt, hx + 1, hy + 2, 5, 1); R('#e6e9f2', hx + 3, hy - 1, 1, 1); }
   if (L.hat === 'headset') { R('#1b1b1b', hx + 1, hy, 5, 1); R('#1b1b1b', hx + 1, hy, 1, 4); R(L.shirt, hx, hy + 3, 2, 3); R('#1b1b1b', hx + 2, hy + 6, 4, 1); }
   if (L.hat === 'hood') { R(L.shade, hx - 1, hy + 1, 1, 6); R(L.shade, hx, hy, 2, 1); R(L.shade, hx, hy + 7, 3, 1); }
@@ -367,12 +403,23 @@ function actor(R, d, a, f, i) {
     if (f % 60 < 30) R(L.skin, x + 7, 96, 2, 2);             // hand to the snacks
     return;
   }
-  const step = a.pose === 'walk' ? (Math.floor(x / 3) % 2) : 0;
-  spr(R, HEAD, x, 77, pal); hat(R, L, x, 77);
-  spr(R, TORSO.slice(0, 8), x - 1, 85, pal); R('#2a2f45', x - 1, 93, 8, 3);
-  R('#2a2f45', x + (step ? 0 : 1), 96, 3, 17); R('#2a2f45', x + (step ? 4 : 3), 96, 3, 17);
-  R('#0b0d14', x + (step ? -1 : 0), 113, 4, 2); R('#0b0d14', x + (step ? 4 : 3), 113, 4, 2);
-  if (a.pose === 'walk') R(L.skin, x + (a.dir > 0 ? 6 : -1), 90 + step, 2, 2);
+  // Four-beat stride from the distance covered, so feet never skate: contact,
+  // passing (body up a pixel), the other contact, passing. Arms swing opposite.
+  const ph = a.pose === 'walk' ? Math.floor((a.walked || 0) / 2.5) % 4 : -1, up = ph % 2 === 1 ? 1 : 0,
+    left = a.dir < 0, y0 = (a.pose === 'rise' ? 1 : 0) - up, fwd = left ? -1 : 1;
+  const legs = ph === 0 ? [2, -1] : ph === 2 ? [-1, 2] : [0, 0];
+  R('rgba(0,0,0,.3)', x - 2 + (ph === 0 || ph === 2 ? -1 : 0), 114, 11 + (ph === 0 || ph === 2 ? 2 : 0), 2);
+  spr(R, left ? HEADL : HEAD, x, 77 + y0, pal); hat(R, L, x, 77 + y0, left);
+  spr(R, TORSO.slice(0, 8), x - 1, 85 + y0, pal); R('#2a2f45', x - 1, 93 + y0, 8, 3);
+  for (const [k, lx] of [[0, 1], [1, 3]]) {
+    const o = legs[k] * fwd, lift = ph >= 0 && legs[k] < 0 ? 1 : 0;
+    R('#2a2f45', x + lx + o, 96 + y0, 3, 17 - y0 - lift); R('#0b0d14', x + lx + o + (left ? -1 : 0), 113 - lift, 4, 2);
+  }
+  if (a.pose === 'walk') {
+    const sw = ph === 0 ? -1 : ph === 2 ? 1 : 0;
+    R(L.shade, x + (left ? 5 : 0) + sw * fwd, 88 + y0, 2, 5); R(L.skin, x + (left ? 5 : 0) + sw * fwd, 93 + y0, 2, 2);
+    R(L.skin, x + (left ? -1 : 6) - sw * fwd, 90 + y0 + (sw ? 0 : 1), 2, 2);
+  }
   if (a.pose === 'stand') { const sip = f % 40 < 14;           // coffee in hand
     R(L.shirt, x + 6, sip ? 84 : 88, 2, sip ? 6 : 4); R('#e6e9f2', x + 7, sip ? 82 : 91, 3, 4); }
 }
@@ -392,6 +439,8 @@ function effects(R, room, pad, f, fx) {
       for (let k = 1; k < 5; k++) { const [tx, ty] = at(Math.max(0, t - k * .05)); R('rgba(246,211,101,' + (.5 - k * .1) + ')', tx + 2, ty + 2, 3, 2); }
       const [x, y] = at(t);
       R('#0b0d14', x - 1, y - 1, 9, 7); R('#e0af68', x, y, 7, 5); R('#c48a3a', x, y, 3, 1); R('#f6d365', x + 1, y + 2, 5, 1);
+      if (age < 7) bubble(R, a + 20, 50, '>', '#e0af68', 0);        // "yours"
+      if (age > 11) bubble(R, b + 20, 50, '!', '#2f8f3a', 0);       // "got it"
     }
     if ((e.type === 'sparkle' || e.type === 'check') && age >= 0 && age < 16) {
       const x = deskX(room, e.on, pad); if (x == null) continue;
@@ -403,7 +452,8 @@ function effects(R, room, pad, f, fx) {
   }
 }
 
-function drawRoom(cv, room, f, o) {
+function drawRoom(cv, room, F, o) {
+  const f = Math.floor(F);   // poses and flicker step by frame; walking and dust use F
   const n = room.desks.length, w = Math.max(256, n * SW + LW), h = RH + (o.caption != null ? 16 : 0);
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const g = cv.getContext('2d');
@@ -411,15 +461,27 @@ function drawRoom(cv, room, f, o) {
   const R = (c, x, y, ww, hh) => { if (ww > 0 && hh > 0) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh)); } };
   const pad = Math.round((w - n * SW - LW) / 2), L0 = pad + n * SW;
   o.pad = pad;
-  const away = room.desks.map((d, i) => (d.away = plan(d, i, f, L0, pad + i * SW)));
+  const away = room.desks.map((d, i) => (d.away = plan(d, i, F, L0, pad + i * SW)));
   const occ = {wc: away.some(a => a && a.pose === 'in'), coffee: away.some(a => a && a.pose === 'stand'),
                tv: away.some(a => a && a.pose === 'sit')};
   backdrop(R, g, w, f, o);
   lounge(R, g, L0, f, occ);
   room.desks.forEach((d, i) => station(R, g, pad + i * SW, d, f, o));
   room.desks.forEach((d, i) => { if (away[i]) actor(R, d, away[i], f, i); });
-  effects(R, room, pad, f, o.fx);
-  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
+  room.desks.forEach((d, i) => { if (!d.live) return;          // dust drifting through the lamp light
+    const x0 = pad + i * SW;
+    for (let k = 0; k < 5; k++) {
+      const y = 12 + ((F * .25 + k * 11) % 44), x = x0 + 33 + Math.sin(F * .03 + k * 2.1) * (6 + y / 5);
+      R('rgba(255,226,170,' + (.45 * Math.sin(Math.PI * (y - 12) / 44)).toFixed(2) + ')', x, 56 + y, 1, 1);
+    } });
+  for (const spot of ['coffee', 'tv']) {            // two on a break together get talking
+    const here = away.filter(a => a && a.spot === spot && a.pose !== 'walk');
+    if (here.length < 2 || f % 40 >= 28) continue;
+    const k = Math.floor(f / 40), a = here[k % here.length];
+    bubble(R, a.x - 4, spot === 'tv' ? 66 : 58, '?!·#'[k % 4], '#3b4261', (f >> 2) % 2);
+  }
+  effects(R, room, pad, F, o.fx);
+  if (o.dawn) { g.globalCompositeOperation = 'lighter'; g.fillStyle = 'rgba(255,150,70,' + (.09 * o.dawn * (1 - (o.day || 0))) + ')'; g.fillRect(0, 56, w, RH - 56); g.globalCompositeOperation = 'source-over'; }
   const vg = g.createRadialGradient(w / 2, RH / 2, RH * .4, w / 2, RH / 2, w * .75);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.38)');
   g.fillStyle = vg; g.fillRect(0, 0, w, RH);
@@ -485,6 +547,9 @@ function track() {
       if (prev[k] !== d.state) since[k] = frame;
       d.since = since[k] || 0;
       if (prev[k] === 'busy' && d.state === 'idle') (fx[r.topic] = fx[r.topic] || []).push({type: 'sparkle', on: d.session, start: frame});
+      if (prev[k] && prev[k] !== d.state)
+        beep(d.state === 'waiting' ? SOUND.waiting : d.state === 'limit' ? SOUND.limit
+             : d.state === 'idle' && prev[k] === 'busy' ? SOUND.done : []);
       prev[k] = d.state;
       if (d.state === 'limit' && d.until) d.prog = 1 - (d.until - Date.now() / 1000) / 18000;
     }
@@ -499,7 +564,43 @@ function label(d) {
   return {busy: 'working', idle: 'idle', waiting: '✋ asking', limit: '💤 ' + (d.until ? left(d.until) : ''),
           unknown: '? unread screen', shell: 'exited', gone: 'gone'}[d.state] || d.state;
 }
-const hhmm = () => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+const hhmm = () => new Date(T || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+// The window follows the viewer's clock: night, dawn from 5, day from 7, dusk to 21. ?hour=14 previews.
+function sky() {
+  const n = new Date(T || Date.now()), h = Q.has('hour') ? +Q.get('hour') : n.getHours() + n.getMinutes() / 60;
+  const ramp = (a, b) => Math.max(0, Math.min(1, Math.min((h - a) / 2, (b - h) / 2)));
+  return {dawn: ramp(5, 21), day: ramp(7, 19)};
+}
+// Sounds, off until the 🔈 button turns them on (remembered per browser).
+let audio = null, sound = false;
+try { sound = localStorage.getItem('nm-sound') === '1'; } catch (e) {}
+function beep(notes) {
+  if (!sound) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    notes.forEach(([hz, at], i) => { const o = audio.createOscillator(), v = audio.createGain(), t = audio.currentTime + at;
+      o.type = 'square'; o.frequency.value = hz; v.gain.setValueAtTime(.04, t); v.gain.exponentialRampToValueAtTime(.0001, t + .18);
+      o.connect(v); v.connect(audio.destination); o.start(t); o.stop(t + .2); });
+  } catch (e) {}
+}
+const SOUND = {done: [[660, 0], [880, .1]], waiting: [[988, 0], [988, .16]], limit: [[330, 0], [247, .14]]};
+// Skins: a colour grade over every canvas — the art stays, the mood changes.
+const SKINS = ['night', 'sunset', 'matrix', 'gameboy', 'vapor', 'mono'];
+let skin = Q.get('skin') || '';
+try { skin = skin || localStorage.getItem('nm-skin') || 'night'; } catch (e) { skin = skin || 'night'; }
+document.body.dataset.skin = skin;
+function nextSkin() {
+  skin = SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length];
+  document.body.dataset.skin = skin;
+  try { localStorage.setItem('nm-skin', skin); } catch (e) {}
+  toast('skin: ' + skin);
+}
+function toggleSound() {
+  sound = !sound;
+  try { localStorage.setItem('nm-sound', sound ? '1' : '0'); } catch (e) {}
+  document.getElementById('snd').textContent = sound ? '🔊' : '🔈';
+  beep(SOUND.done);
+}
 
 function build() {
   const main = document.getElementById('rooms');
@@ -532,15 +633,21 @@ function render() {
         + ' · ' + esc(label(d)) + (d.queued ? ' · 📝' + d.queued : ''); });
   });
   document.title = (asking ? '✋' + asking + ' ' : '') + 'nightmux office';
-  for (const [id, k] of [['u5', 'five_hour'], ['u7', 'seven_day']]) {
+    for (const [id, k] of [['u5', 'five_hour'], ['u7', 'seven_day'], ['agy_b', 'agy_limit'], ['oc_b', 'oc_limit']]) {
     const p = data.usage[k], bar = document.getElementById(id);
-    bar.querySelector('i').style.width = (p == null ? 0 : Math.min(100, p)) + '%';
-    bar.classList.toggle('hot', p >= 80); bar.title = p == null ? 'no figure yet' : Math.round(p) + '%';
+    if(bar) {
+      if(p != null) bar.parentElement.style.display = '';
+      bar.querySelector('i').style.width = (p == null ? 0 : Math.min(100, p)) + '%';
+      bar.classList.toggle('hot', p >= 80); bar.title = p == null ? 'no figure yet' : Math.round(p) + '%';
+    }
   }
+  if(data.usage.agy_model && document.getElementById('agy_stat')) document.getElementById('agy_stat').title = 'agy model: ' + data.usage.agy_model;
+  if(data.usage.oc_model && document.getElementById('oc_stat')) document.getElementById('oc_stat').title = 'opencode model: ' + data.usage.oc_model;
+
   if (open) sheet();
 }
 
-function pick(topic, i) { if (window.PUB) return; const r = data.rooms.find(x => x.topic === topic);
+function pick(topic, i) { if (window.PUB || REPLAY) return; const r = data.rooms.find(x => x.topic === topic);
   open = {topic, session: r.desks[i].session}; sheet(); }
 
 function sheet() {
@@ -556,7 +663,8 @@ function sheet() {
   add('div', [label(d), d.ctx != null ? 'ctx ' + Math.round(d.ctx) + '%' : '', d.queued ? d.queued + ' queued' : '',
               r.name].filter(Boolean).join(' · '), 'meta');
   if (d.doing) add('pre', d.doing);
-  else if (d.screen.length) add('pre', d.screen.join('\n'));
+  if (d.screen.length) { const t = add('pre', d.screen.join('\n'), 'term'); t.scrollTop = t.scrollHeight; }
+  if (!window.PUB) { const a = add('a', 'full terminal ↗', 'meta'); a.href = '/term/' + open.topic + '?agent=' + d.agent; a.target = '_blank'; }
   const acts = [];
   if (d.state === 'waiting') (d.options || []).forEach(o => acts.push([o.text, o.send, /^\d/.test(o.text) ? 'go' : '']));
   if (!d.live) acts.push(['★ make live', '!' + d.agent]);
@@ -590,6 +698,7 @@ async function send(topic, text) {
 async function poll() {
   try {
     data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
+    for (const [k, v] of Object.entries(data.looks || {})) LOOK[k] = Object.assign({}, look(k), v);
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
     const sv = data.servers || [];
@@ -615,7 +724,36 @@ function draw() {
     return;
   }
   document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
-    if (r) cv.pad = drawRoom(cv, r, frame, {clock: hhmm(), fx: fx[r.topic]}); });
+    if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
+}
+
+// ?replay: the last day as recorded, on a slider. Same rooms, same drawing.
+async function replay() {
+  document.body.classList.add('replay');
+  const bar = document.getElementById('rp'), s = document.getElementById('rps'),
+    btn = document.getElementById('rpp'), lab = document.getElementById('rpt');
+  bar.hidden = false;
+  let F = [];
+  try { F = (await (await fetch('/api/office/replay', {cache: 'no-store'})).json()).frames || []; } catch (e) {}
+  if (!F.length) { lab.textContent = 'nothing recorded yet — the office records while nightmux runs'; return; }
+  s.max = F.length - 1;
+  const show = i => { const f = F[i]; T = f.t * 1000; data = {rooms: f.rooms, installed: [], usage: {}};
+    lab.textContent = new Date(T).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false})
+      + '  ·  ' + (i + 1) + '/' + F.length;
+    render(); };
+  let timer = null;
+  s.oninput = () => show(+s.value);
+  btn.onclick = () => {
+    if (timer) { clearInterval(timer); timer = null; btn.textContent = '▶'; return; }
+    if (+s.value >= F.length - 1) s.value = 0;
+    btn.textContent = '⏸';
+    timer = setInterval(() => { if (+s.value >= F.length - 1) return btn.onclick();
+      s.value = +s.value + 1; show(+s.value); }, 350);
+  };
+  // Start where the night did: the first frame after 22:00 last night, if there is one.
+  const eve = new Date(); eve.setDate(eve.getDate() - (eve.getHours() < 12 ? 1 : 0)); eve.setHours(22, 0, 0, 0);
+  const i0 = F.findIndex(f => f.t * 1000 >= eve.getTime());
+  s.value = i0 > 0 ? i0 : 0; show(+s.value);
 }
 
 // GIF capture drives frames itself, one exact frame per call.
@@ -623,8 +761,17 @@ window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
 if (window.PUB) document.body.classList.add('pub');
-else { poll(); setInterval(poll, 2000); }
-setInterval(() => { if (auto) { frame++; draw(); } }, 110);
+if (sound) document.getElementById('snd').textContent = '🔊';
+if (REPLAY) replay();
+else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
+// The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
+// walk moves a pixel at a time instead of hopping two.
+let lastT = 0;
+(function loop(now) {
+  requestAnimationFrame(loop);
+  if (!auto || now - lastT < 33) { if (!auto) lastT = now; return; }
+  frame += Math.min(now - lastT, 250) / 110; lastT = now; draw();
+})(0);
 draw();
 </script>
 </body></html>

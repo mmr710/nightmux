@@ -91,3 +91,15 @@ Open an issue for anything that lets a **non-allowlisted** sender cause nightmux
 type, spend tokens, or leak session output. That is the property worth
 defending. For anything sensitive, reach the maintainer through the contact on
 https://github.com/mmr710 rather than filing publicly.
+
+## Roles for a shared group
+
+Everyone in `allow_users` is an admin unless `"roles"` says otherwise. `!team <id> watch|prompt|admin` sets one:
+
+- **watch** reads only — status, pane, office, stats. Nothing reaches a keyboard.
+- **prompt** talks to the agents and answers their menus, but cannot run nightmux commands that start, stop, schedule, expose or reconfigure anything.
+- **admin** is everything, as before.
+
+A prompt is still a shell by proxy: the agent can run whatever it is asked to. Give `prompt` to people you would hand a terminal on this machine, not to strangers. The dashboard has no login, so anyone who can reach it is an admin — keep it on `127.0.0.1` or your tailnet.
+
+Once any role is set (or `"audit": true`), every message and tap is appended to `~/.nightmux-state/audit.log` — who, which topic, the text with secrets redacted. `!audit [n]` shows the last lines.
