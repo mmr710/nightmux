@@ -869,6 +869,13 @@ the command-center topic, or General. `!update [agent]` does it on demand.
 off by default because it runs installers unattended. Running sessions keep
 their version until relaunched: `!kill yes`, then `!restore`.
 
+## Community & Support
+
+**Join the Community:** Connect with other users, share your overnight agent successes, and get help in our [Telegram Group](https://t.me/+SGmmExdMHTQ3OWVk).
+
+**Support the Project:** If `nightmux` saves you time or money, consider supporting its development! ☕
+* **Crypto (USDT on TRX Network):** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+
 ## Requirements
 
 Python 3.8+ (CI runs 3.8 through 3.13), tmux, a terminal coding agent, and Linux
