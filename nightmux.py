@@ -12362,11 +12362,11 @@ def selfcheck():
         assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
         _route_last["9"] = ("light", "claude")
         coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
-        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
+        assert cst_["k"]["queue"] == ["/model haiku 5.5"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
         assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model haiku 5.5"]
         cst_["k"]["queue"] = []
         ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
         assert cst_["k"]["queue"] == [], cst_
