@@ -876,7 +876,10 @@ their version until relaunched: `!kill yes`, then `!restore`.
 **Join the Community:** Connect with other users, share your overnight agent successes, and get help in our [Telegram Group](https://t.me/+SGmmExdMHTQ3OWVk).
 
 **Support the Project:** If `nightmux` saves you time or money, consider supporting its development! ☕
-* **Crypto (USDT on TRX Network):** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+
+### 💳 Donate Crypto (USDT on TRX Network)
+**Address:** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+<br><img src="docs/usdt-qr.png" alt="USDT TRX QR Code" width="150">
 
 ## Requirements
 
