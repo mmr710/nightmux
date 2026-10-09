@@ -3954,7 +3954,7 @@ HELP = [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k) · !idlectx <pct|off>",
-        "!ladder on|off = Claude on haiku/sonnet/opus by task, up a step when "
+        "!ladder on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when "
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
         "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
@@ -5532,7 +5532,7 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["claude-3-5-haiku-20241022", "sonnet", "opus"]}
+LADDER = {"claude": ["claude-3-5-haiku-20241022", "sonnet", "opus"], "agy": ["low", "medium", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
@@ -5626,7 +5626,8 @@ def ladder_set(cfg, state, topic, sess, idx, why, up=False):
     _ladder[topic] = idx
     coach_log({"t": int(time.time()), "topic": topic, "switch": "model", "to": tiers[idx],
                "ctx": tok or 0})
-    state.setdefault(sess, {}).setdefault("queue", []).append(f"/model {tiers[idx]}")
+    cmd = "/effort" if agent_key(cfg, topic, sess) == "agy" else "/model"
+    state.setdefault(sess, {}).setdefault("queue", []).append(f"{cmd} {tiers[idx]}")
     return f"🪜 {sess} → {tiers[idx]} ({why})"
 
 
@@ -5881,7 +5882,7 @@ def ladder_cmd(cfg, lock, topic, arg):
         _ladder.pop(topic, None)
     tiers = LADDER.get("claude")
     return (f"🪜 model ladder {'on' if ladder_on(cfg, topic) else 'off'} here — Claude "
-            f"starts each task on {tiers[0]} (light) / {tiers[1]} / {tiers[2]} (heavy), steps "
+            f"starts each task on {tiers[0]} (or Agy on low effort) and steps "
             "up when !goal fails the same way twice, the loop guard fires or you correct it "
             "twice\n!ladder on|off")
 
