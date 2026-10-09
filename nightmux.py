@@ -8279,9 +8279,8 @@ def office_snapshot(cfg, state):
         agy_set = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
         if os.path.exists(agy_set):
             with open(agy_set) as f:
-                usage["agy_model"] = json.load(f).get("modelSelection", "Unknown")
+                usage["agy_model"] = json.load(f).get("model", "Unknown")
         else: usage["agy_model"] = "Unknown"
-        usage["agy_limit"] = 100 # Mock limit
         
         # opencode
         oc_set = os.path.expanduser("~/.config/opencode/opencode.json")
@@ -8289,7 +8288,18 @@ def office_snapshot(cfg, state):
             with open(oc_set) as f:
                 usage["oc_model"] = json.load(f).get("model", "Unknown")
         else: usage["oc_model"] = "Unknown"
-        usage["oc_limit"] = 100 # Mock limit
+        
+        try:
+            ch = analyze_chats(1).get("agents", {})
+            a = ch.get("agy", {}).get("tokens", {})
+            o = ch.get("opencode", {}).get("tokens", {})
+            a_tot = sum(a.values()) if isinstance(a, dict) else 0
+            o_tot = sum(o.values()) if isinstance(o, dict) else 0
+            usage["agy_limit"] = min(100, (a_tot / 15_000_000) * 100) if a_tot else 0
+            usage["oc_limit"] = min(100, (o_tot / 2_000_000) * 100) if o_tot else 0
+        except Exception:
+            usage["agy_limit"] = 0
+            usage["oc_limit"] = 0
     except:
         pass
 
