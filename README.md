@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/nightmux-logo.jpg" alt="nightmux logo" width="200" height="200">
+
 # 🌙 nightmux
 
 **Your AI coding agents keep working while you sleep.**
