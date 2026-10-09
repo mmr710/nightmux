@@ -6401,7 +6401,7 @@ def wrapped_data(cfg, days):
 AGENT_COLOR = {"claude": "#d97757", "codex": "#7aa2f7", "opencode": "#9ece6a", "agy": "#bb9af7"}
 
 
-NO_TOKENS = {"agy"}   # keeps step counts on disk, never tokens
+NO_TOKENS = {"agy"}   # an agy without per-conversation logs keeps step counts only
 
 
 def split_html(split):
@@ -8927,6 +8927,8 @@ def _scan_opencode(stats, home, since):
     b = _chat_bucket(stats, "opencode")
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name = 'session_message'").fetchone():
+            return _scan_opencode_v2(b, con, since)
         sess = set()
         for sid, data in con.execute("SELECT session_id, data FROM message "
                                      "WHERE time_created >= ?", (int(since * 1000),)):
@@ -8954,6 +8956,29 @@ def _scan_opencode(stats, home, since):
         con.close()
 
 
+def _scan_opencode_v2(b, con, since):
+    """opencode's newer schema: one session_message row per turn, typed, with the
+    tokens on the assistant row. It holds copies of the old message table, so
+    when it exists it is read instead of that, never as well."""
+    sess = set()
+    for sid, typ, data, at, cwd in con.execute(
+            "SELECT m.session_id, m.type, m.data, m.time_created, s.directory FROM session_message m "
+            "LEFT JOIN session_v2 s ON s.id = m.session_id WHERE m.time_created >= ? "
+            "AND m.type IN ('assistant', 'user')", (int(since * 1000),)):
+        sess.add(sid)
+        d = json.loads(data)
+        if typ == "user":
+            _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
+            continue
+        if d.get("error"):
+            b["errors"] += 1
+        t, c = d.get("tokens") or {}, (d.get("tokens") or {}).get("cache") or {}
+        if t.get("input") or t.get("output") or c.get("read"):
+            _chat_call(b, (d.get("model") or {}).get("id"), t.get("input") or 0, c.get("read") or 0,
+                       c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+    b["sessions"] += len(sess)
+
+
 def _scan_agy(stats, home, since):
     import sqlite3
     db = os.path.join(home, ".gemini", "antigravity-cli", "conversation_summaries.db")
@@ -8963,16 +8988,46 @@ def _scan_agy(stats, home, since):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for steps, ws in con.execute("SELECT step_count, workspace_uris FROM "
-                                     "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
+        for cid, steps, ws in con.execute("SELECT conversation_id, step_count, workspace_uris FROM "
+                                          "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
             b["sessions"] += 1
             m = re.search(r"file://(/[^\"',\s]+)", ws or "")
-            if m:      # no prompts on disk: a conversation counts once for its project
-                n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
-                b["projects"][n] = b["projects"].get(n, 0) + 1
-            b["requests"] += steps or 0     # agy keeps no token counts on disk
+            cwd = urllib.parse.unquote(m.group(1)) if m else None
+            if not _scan_agy_log(b, home, cid, since, cwd):
+                if cwd:      # no log: a conversation counts once for its project
+                    n = os.path.basename(cwd.rstrip("/"))
+                    b["projects"][n] = b["projects"].get(n, 0) + 1
+                b["requests"] += steps or 0
     finally:
         con.close()
+
+
+def _scan_agy_log(b, home, cid, since, cwd):
+    """agy's per-conversation log: a PLANNER_RESPONSE record per model call carries
+    its token counts, a USER_INPUT one per prompt. False when there is no log."""
+    path = os.path.join(home, ".gemini", "antigravity-cli", "brain", os.path.basename(cid or ""),
+                        ".system_generated", "logs", "transcript.jsonl")
+    try:
+        f = open(path, encoding="utf8", errors="replace")
+    except OSError:
+        return False
+    with f:
+        for line in f:
+            if '"PLANNER_RESPONSE"' not in line and '"USER_INPUT"' not in line:
+                continue          # tool output is most of the file: skip it unparsed
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            ts = _iso_ts(d.get("created_at"))
+            if ts is not None and ts < since:
+                continue
+            if d.get("type") == "USER_INPUT":
+                _chat_prompt(b, d.get("content") or "", ts, cwd)
+            elif d.get("type") == "PLANNER_RESPONSE":
+                _chat_call(b, None, d.get("input_tokens") or 0, d.get("cache_read_tokens") or 0, 0,
+                           d.get("output_tokens") or 0)
+    return True
 
 
 def chat_tips(stats):
@@ -13771,6 +13826,50 @@ def selfcheck():
                            "rate_limits": {"primary": {"used_percent": 42.0, "window_minutes": 300,
                                                        "resets_at": time.time() + 600}}}}):
                 f.write(json.dumps(l_) + "\n")
+        import sqlite3
+        os.makedirs(os.path.join(h_, ".local", "share", "opencode"), exist_ok=True)
+        oc_ = sqlite3.connect(os.path.join(h_, ".local", "share", "opencode", "opencode.db"))
+        oc_.executescript("CREATE TABLE message (id, session_id, time_created, data);"
+                          "CREATE TABLE session_message (id, session_id, type, time_created, data);"
+                          "CREATE TABLE session_v2 (id, directory);")
+        now_ = int(time.time() * 1000)
+        oc_.execute("INSERT INTO message VALUES ('m1', 's1', ?, ?)", (now_, json.dumps(   # the old copy
+            {"role": "assistant", "tokens": {"input": 999, "output": 999}})))
+        oc_.executemany("INSERT INTO session_message VALUES (?, 's1', ?, ?, ?)", [
+            ("m0", "user", now_, json.dumps({"text": "add a page"})),
+            ("m1", "assistant", now_, json.dumps({"model": {"id": "muse"}, "tokens": {
+                "input": 300, "output": 20, "reasoning": 5, "cache": {"read": 7000, "write": 0}}})),
+            ("m2", "shell", now_, json.dumps({"command": "ls"}))])
+        oc_.execute("INSERT INTO session_v2 VALUES ('s1', '/home/u/shop')")
+        oc_.commit(); oc_.close()
+        r_ = analyze_chats(30, home=h_)
+        o_ = r_["agents"]["opencode"]
+        assert (o_["prompts"], o_["requests"], o_["sessions"]) == (1, 1, 1), o_
+        assert o_["tokens"]["input"] == 300 and o_["tokens"]["cache_read"] == 7000 and "muse" in o_["models"], o_
+        os.remove(os.path.join(h_, ".local", "share", "opencode", "opencode.db"))
+        ag_ = os.path.join(h_, ".gemini", "antigravity-cli")
+        os.makedirs(os.path.join(ag_, "brain", "c1", ".system_generated", "logs"), exist_ok=True)
+        os.makedirs(os.path.join(ag_, "brain", "c2"), exist_ok=True)
+        sq_ = sqlite3.connect(os.path.join(ag_, "conversation_summaries.db"))
+        sq_.execute("CREATE TABLE conversation_summaries (conversation_id, step_count, workspace_uris, "
+                    "last_modified_time)")
+        lm_ = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        sq_.executemany("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                        [("c1", 9, '["file:///home/u/shop"]', lm_), ("c2", 40, "", lm_)])
+        sq_.commit(); sq_.close()
+        iso_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(os.path.join(ag_, "brain", "c1", ".system_generated", "logs", "transcript.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "USER_INPUT", "created_at": iso_, "content": "fix it"}) + "\n"
+                    + json.dumps({"type": "PLANNER_RESPONSE", "created_at": iso_, "input_tokens": 500,
+                                  "cache_read_tokens": 8000, "output_tokens": 40}) + "\n"
+                    + json.dumps({"type": "PLANNER_RESPONSE", "created_at": "2001-01-01T00:00:00Z",
+                                  "input_tokens": 9999}) + "\n"
+                    + json.dumps({"type": "GENERIC", "content": "tool output"}) + "\n")
+        r_ = analyze_chats(30, home=h_)
+        g_ = r_["agents"]["agy"]
+        assert (g_["prompts"], g_["requests"], g_["sessions"]) == (1, 1 + 40, 2), g_   # c2: steps only
+        assert g_["tokens"]["input"] == 500 and g_["tokens"]["cache_read"] == 8000, g_
+        shutil.rmtree(os.path.join(h_, ".gemini"))
         r_ = analyze_chats(30, home=h_)
         c_ = r_["agents"]["claude"]
         assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
