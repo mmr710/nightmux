@@ -38,6 +38,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
 
 ### Fixed
+- Chat analysis and `!wrapped` now count opencode and agy tokens. opencode moved its turns to `session_message` / `session_v2`, so those tables are read when present instead of the old `message` table (they hold copies of it). agy's per-conversation `brain/<id>/.system_generated/logs/transcript.jsonl` gives tokens per model call and timestamped prompts. Conversations without that log still count steps.
 
 - `!agy <name> [dir]` where `<name>` is this topic's own session now says to send bare `!agy` (which adds agy beside it in the same folder) instead of pointing at `!bind`.
 
