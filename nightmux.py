@@ -6297,7 +6297,7 @@ def tweet_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:1000px;background:#07090f;color:#cdd6f4;
+body{margin:0;width:1200px;height:1100px;background:#07090f;color:#cdd6f4;
 font:26px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
 justify-content:space-between;padding:52px 64px;box-sizing:border-box;
 background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%)}
@@ -6312,9 +6312,15 @@ h2{margin:0 0 10px;font-size:18px;color:#7aa2f7;letter-spacing:3px;font-weight:4
 .p span{color:#565f89;margin-left:auto}
 ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:#e0af68;font-style:normal}
 .foot{display:flex;justify-content:space-between;color:#565f89;font-size:20px}
+.split{display:flex;height:26px;border-radius:6px;overflow:hidden;background:#1b2133}
+.split b{display:block;height:100%}
+.leg{display:flex;flex-wrap:wrap;gap:6px 28px;margin-top:12px;font-size:20px}
+.leg span i{display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:8px;vertical-align:-1px}
+.leg em{font-style:normal;color:#565f89}
 </style></head><body>
 <div><h1><svg width="34" height="34" viewBox="0 0 16 16" style="vertical-align:-5px"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg> my night crew · {period}</h1><div class="sub">{agents}</div></div>
 <div class="grid">{cells}</div>
+<div><h2>TOKENS BY AGENT</h2>{split}</div>
 <div class="two"><div><h2>PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
 <div class="foot"><span>made with nightmux</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
@@ -6385,9 +6391,34 @@ def wrapped_data(cfg, days):
     nud = sum(round((a["nudge_pct"] or 0) * (a["prompts"] or 0)) for a in ag.values())
     if prompts >= 10:
         ins.append(("one-word nudges", f"{nud / prompts:.0%}"))
-    return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]),
+    split = sorted(((a, sum(v["tokens"].values()), v["requests"] or 0) for a, v in ag.items()),
+                   key=lambda x: (-x[1], -x[2]))
+    return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]), "split": split,
             "used": toks, "saved": saved, "lighter": lighter,
             "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
+
+
+AGENT_COLOR = {"claude": "#d97757", "codex": "#7aa2f7", "opencode": "#9ece6a", "agy": "#bb9af7"}
+
+
+NO_TOKENS = {"agy"}   # keeps step counts on disk, never tokens
+
+
+def split_html(split):
+    """One bar cut by each agent's share of the tokens, and a legend under it.
+    An agent that keeps no token counts shows its steps instead of a false 0%."""
+    e, tot = html.escape, sum(n for _, n, _ in split) or 1
+    col = {a: AGENT_COLOR.get(a, "#7dcfff") for a, _, _ in split}
+
+    def pct(n):
+        return f"{100 * n / tot:.0f}%" if n * 100 >= tot else "<1%"
+    bar = "".join(f'<b style="width:{100 * n / tot:.2f}%;background:{col[a]}"></b>' for a, n, _ in split if n)
+    leg = "".join(f'<span><i style="background:{col[a]}"></i>{e(a)} {_k(n)} <em>{pct(n)}</em></span>' if n else
+                  f'<span><i style="background:#2b3452"></i>{e(a)} <em>{_k(r)} steps, no token counts</em></span>'
+                  if a in NO_TOKENS and r else
+                  f'<span><i style="background:#2b3452"></i>{e(a)} <em>0</em></span>'
+                  for a, n, r in split)
+    return f'<div class="split">{bar}</div><div class="leg">{leg or "—"}</div>'
 
 
 def wrapped_page(days, w, share=False):
@@ -6408,6 +6439,7 @@ def wrapped_page(days, w, share=False):
             .replace("{agents}", e(" · ".join(w["agents"])))
             .replace("{cells}", "".join(f'<div><div class="n">{e(n)}</div><div class="l">{e(l)}'
                                         '</div></div>' for n, l in w["cells"]))
+            .replace("{split}", split_html(w.get("split") or []))
             .replace("{projects}", projects).replace("{hours}", hours)
             .replace("{insights}", "".join(f"<li><i>{e(k)}</i> {e(v)}</li>"
                                            for k, v in w["insights"][:6])))
@@ -6425,7 +6457,7 @@ def wrapped_cmd(cfg, topic, arg):
         with open(src, "w") as f:
             f.write(page)
         run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-            "--window-size=1200,1000", "--virtual-time-budget=2000", f"--screenshot={out}",
+            "--window-size=1200,1100", "--virtual-time-budget=2000", f"--screenshot={out}",
             "file://" + src, timeout=60)
         try:
             with open(out, "rb") as f:
@@ -6445,7 +6477,8 @@ def wrapped_cmd(cfg, topic, arg):
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
         send_file(cfg, topic, "wrapped.png", mine, kind="photo",
                   caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
-                  + "\n".join(f"• {k}: {v}" for k, v in w["insights"]))
+                  + "\n".join(f"• {k}: {v}" for k, v in w["insights"])
+                  + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
                   caption="📤 to share: projects shown as counts only",
                   buttons=kb([[("🐦 post it", tweet_url(
@@ -13759,6 +13792,10 @@ def selfcheck():
         assert wd_["saved"] == 5000000 and wd_["cells"][1][1] == "tokens saved (5.0M)", wd_
         assert wd_["cells"][1][0].endswith("%") and wd_["cells"][1][0] != "0%", wd_["cells"]
         assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
+        assert wd_["split"][0][0] == "claude" and "TOKENS BY AGENT" in pg_, wd_["split"]
+        sh_ = split_html([("claude", 300, 1), ("codex", 100, 1), ("agy", 0, 40), ("opencode", 0, 0)])
+        assert "75%" in sh_ and "25%" in sh_ and "agy <em>40 steps, no token counts" in sh_, sh_
+        assert "opencode <em>0</em>" in sh_, sh_
         ps_ = wrapped_page(30, wd_, share=True)
         assert "shop" not in ps_ and "project 1" in ps_ and ">30<" in ps_, ps_
         t0_ = time.time()
