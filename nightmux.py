@@ -6301,31 +6301,39 @@ def reddit_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:1100px;background:#07090f;color:#cdd6f4;
-font:26px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
-justify-content:space-between;padding:52px 64px;box-sizing:border-box;
-background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%),radial-gradient(circle at 10% 90%,#1b2a4a 0,#07090f 50%)}
-h1{font-size:16px;margin:0;letter-spacing:1px;font-weight:600;text-shadow:0 0 10px rgba(255,255,255,0.1)}.sub{color:#8b93a7;font-size:22px}
-h2{margin:0 0 10px;font-size:18px;color:#7aa2f7;letter-spacing:3px;font-weight:400}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
-.n{font-size:62px;font-weight:700;color:#9ece6a;text-shadow:0 0 15px rgba(158,206,106,0.5)}.l{font-size:19px;color:#a9b1d6}
+body{margin:0;width:1200px;height:1100px;background:#0d1117;color:#c9d1d9;
+font:24px/1.4 system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;
+justify-content:space-between;padding:60px 80px;box-sizing:border-box;
+background:radial-gradient(100% 100% at 85% 0%, rgba(138, 43, 226, 0.2) 0%, transparent 60%), radial-gradient(100% 100% at 10% 100%, rgba(46, 160, 67, 0.15) 0%, transparent 50%), #0d1117;}
+.card{background:rgba(22, 27, 34, 0.6);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:40px;box-shadow:0 12px 40px rgba(0,0,0,0.3);display:flex;flex-direction:column;gap:32px;flex:1;margin-top:20px;}
+h1{font-size:28px;margin:0;letter-spacing:-0.5px;font-weight:800;color:#fff;display:flex;align-items:center;gap:12px;text-transform:uppercase}
+.sub{color:#8b949e;font-size:20px;margin-top:8px;font-family:ui-monospace,monospace;}
+h2{margin:0 0 16px;font-size:16px;color:#8b949e;letter-spacing:4px;font-weight:700;text-transform:uppercase}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+.cell{background:rgba(255,255,255,0.03);padding:24px;border-radius:16px;}
+.n{font-size:56px;font-weight:800;color:#3fb950;line-height:1;margin-bottom:8px;letter-spacing:-1px}
+.l{font-size:18px;color:#c9d1d9;font-weight:500;}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:48px}
-.p{display:flex;align-items:center;gap:12px;font-size:20px;margin:6px 0}
-.p em{width:230px;font-style:normal;overflow:hidden;white-space:nowrap}
-.p b{display:inline-block;height:14px;background:#bb9af7;border-radius:3px}
-.p span{color:#565f89;margin-left:auto}
-ul{margin:0;padding:0;list-style:none;font-size:21px}li{margin:7px 0}li i{color:#e0af68;font-style:normal}
-.foot{display:flex;justify-content:space-between;color:#565f89;font-size:20px}
-.split{display:flex;height:26px;border-radius:6px;overflow:hidden;background:#1b2133}
-.split b{display:block;height:100%}
-.leg{display:flex;flex-wrap:wrap;gap:6px 28px;margin-top:12px;font-size:20px}
-.leg span i{display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:8px;vertical-align:-1px}
-.leg em{font-style:normal;color:#565f89}
+.p{display:flex;align-items:center;gap:16px;font-size:20px;margin:12px 0}
+.p em{width:220px;font-style:normal;overflow:hidden;white-space:nowrap;font-weight:600;color:#e6edf3}
+.p b{display:inline-block;height:12px;background:linear-gradient(90deg, #a371f7 0%, #d2a8ff 100%);border-radius:6px}
+.p span{color:#8b949e;margin-left:auto;font-family:ui-monospace,monospace;font-size:18px}
+ul{margin:0;padding:0;list-style:none;font-size:20px}li{margin:10px 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.05);padding-bottom:10px;}
+li:last-child{border:none}li i{color:#d2a8ff;font-style:normal;font-weight:600;}
+.foot{display:flex;justify-content:space-between;color:#8b949e;font-size:18px;margin-top:30px;font-family:ui-monospace,monospace;}
+.split{display:flex;height:24px;border-radius:12px;overflow:hidden;background:#21262d;box-shadow:inset 0 2px 4px rgba(0,0,0,0.5)}
+.split b{display:block;height:100%;transition:width 1s ease}
+.leg{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px;font-size:16px}
+.leg span{display:flex;align-items:center;font-weight:600;color:#e6edf3}
+.leg span i{display:inline-block;width:12px;height:12px;border-radius:6px;margin-right:8px;}
+.leg em{font-style:normal;color:#8b949e;margin-left:6px;font-family:ui-monospace,monospace}
 </style></head><body>
-<div><h1><svg width="34" height="34" viewBox="0 0 16 16" style="vertical-align:-5px"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg> my night crew · {period}</h1><div class="sub">{agents}</div></div>
+<div><h1><svg width="40" height="40" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#d2a8ff"/></svg> NIGHTMUX WRAPPED</h1><div class="sub">{period} · {agents}</div></div>
+<div class="card">
 <div class="grid">{cells}</div>
 <div><h2>TOKENS BY AGENT</h2>{split}</div>
-<div class="two"><div><h2>PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
+<div class="two"><div><h2>TOP PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
+</div>
 <div class="foot"><span>made with nightmux</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
 
@@ -6441,7 +6449,7 @@ def wrapped_page(days, w, share=False):
           '<text x="460" y="70" font-size="10" fill="#565f89">23h</text></svg>')
     return (WRAPPED_HTML.replace("{period}", f"last {days} days")
             .replace("{agents}", e(" · ".join(w["agents"])))
-            .replace("{cells}", "".join(f'<div><div class="n">{e(n)}</div><div class="l">{e(l)}'
+            .replace("{cells}", "".join(f'<div class="cell"><div class="n">{e(n)}</div><div class="l">{e(l)}'
                                         '</div></div>' for n, l in w["cells"]))
             .replace("{split}", split_html(w.get("split") or []))
             .replace("{projects}", projects).replace("{hours}", hours)
