@@ -11574,6 +11574,17 @@ if (/NightmuxApp/.test(navigator.userAgent)) document.getElementById('phone').in
 
 
 
+
+def inject_telemetry(cfg, html):
+    tid = cfg.get("telemetry_id")
+    if not tid:
+        return html
+    if tid.startswith("G-"):
+        ping = f'<script async src="https://www.googletagmanager.com/gtag/js?id={tid}"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){{dataLayer.push(arguments);}}gtag("js",new Date());gtag("config","{tid}");</script>'
+    else:
+        ping = f'<script data-goatcounter="https://{tid}.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>'
+    return html.replace("</head>", ping + "</head>")
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     peer = False   # this request came from another nightmux, through /peer/
 
@@ -11626,10 +11637,10 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 with self.server.lock:
                     data = public_snapshot(self.server.cfg, self.server.state)
                 return self.reply(json.dumps(data), "application/json")
-            return self.reply(OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>"
-                                                  % json.dumps(tok), 1), "text/html; charset=utf-8")
+            html = OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>" % json.dumps(tok), 1)
+            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
         if self.path in ("/", ""):
-            return self.reply(DASHBOARD_HTML, "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, DASHBOARD_HTML), "text/html; charset=utf-8")
         if self.path == "/api/metrics":
             cfg = self.server.cfg
             with self.server.lock:
@@ -11646,7 +11657,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             # No lock: reads transcript files, not daemon state.
             return self.reply(json.dumps(analyze_chats(days)), "application/json")
         if self.path.startswith("/chat"):
-            return self.reply(CHAT_HTML, "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, CHAT_HTML), "text/html; charset=utf-8")
         if self.path == "/manifest.json":
             return self.reply(json.dumps({
                 "name": "nightmux", "short_name": "nightmux", "start_url": "/",
@@ -11656,7 +11667,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/icon.svg":
             return self.reply(ICON_SVG, "image/svg+xml")
         if self.path == "/app":
-            return self.reply(APP_HTML, "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, APP_HTML), "text/html; charset=utf-8")
         if self.path.startswith("/qr.svg?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
