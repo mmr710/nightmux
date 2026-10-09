@@ -1,4 +1,4 @@
 # These are supported funding model platforms
 
-custom: ["https://t.me/+SGmmExdMHTQ3OWVk"] # Replace with a buymeacoffee or other link if created
-# Add a note about the USDT donation in the repo instead since FUNDING.yml doesn't support raw crypto addresses elegantly unless linked to a page.
+buy_me_a_coffee: mmr710 # Replace 'mmr710' with your actual Buy Me A Coffee username if different
+custom: ["https://tronscan.org/#/address/TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN"] # Links to your USDT TRX address on Tronscan
