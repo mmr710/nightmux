@@ -6123,7 +6123,7 @@ def crop(frames):
     return [(x1 - x0, y1 - y0, [r[x0 * 3:x1 * 3] for r in rows[y0:y1]]) for _, _, rows in frames]
 
 
-def reel_render(cfg, frames):
+def reel_render(cfg, frames, title="NIGHTMUX REEL"):
     """GIF bytes for the story frames, or (None, why)."""
     b = browser_bin(cfg)
     if not b:
@@ -6134,10 +6134,10 @@ def reel_render(cfg, frames):
         f.write(OFFICE_HTML)
     pics = []
     for i, fr in enumerate(frames):
-        url = (f"file://{page}?reel&scale=2&f={i * 3}#"
+        url = (f"file://{page}?reel&scale=2&f={i * 3}&t={urllib.parse.quote(title)}#"
                + urllib.parse.quote(json.dumps(fr, separators=(",", ":"))))
         run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-            "--window-size=560,300", "--virtual-time-budget=1500",
+            "--window-size=600,400", "--virtual-time-budget=1500",
             f"--screenshot={shot}", url, timeout=60)
         try:
             with open(shot, "rb") as f:
@@ -6147,7 +6147,7 @@ def reel_render(cfg, frames):
             continue
     if len(pics) < 2:
         return None, "the browser drew no frames"
-    return gif(crop(pics)), ""
+    return gif(pics), ""
 
 
 def reel_caption(cfg, since):
@@ -6181,7 +6181,7 @@ def reel_start(cfg, topic, hours):
 
     def go():
         try:
-            data, err = reel_render(cfg, frames)
+            data, err = reel_render(cfg, frames, name)
             if not data:
                 send(cfg, topic, f"🌙 no reel: {err}", mode="plain")
                 return
@@ -10330,7 +10330,11 @@ button.snd{background:none;border:0;font-size:18px;cursor:pointer;padding:0 4px}
 #toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#9ece6a;color:#07090f;padding:6px 12px;display:none;z-index:4}
 .empty{color:#565f89;padding:24px}
 body.pub .nav,body.pub #sheet{display:none}
-body.demo{display:flex;align-items:center;justify-content:center;min-height:100vh}
+body.demo{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;
+background:radial-gradient(100% 100% at 50% 0%, rgba(138,43,226,0.15) 0%, transparent 80%), #0d1117;
+font-family:system-ui,-apple-system,sans-serif;}
+body.demo #stage{display:block;box-shadow:0 20px 50px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1);border-radius:12px;}
+body.demo h1{margin:0 0 24px;font-size:24px;font-weight:800;color:#fff;letter-spacing:4px;text-transform:uppercase;text-shadow:0 2px 10px rgba(0,0,0,0.5)}
 body.demo header,body.demo main,body.demo #sheet{display:none}
 #stage{display:none}
 body.demo #stage{display:block}
@@ -10349,6 +10353,7 @@ body.demo #stage{display:block}
 <input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span></div>
 <div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
+<h1 id="rtitle" style="display:none">NIGHTMUX REEL</h1>
 <canvas id="stage"></canvas>
 <div id="sheet"></div><div id="toast"></div>
 <script>
@@ -11034,6 +11039,7 @@ async function replay() {
 window.__frame = n => { auto = false; frame = n; draw(); };
 if (REEL) { auto = false; frame = +Q.get('f') || 0; }
 if (DEMO || REEL) document.body.classList.add('demo');
+if (REEL) { document.getElementById('rtitle').style.display = 'block'; document.getElementById('rtitle').textContent = Q.get('t') || 'NIGHTMUX REEL'; }
 if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
