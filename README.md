@@ -876,7 +876,6 @@ their version until relaunched: `!kill yes`, then `!restore`.
 **Join the Community:** Connect with other users, share your overnight agent successes, and get help in our [Telegram Group](https://t.me/+SGmmExdMHTQ3OWVk).
 
 **Support the Project:** If `nightmux` saves you time or money, consider supporting its development! ☕
-* **Buy Me A Coffee:** [buymeacoffee.com/mmr710](https://buymeacoffee.com/mmr710)
 * **Crypto (USDT on TRX Network):** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
 
 ## Requirements
