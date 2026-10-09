@@ -68,7 +68,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 
 - `!usage` | `!ctx` | `!cost [days]` | `!forecast` = when each window fills
 - `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k) · `!idlectx <pct|off>`
-- `!ladder` on|off = Claude on haiku/sonnet/opus by task, up a step when it struggles
+- `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
 - `!spendcap <turns|500k|2M|off>` = interrupt a runaway loop
 - `!budget <50M> [day|week|month]` | off = a token allowance for this project; once spent, new prompts wait for the next period

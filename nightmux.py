@@ -14466,7 +14466,7 @@ def selfcheck():
         assert "9" not in _lint_pass and "9" not in _lint_hold
         note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
         assert queued and "haiku" in note and cst_["k"]["queue"] == [
-            "/model haiku", "rename foo to bar in utils"], cst_
+            "/model claude-3-5-haiku-20241022", "rename foo to bar in utils"], cst_
         assert _route_last["9"] == ("light", "claude")
         cst_["k"]["queue"] = []
         assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
