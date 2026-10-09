@@ -5532,7 +5532,7 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["haiku", "sonnet", "opus"]}
+LADDER = {"claude": ["claude-3-5-haiku-20241022", "sonnet", "opus"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
@@ -8290,12 +8290,18 @@ def office_snapshot(cfg, state):
         else: usage["oc_model"] = "Unknown"
         
         try:
+            agy_usage = agy_limits()
+            if agy_usage["at"]:
+                if "claude" in usage.get("agy_model", "").lower() or "gpt" in usage.get("agy_model", "").lower():
+                    usage["agy_limit"] = agy_usage["claude_pct"]
+                else:
+                    usage["agy_limit"] = agy_usage["pct"]
+            else:
+                usage["agy_limit"] = 0
+            
             ch = analyze_chats(1).get("agents", {})
-            a = ch.get("agy", {}).get("tokens", {})
             o = ch.get("opencode", {}).get("tokens", {})
-            a_tot = sum(a.values()) if isinstance(a, dict) else 0
             o_tot = sum(o.values()) if isinstance(o, dict) else 0
-            usage["agy_limit"] = min(100, (a_tot / 15_000_000) * 100) if a_tot else 0
             usage["oc_limit"] = min(100, (o_tot / 2_000_000) * 100) if o_tot else 0
         except Exception:
             usage["agy_limit"] = 0
@@ -9092,6 +9098,41 @@ def chat_tips(stats):
                          f"(!{lo} / !failover {lo}) and keep {hi} for what only it does well"))
     return tips
 
+
+
+    try:
+        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
+        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+        if m_gem:
+            # Output says "Remaining 73%", we want "used percentage" which is 100 - remaining
+            _agy_usage["pct"] = 100 - int(m_gem.group(1))
+        if m_cla:
+            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
+        _agy_usage["at"] = time.time()
+    except Exception:
+        pass
+    return _agy_usage
+
+
+_agy_usage = {"at": 0, "pct": 0, "claude_pct": 0}
+
+def agy_limits():
+    import subprocess, time, re
+    if time.time() - _agy_usage["at"] < 300:
+        return _agy_usage
+    try:
+        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
+        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+        if m_gem:
+            _agy_usage["pct"] = 100 - int(m_gem.group(1))
+        if m_cla:
+            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
+        _agy_usage["at"] = time.time()
+    except Exception:
+        pass
+    return _agy_usage
 
 def analyze_chats(days=30, home=None):
     """Read every agent's own transcripts on this machine and summarise them.
