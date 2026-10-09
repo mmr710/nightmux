@@ -875,7 +875,9 @@ their version until relaunched: `!kill yes`, then `!restore`.
 
 **Support the Project:** If `nightmux` saves you time or money, consider supporting its development! ☕
 * **Buy Me A Coffee:** [buymeacoffee.com/mmr710](https://buymeacoffee.com/mmr710)
-* **Crypto (USDT on TRX Network):** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+* **Crypto (USDT on TRX Network):** 
+  <br>`TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+  <br><img src="docs/usdt-qr.png" alt="USDT TRX QR Code" width="150">
 
 ## Requirements
 
