@@ -7,6 +7,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- `!wrapped` shows tokens by agent: a bar split by each agent's share, with a legend. Agents that keep no token counts (agy) show their step counts instead of a misleading 0%. The private card's caption lists the split too.
 - Dashboard redesign: a sticky header with live counts (working / asking / idle / queued / at a limit), topics first, cards edged in their status colour, a pulsing dot on busy and asking agents, and limits and servers below.
 - Office motion: drawing runs at ~30 fps between story frames, so walks move a pixel at a time. Walks ease in and out at each agent's own pace after a beat to stand up, with a four-beat stride, arm swing, facing direction and a shadow. Seated agents blink and glance at the keyboard. Dust drifts in the lamp light.
 - Savings now include model choice: while `!ladder` runs a Claude turn on haiku or sonnet, the turn's cost below Opus is recorded (`MODEL_COST`) and shown in `!saved` and on the `!wrapped` cards.
