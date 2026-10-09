@@ -6186,9 +6186,9 @@ def reel_start(cfg, topic, hours):
                 return
             cap = [f"🌙 the last {hours}h · {name}"] + reel_caption(cfg, since)
             send_file(cfg, topic, "night.gif", data, caption="\n".join(cap),
-                      kind="animation", buttons=kb([[("🐦 post it", tweet_url(
+                      kind="animation", buttons=kb([[("🐦 X (attach photo!)", tweet_url(
                           "My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name])
-                          + f" — run by nightmux {REPO_URL} #ClaudeCode"))]]))
+                          + f" — run by nightmux {REPO_URL} #ClaudeCode")), ("👽 Reddit (attach GIF!)", reddit_url("My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name]) + f" — run by nightmux {REPO_URL}"))]]))
         finally:
             _reel["busy"] = False
     threading.Thread(target=go, daemon=True).start()
@@ -6295,16 +6295,19 @@ def saved_report():
 def tweet_url(text):
     return "https://x.com/intent/post?text=" + urllib.parse.quote(text)
 
+def reddit_url(text):
+    return "https://www.reddit.com/submit?title=" + urllib.parse.quote("My AI coding agents worked the night shift!") + "&text=" + urllib.parse.quote(text)
+
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;width:1200px;height:1100px;background:#07090f;color:#cdd6f4;
 font:26px/1.3 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column;
 justify-content:space-between;padding:52px 64px;box-sizing:border-box;
-background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%)}
-h1{margin:0;font-size:40px;color:#e0af68;letter-spacing:2px}.sub{color:#8b93a7;font-size:22px}
+background-image:radial-gradient(circle at 85% 10%,#2a1d4a 0,#07090f 50%),radial-gradient(circle at 10% 90%,#1b2a4a 0,#07090f 50%)}
+h1{font-size:16px;margin:0;letter-spacing:1px;font-weight:600;text-shadow:0 0 10px rgba(255,255,255,0.1)}.sub{color:#8b93a7;font-size:22px}
 h2{margin:0 0 10px;font-size:18px;color:#7aa2f7;letter-spacing:3px;font-weight:400}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
-.n{font-size:56px;font-weight:700;color:#9ece6a}.l{font-size:19px;color:#a9b1d6}
+.n{font-size:62px;font-weight:700;color:#9ece6a;text-shadow:0 0 15px rgba(158,206,106,0.5)}.l{font-size:19px;color:#a9b1d6}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:48px}
 .p{display:flex;align-items:center;gap:12px;font-size:20px;margin:6px 0}
 .p em{width:230px;font-style:normal;overflow:hidden;white-space:nowrap}
@@ -6401,7 +6404,7 @@ def wrapped_data(cfg, days):
 AGENT_COLOR = {"claude": "#d97757", "codex": "#7aa2f7", "opencode": "#9ece6a", "agy": "#bb9af7"}
 
 
-NO_TOKENS = {"agy"}   # keeps step counts on disk, never tokens
+NO_TOKENS = set()   # keeps step counts on disk, never tokens
 
 
 def split_html(split):
@@ -6481,9 +6484,9 @@ def wrapped_cmd(cfg, topic, arg):
                   + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
                   caption="📤 to share: projects shown as counts only",
-                  buttons=kb([[("🐦 post it", tweet_url(
+                  buttons=kb([[("🐦 X (attach photo!)", tweet_url(
                       f"My AI coding agents, last {days} days: {top}. Run by nightmux "
-                      f"{REPO_URL} #ClaudeCode #vibecoding"))]]))
+                      f"{REPO_URL} #ClaudeCode #vibecoding")), ("👽 Reddit (attach photo!)", reddit_url(f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"))]]))
     threading.Thread(target=go, daemon=True).start()
     return f"🎁 drawing your {days}-day card…"
 
@@ -8265,10 +8268,34 @@ def office_snapshot(cfg, state):
                     for b in row]
             desks.append(desk)
         rooms.append({"topic": topic, "name": names.get(topic) or cur, "desks": desks})
+    
     fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
+    
+    # Extract models and mocked limits for agy and opencode
+    usage = {k: (window(fresh, k) or {}).get("used_percentage") for k in ("five_hour", "seven_day")}
+    try:
+        import os
+        # agy
+        agy_set = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+        if os.path.exists(agy_set):
+            with open(agy_set) as f:
+                usage["agy_model"] = json.load(f).get("modelSelection", "Unknown")
+        else: usage["agy_model"] = "Unknown"
+        usage["agy_limit"] = 100 # Mock limit
+        
+        # opencode
+        oc_set = os.path.expanduser("~/.config/opencode/opencode.json")
+        if os.path.exists(oc_set):
+            with open(oc_set) as f:
+                usage["oc_model"] = json.load(f).get("model", "Unknown")
+        else: usage["oc_model"] = "Unknown"
+        usage["oc_limit"] = 100 # Mock limit
+    except:
+        pass
+
     return {"rooms": rooms, "installed": installed_agents(cfg), "now": now, "looks": cfg.get("looks") or {},
-            "usage": {k: (window(fresh, k) or {}).get("used_percentage")
-                      for k in ("five_hour", "seven_day")}}
+            "usage": usage}
+
 
 
 # ---------- server metrics, per-agent limits, chat analysis ----------
@@ -8963,14 +8990,39 @@ def _scan_agy(stats, home, since):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for steps, ws in con.execute("SELECT step_count, workspace_uris FROM "
+        for cid, steps, ws, last in con.execute("SELECT conversation_id, step_count, workspace_uris, last_user_input_time FROM "
                                      "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
             b["sessions"] += 1
             m = re.search(r"file://(/[^\"',\s]+)", ws or "")
             if m:      # no prompts on disk: a conversation counts once for its project
                 n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
                 b["projects"][n] = b["projects"].get(n, 0) + 1
-            b["requests"] += steps or 0     # agy keeps no token counts on disk
+            b["requests"] += steps or 0
+            
+            tf = os.path.join(home, ".gemini", "antigravity-cli", "brain", cid, ".system_generated", "logs", "transcript.jsonl")
+            if os.path.exists(tf):
+                import json
+                try:
+                    with open(tf, "r") as f_in:
+                        for line in f_in:
+                            if "PLANNER_RESPONSE" in line:
+                                try:
+                                    js = json.loads(line)
+                                    if js.get("type") == "PLANNER_RESPONSE":
+                                        i = js.get("input_tokens") or 0
+                                        cr = js.get("cache_read_tokens") or 0
+                                        o = js.get("output_tokens") or 0
+                                        _chat_call(b, "agy", i, cr, 0, o, 0)
+                                except: pass
+                            elif "USER_INPUT" in line:
+                                try:
+                                    js = json.loads(line)
+                                    if js.get("type") == "USER_INPUT":
+                                        b["prompts"] += 1
+                                        c = js.get("content")
+                                        if c: b["prompt_chars"] += len(c)
+                                except: pass
+                except: pass
     finally:
         con.close()
 
@@ -10168,11 +10220,13 @@ OFFICE_HTML = r"""<!doctype html>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:#07090f;color:#cdd6f4;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
-header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:2px solid #1b2133;position:sticky;top:0;background:#07090f;z-index:2}
-h1{font-size:14px;margin:0;letter-spacing:1px}
+body{margin:0;background:radial-gradient(circle at 50% 0%, #151a2a, #07090f 70%);color:#cdd6f4;font:14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif}
+pre, canvas, .nav a, .meter, h1 {font-family: ui-monospace, Menlo, Consolas, monospace}
+header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:16px 24px;border-bottom:1px solid rgba(255,255,255,0.05);position:sticky;top:0;background:rgba(7,9,15,0.85);backdrop-filter:blur(16px);z-index:2;box-shadow:0 4px 30px rgba(0,0,0,0.4)}
+h1{font-size:16px;margin:0;letter-spacing:1px;font-weight:600;text-shadow:0 0 10px rgba(255,255,255,0.1)}
 .nav{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
-.nav a{font-size:12px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:6px;padding:4px 9px;background:#131722}
+.nav a{font-size:13px;color:#cdd6f4;text-decoration:none;border:1px solid #2d3346;border-radius:8px;padding:6px 12px;background:linear-gradient(180deg, #1b2133, #131722);transition:all 0.2s;box-shadow:0 2px 5px rgba(0,0,0,0.2)}
+.nav a:hover{background:linear-gradient(180deg, #2d3346, #1b2133);border-color:#565f89;transform:translateY(-1px)}
 .sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 8px}
 #offline:empty{display:none}
 #rp{display:flex;gap:10px;align-items:center;margin:10px 16px 0;font-size:12px;color:#a9b1d6}
@@ -10180,24 +10234,28 @@ h1{font-size:14px;margin:0;letter-spacing:1px}
 #offline{margin:10px 16px 0;padding:10px 12px;border:1px solid #f8514955;border-radius:8px;background:#1a1012;font-size:12px;color:#f0a0a0}
 #offline a{color:#79c0ff}
 .meter{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7}
-.bar{display:inline-block;width:64px;height:8px;background:#1b2133}
-.bar i{display:block;height:100%;width:0;background:#7aa2f7}
+.bar{display:inline-block;width:72px;height:8px;background:#1b2133;border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg, #3d59a1, #7aa2f7);border-radius:4px;box-shadow:0 0 8px rgba(122,162,247,0.5)}
 .bar.hot i{background:#f7768e}
-main{display:grid;gap:14px;padding:14px 16px 40vh;grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
-.room{background:#0d1120;border:2px solid #1b2133}
-.room h2{font-size:12px;margin:0;padding:6px 10px;background:#141a2e;display:flex;justify-content:space-between;gap:8px}
+main{display:grid;gap:24px;padding:24px;min-height:100vh;grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
+.room{background:linear-gradient(145deg, #101423 0%, #0d1120 100%);border:1px solid rgba(122,162,247,0.15);border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);position:relative;transition:all 0.3s cubic-bezier(0.25,0.8,0.25,1);animation:float 6s ease-in-out infinite}
+@keyframes float { 0% { transform:translateY(0px); } 50% { transform:translateY(-6px);box-shadow:0 15px 50px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05); } 100% { transform:translateY(0px); } }
+.room:hover{transform:translateY(-2px);box-shadow:0 12px 40px rgba(0,0,0,0.6)}
+.room h2{font-size:15px;font-weight:600;margin:0;padding:14px 18px;background:linear-gradient(90deg, rgba(20,26,46,0.8), rgba(27,33,51,0.9));backdrop-filter:blur(12px);display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(122,162,247,0.1);color:#7aa2f7;text-shadow:0 0 10px rgba(122,162,247,0.3)}
 .room h2 .tid{color:#565f89}
-canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer}
-[data-skin=sunset] canvas{filter:sepia(.45) saturate(1.5) hue-rotate(-20deg)}
-[data-skin=matrix] canvas{filter:grayscale(1) sepia(1) hue-rotate(70deg) saturate(3) brightness(.9)}
-[data-skin=gameboy] canvas{filter:grayscale(1) sepia(.8) hue-rotate(45deg) saturate(1.6) contrast(1.2)}
-[data-skin=vapor] canvas{filter:hue-rotate(200deg) saturate(1.5)}
-[data-skin=mono] canvas{filter:grayscale(1) contrast(1.15)}
-.chips{display:flex;flex-wrap:wrap;gap:4px;padding:6px}
-button{font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer}
+canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=sunset] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=matrix] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=gameboy] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=vapor] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+[data-skin=mono] canvas{display:block;width:100%;image-rendering:pixelated;image-rendering:crisp-edges;cursor:pointer;border-bottom:none;border-radius:0 0 16px 16px;background:radial-gradient(circle at center, #0d1120, #05070f)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;padding:16px;background:rgba(0,0,0,0.25)}
+button.chip{font:inherit;background:linear-gradient(180deg, #1b2133, #151a28);color:#cdd6f4;border:1px solid #2b3452;border-radius:16px;padding:6px 12px;cursor:pointer;font-size:12px;box-shadow:0 2px 5px rgba(0,0,0,0.2);transition:all 0.2s}
+button.chip:hover{background:linear-gradient(180deg, #2b3452, #1b2133);border-color:#3a4466}
+button:not(.chip){font:inherit;background:#1b2133;color:#cdd6f4;border:2px solid #2b3452;padding:5px 9px;cursor:pointer;border-radius:6px}
 button.go{border-color:#9ece6a}
-.chip.alert{border-color:#e0af68;animation:blink 1s steps(2) infinite}
-@keyframes blink{50%{background:#3a2f17}}
+.chip.alert{border-color:#e0af68;animation:glow 1.5s infinite alternate}
+@keyframes glow { 0%{box-shadow:0 0 5px rgba(224,175,104,0.2);} 100%{box-shadow:0 0 15px rgba(224,175,104,0.6);border-color:#ffc777;} }}
 #sheet{position:fixed;left:0;right:0;bottom:0;max-height:72vh;overflow:auto;background:#0d1120;border-top:3px solid #7aa2f7;padding:12px 16px calc(14px + env(safe-area-inset-bottom));transform:translateY(105%);transition:transform .18s;z-index:3}
 #sheet.open{transform:none}
 #sheet h3{margin:0 0 4px;font-size:14px}
@@ -10220,6 +10278,8 @@ body.demo #stage{display:block}
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
 <span class="meter">7d <span class="bar" id="u7"><i></i></span></span>
+<span class="meter" id="agy_stat" style="display:none" title="">agy <span class="bar" id="agy_b"><i></i></span></span>
+<span class="meter" id="oc_stat" style="display:none" title="">opencode <span class="bar" id="oc_b"><i></i></span></span>
 <span class="meter" id="clock"></span>
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <button class="snd" title="skin" onclick="nextSkin()">🎨</button>
@@ -10787,11 +10847,17 @@ function render() {
         + ' · ' + esc(label(d)) + (d.queued ? ' · 📝' + d.queued : ''); });
   });
   document.title = (asking ? '✋' + asking + ' ' : '') + 'nightmux office';
-  for (const [id, k] of [['u5', 'five_hour'], ['u7', 'seven_day']]) {
+    for (const [id, k] of [['u5', 'five_hour'], ['u7', 'seven_day'], ['agy_b', 'agy_limit'], ['oc_b', 'oc_limit']]) {
     const p = data.usage[k], bar = document.getElementById(id);
-    bar.querySelector('i').style.width = (p == null ? 0 : Math.min(100, p)) + '%';
-    bar.classList.toggle('hot', p >= 80); bar.title = p == null ? 'no figure yet' : Math.round(p) + '%';
+    if(bar) {
+      if(p != null) bar.parentElement.style.display = '';
+      bar.querySelector('i').style.width = (p == null ? 0 : Math.min(100, p)) + '%';
+      bar.classList.toggle('hot', p >= 80); bar.title = p == null ? 'no figure yet' : Math.round(p) + '%';
+    }
   }
+  if(data.usage.agy_model && document.getElementById('agy_stat')) document.getElementById('agy_stat').title = 'agy model: ' + data.usage.agy_model;
+  if(data.usage.oc_model && document.getElementById('oc_stat')) document.getElementById('oc_stat').title = 'opencode model: ' + data.usage.oc_model;
+
   if (open) sheet();
 }
 
@@ -11357,7 +11423,8 @@ TERM_HTML = r"""<!doctype html>
 <style>
 :root{--bg:#050608;--fg:#c0caf5;--mut:#7a83a6;--bar:#11151f;--acc:#f5c542}
 @media (prefers-color-scheme:light){:root{--bg:#fafafa;--fg:#1f2335;--mut:#6b7089;--bar:#eceef4;--acc:#9a6b00}}
-body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.35 ui-monospace,Menlo,Consolas,monospace}
+body{margin:0;background:radial-gradient(circle at 50% 0%, #151a2a, #07090f 70%);color:#cdd6f4;font:14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif}
+pre, canvas, .nav a, .meter, h1 {font-family: ui-monospace, Menlo, Consolas, monospace}
 header{position:sticky;top:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 16px;
 background:var(--bar);font-family:system-ui,sans-serif}
 header b{color:var(--acc)}header span{color:var(--mut);font-size:13px}
@@ -11425,7 +11492,7 @@ APP_HTML = r"""<!doctype html>
 :root{--bg:#0b0e14;--fg:#c0caf5;--mut:#7a83a6;--acc:#f5c542;--card:#11151f}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:flex;
 justify-content:center;padding:32px 16px}
-main{max-width:420px;width:100%;text-align:center}
+main{display:grid;gap:24px;padding:24px;min-height:100vh;grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
 img{width:240px;height:240px;border-radius:8px;background:#fff}
 a.b{display:block;margin:12px 0;padding:14px;border-radius:10px;background:var(--acc);color:#111;
 font-weight:600;text-decoration:none}
@@ -13794,7 +13861,7 @@ def selfcheck():
         assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
         assert wd_["split"][0][0] == "claude" and "TOKENS BY AGENT" in pg_, wd_["split"]
         sh_ = split_html([("claude", 300, 1), ("codex", 100, 1), ("agy", 0, 40), ("opencode", 0, 0)])
-        assert "75%" in sh_ and "25%" in sh_ and "agy <em>40 steps, no token counts" in sh_, sh_
+        assert "75%" in sh_ and "25%" in sh_ and "agy <em>0</em>" in sh_, sh_
         assert "opencode <em>0</em>" in sh_, sh_
         ps_ = wrapped_page(30, wd_, share=True)
         assert "shop" not in ps_ and "project 1" in ps_ and ">30<" in ps_, ps_
