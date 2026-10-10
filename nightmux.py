@@ -5892,51 +5892,55 @@ def lint_cmd(cfg, state, lock, topic, sess, arg, mid=None):
 
 
 COACH_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=JetBrains+Mono:wght@700;800&display=swap');
 body {
-    margin:0; width:1200px; height:1100px; background:#050505; color:#fff;
-    font:24px/1.4 system-ui,-apple-system,sans-serif; display:flex; flex-direction:column;
-    justify-content:space-between; padding:60px 80px; box-sizing:border-box;
-    background: radial-gradient(circle at 15% 50%, rgba(255,123,114,0.15) 0%, transparent 50%),
-                radial-gradient(circle at 85% 30%, rgba(121,192,255,0.15) 0%, transparent 50%),
-                radial-gradient(circle at 50% 100%, rgba(210,168,255,0.1) 0%, transparent 50%),
-                #050505;
+    margin: 0; width: 1200px; height: 1100px; background: #050505; color: #fff;
+    font-family: 'Inter', system-ui, sans-serif; display: flex; flex-direction: column;
+    justify-content: space-between; padding: 60px 80px; box-sizing: border-box; overflow: hidden;
+    background-image: 
+        radial-gradient(circle at 15% 50%, rgba(255,123,114,0.2) 0%, transparent 60%),
+        radial-gradient(circle at 85% 30%, rgba(121,192,255,0.2) 0%, transparent 60%),
+        radial-gradient(circle at 50% 100%, rgba(210,168,255,0.15) 0%, transparent 60%);
 }
 .card {
-    background: rgba(22, 27, 34, 0.4);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 32px; padding: 48px;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
-    display:flex; flex-direction:column; gap:36px; margin-top:20px;
+    background: rgba(22, 27, 34, 0.4); backdrop-filter: blur(40px);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 32px; padding: 48px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.1);
+    display: flex; flex-direction: column; gap: 36px; margin-top: 20px;
 }
-h1 { font-size:42px; margin:0; letter-spacing:-1px; font-weight:900; color:#fff; display:flex; align-items:center; gap:16px; text-transform:uppercase; background: linear-gradient(to right, #ff7b72, #ffa657); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.sub { color:#8b949e; font-size:22px; margin-top:8px; font-family:ui-monospace,monospace; font-weight:600; text-transform:uppercase; letter-spacing:2px; }
-h2 { margin:0 0 20px; font-size:22px; color:#8b949e; letter-spacing:4px; font-weight:800; text-transform:uppercase; display:flex; align-items:center; gap:10px; }
-h2::before { content:''; display:block; width:12px; height:12px; border-radius:50%; background:#79c0ff; }
-.score { font-size: 80px; font-weight: 900; line-height: 1; letter-spacing: -2px; color: #79c0ff; text-align: center; margin: 20px 0; text-shadow: 0 0 30px rgba(121,192,255,0.4); }
-.score span { font-size: 30px; color: #8b949e; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; display: block; margin-top: 10px; }
-.grid { display:grid; grid-template-columns:1fr 1fr; gap:32px }
-.insight { background: linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%); padding:24px; border-radius:20px; border: 1px solid rgba(255,255,255,0.03); }
-.insight h3 { margin: 0 0 10px; font-size: 24px; color: #d2a8ff; }
-.insight p { margin: 0; font-size: 20px; color: #c9d1d9; font-weight: 500; }
-.bar-wrap { margin-top: 16px; background: #21262d; border-radius: 8px; height: 16px; overflow: hidden; display: flex; }
-.bar-wrap b { display: block; height: 100%; background: linear-gradient(90deg, #79c0ff, #d2a8ff); }
+h1 { 
+    font-size: 52px; margin: 0; letter-spacing: -1.5px; font-weight: 900; color: #fff; 
+    display: flex; align-items: center; gap: 16px; text-transform: uppercase; 
+    background: linear-gradient(135deg, #ff7b72, #ffa657); -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
+}
+.sub { color: #8b949e; font-size: 22px; margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 800; text-transform: uppercase; letter-spacing: 3px; }
+h2 { margin: 0 0 20px; font-size: 20px; color: #8b949e; letter-spacing: 5px; font-weight: 800; text-transform: uppercase; display: flex; align-items: center; gap: 12px; }
+h2::before { content:''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #79c0ff; box-shadow: 0 0 12px #79c0ff; }
+.score { font-family: 'JetBrains Mono', monospace; font-size: 88px; font-weight: 900; line-height: 1; letter-spacing: -3px; color: #79c0ff; text-align: center; margin: 20px 0; text-shadow: 0 0 40px rgba(121,192,255,0.5); }
+.score span { font-family: 'Inter', sans-serif; font-size: 26px; color: #8b949e; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; display: block; margin-top: 12px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px }
+.insight { background: linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%); padding: 30px; border-radius: 24px; border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+.insight h3 { margin: 0 0 12px; font-size: 26px; color: #d2a8ff; }
+.insight p { margin: 0; font-size: 22px; color: #c9d1d9; font-weight: 600; }
+.bar-wrap { margin-top: 20px; background: #000; border-radius: 10px; height: 20px; overflow: hidden; display: flex; border: 1px solid rgba(255,255,255,0.05); }
+.bar-wrap b { display: block; height: 100%; background: linear-gradient(90deg, #79c0ff, #d2a8ff); box-shadow: inset 0 0 10px rgba(255,255,255,0.3); }
 .list { display: flex; flex-direction: column; gap: 16px; }
-.list-item { display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.02); padding: 16px 24px; border-radius: 12px; font-size: 22px; font-weight: 600; }
-.list-item span { color: #ffa657; font-family: ui-monospace,monospace; font-weight: bold; }
-.foot { display:flex; justify-content:space-between; color:#8b949e; font-size:20px; margin-top:auto; font-family:ui-monospace,monospace; font-weight:600; }
+.list-item { display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 20px 28px; border-radius: 16px; font-size: 24px; font-weight: 700; border: 1px solid rgba(255,255,255,0.02); }
+.list-item span { color: #ffa657; font-family: 'JetBrains Mono', monospace; font-weight: 800; }
+.foot { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding: 24px 40px; background: rgba(121, 192, 255, 0.1); border: 1px solid rgba(121, 192, 255, 0.2); border-radius: 20px; box-shadow: 0 0 30px rgba(121, 192, 255, 0.1); font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 22px; color: #79c0ff; }
+.foot span:last-child { color: #fff; }
 </style></head><body>
-<div><h1><svg width="48" height="48" viewBox="0 0 24 24" style="filter:drop-shadow(0 0 10px rgba(255,123,114,0.5))" fill="none" stroke="#ff7b72" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> NIGHTMUX COACH</h1><div class="sub">AI PROMPTING INSIGHTS</div></div>
-<div class="score">{rate}%<span>First-Try Success Rate ({n} prompts)</span></div>
+<div><h1><svg width="56" height="56" viewBox="0 0 24 24" style="filter:drop-shadow(0 0 12px rgba(255,123,114,0.6))" fill="none" stroke="#ff7b72" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> NIGHTMUX COACH</h1><div class="sub">AI PROMPTING MASTERCLASS</div></div>
+<div class="score">{rate}%<span>First-Try Zero-Shot Success ({n} prompts)</span></div>
 <div class="card">
-<h2>Prompt Engineering Impact</h2>
+<h2>PROMPT ENGINEERING IMPACT</h2>
 <div class="grid">{insights}</div>
 </div>
 <div class="card">
-<h2>Top Corrections by Task</h2>
+<h2>TOP CORRECTIONS ISSUED</h2>
 <div class="list">{corrections}</div>
 </div>
-<div class="foot"><span>🚀 Level up with nightmux</span><span>github.com/mmr710/nightmux</span></div>
+<div class="foot"><span>🚀 LEVEL UP WITH NIGHTMUX</span><span>#nightmux</span></div>
 </body></html>"""
 
 
@@ -6449,59 +6453,82 @@ def reddit_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:1100px;color:#c9d1d9;
-font:22px/1.4 system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;
-justify-content:space-between;padding:50px 60px;box-sizing:border-box;
-background:#0d1117;
-background-image:
-    radial-gradient(circle at 100% 0%, rgba(138, 43, 226, 0.2) 0%, transparent 60%),
-    radial-gradient(circle at 0% 100%, rgba(46, 160, 67, 0.15) 0%, transparent 50%),
-    radial-gradient(circle at 50% 50%, rgba(22, 27, 34, 0.6) 0%, #0d1117 100%);}
-.header{display:flex;justify-content:space-between;align-items:flex-end;}
-h1{font-size:36px;margin:0;letter-spacing:-1px;font-weight:900;color:#fff;display:flex;align-items:center;gap:12px;text-transform:uppercase;
-background:linear-gradient(135deg, #d2a8ff, #a371f7, #3fb950);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-h1 svg { fill: url(#grad); width: 44px; height: 44px; }
-.sub{color:#a5d6ff;font-size:20px;font-weight:600;font-family:ui-monospace,monospace;margin-top:8px;background:rgba(56, 139, 253, 0.15);padding:6px 16px;border-radius:16px;display:inline-block;}
-.card{background:rgba(22, 27, 34, 0.6);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:30px;box-shadow:0 16px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:30px;flex:1;margin-top:24px;}
-h2{margin:0 0 16px;font-size:16px;color:#8b949e;letter-spacing:4px;font-weight:800;text-transform:uppercase;display:flex;align-items:center;gap:8px;}
-h2::before{content:"";display:block;width:10px;height:10px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950;}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
-.cell{background:rgba(0,0,0,0.2);padding:20px;border-radius:16px;border:1px solid rgba(255,255,255,0.03);}
-.n{font-size:48px;font-weight:900;color:#fff;line-height:1;margin-bottom:8px;letter-spacing:-1px;}
-.l{font-size:18px;color:#8b949e;font-weight:600;line-height:1.2;}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:40px}
-.p{display:flex;align-items:center;gap:16px;font-size:20px;margin:12px 0}
-.p em{width:200px;font-style:normal;overflow:hidden;white-space:nowrap;font-weight:700;color:#e6edf3}
-.p b{display:inline-block;height:12px;background:linear-gradient(90deg, #3fb950 0%, #2ea043 100%);border-radius:6px;box-shadow:0 0 8px rgba(63,185,80,0.3);}
-.p span{color:#8b949e;margin-left:auto;font-family:ui-monospace,monospace;font-size:18px;font-weight:600;}
-ul{margin:0;padding:0;list-style:none;font-size:20px}
-li{margin:12px 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03);padding-bottom:12px;}
-li:last-child{border:none;padding-bottom:0;}
-li i{color:#d2a8ff;font-style:normal;font-weight:700;text-transform:uppercase;font-size:16px;letter-spacing:1px;}
-li span{font-weight:600;color:#fff;}
-.split{display:flex;height:24px;border-radius:12px;overflow:hidden;background:#000;box-shadow:inset 0 2px 4px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.05);}
-.split b{display:block;height:100%;transition:width 1s ease}
-.leg{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px;font-size:16px}
-.leg span{display:flex;align-items:center;font-weight:700;color:#fff;text-transform:capitalize;}
-.leg span i{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;box-shadow:0 0 8px currentColor;}
-.leg em{font-style:normal;color:#8b949e;margin-left:8px;font-family:ui-monospace,monospace;font-weight:600;}
-.foot{display:flex;justify-content:space-between;align-items:center;margin-top:30px;padding:20px 30px;background:rgba(255,255,255,0.03);border-radius:20px;border:1px solid rgba(255,255,255,0.05);}
-.foot-left{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:800;color:#fff;}
-.foot-left svg{width:24px;height:24px;}
-.foot-right{font-size:18px;font-family:ui-monospace,monospace;color:#a371f7;font-weight:700;background:rgba(163, 113, 247, 0.1);padding:8px 20px;border-radius:12px;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=JetBrains+Mono:wght@700;800&display=swap');
+body {
+    margin: 0; width: 1200px; height: 1100px;
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #fff; background: #050505;
+    background-image: 
+        radial-gradient(circle at 0% 0%, rgba(163, 113, 247, 0.4) 0%, transparent 60%),
+        radial-gradient(circle at 100% 100%, rgba(56, 139, 253, 0.3) 0%, transparent 60%),
+        radial-gradient(circle at 50% 100%, rgba(46, 160, 67, 0.15) 0%, transparent 60%);
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: 50px 70px; box-sizing: border-box; overflow: hidden;
+}
+h1 {
+    font-size: 56px; font-weight: 900; margin: 0; letter-spacing: -2px;
+    background: linear-gradient(135deg, #fff, #a5d6ff);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    display: flex; align-items: center; gap: 16px; text-transform: uppercase;
+}
+h1 svg { fill: url(#grad); width: 64px; height: 64px; filter: drop-shadow(0 0 12px rgba(56, 139, 253, 0.6)); }
+.sub {
+    font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 800; color: #3fb950;
+    margin-top: 8px; letter-spacing: 2px; text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(63, 185, 80, 0.4);
+}
+.card {
+    background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(40px);
+    border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 32px;
+    padding: 40px; box-shadow: 0 30px 80px rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.1);
+    display: flex; flex-direction: column; gap: 32px; flex: 1; margin-top: 30px;
+}
+h2 {
+    font-size: 18px; color: #8b949e; letter-spacing: 6px; font-weight: 800;
+    margin: 0 0 20px; display: flex; align-items: center; gap: 12px; text-transform: uppercase;
+}
+h2::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #a371f7; box-shadow: 0 0 12px #a371f7; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.cell {
+    background: linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.01));
+    border: 1px solid rgba(255,255,255,0.04); padding: 28px; border-radius: 24px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2); transition: transform 0.2s;
+}
+.n { font-family: 'JetBrains Mono', monospace; font-size: 56px; font-weight: 800; line-height: 1; margin-bottom: 12px; color: #fff; text-shadow: 0 0 20px rgba(255,255,255,0.3); }
+.l { font-size: 18px; color: #8b949e; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; line-height: 1.2; }
+.two { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 48px; }
+.p { display: flex; align-items: center; gap: 20px; margin: 16px 0; font-size: 22px; }
+.p em { width: 220px; font-style: normal; font-weight: 700; color: #e6edf3; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.p b { display: inline-block; height: 14px; background: linear-gradient(90deg, #3fb950, #2ea043); border-radius: 7px; box-shadow: 0 0 12px rgba(63,185,80,0.5); }
+.p span { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; color: #8b949e; }
+ul { list-style: none; padding: 0; margin: 0; }
+li { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 14px 0; font-size: 20px; }
+li:last-child { border: none; padding-bottom: 0; }
+li i { color: #d2a8ff; font-style: normal; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
+li span { font-weight: 700; color: #fff; }
+.split { display: flex; height: 28px; border-radius: 14px; background: #000; box-shadow: inset 0 4px 10px rgba(0,0,0,0.8); overflow: hidden; border: 1px solid rgba(255,255,255,0.05); }
+.split b { height: 100%; box-shadow: inset 0 0 10px rgba(255,255,255,0.2); transition: width 1s ease; }
+.leg { display: flex; flex-wrap: wrap; gap: 16px 28px; margin-top: 20px; }
+.leg span { display: flex; align-items: center; font-size: 18px; font-weight: 800; color: #fff; }
+.leg span i { width: 14px; height: 14px; border-radius: 50%; margin-right: 10px; box-shadow: 0 0 10px currentColor; }
+.leg em { font-family: 'JetBrains Mono', monospace; font-style: normal; color: #8b949e; margin-left: 10px; }
+.foot { display: flex; justify-content: space-between; align-items: center; margin-top: 30px; padding: 24px 40px; background: rgba(56, 139, 253, 0.1); border: 1px solid rgba(56, 139, 253, 0.2); border-radius: 20px; box-shadow: 0 0 30px rgba(56, 139, 253, 0.1); }
+.foot-left { display: flex; align-items: center; gap: 16px; font-size: 26px; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
+.foot-left svg { width: 32px; height: 32px; filter: drop-shadow(0 0 8px #3fb950); }
+.foot-right { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 800; color: #a5d6ff; background: rgba(165, 214, 255, 0.1); padding: 10px 24px; border-radius: 12px; border: 1px solid rgba(165, 214, 255, 0.2); }
 </style></head><body>
-<svg width="0" height="0"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#d2a8ff"/><stop offset="100%" stop-color="#3fb950"/></linearGradient></defs></svg>
+<svg width="0" height="0"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#388bfd"/><stop offset="100%" stop-color="#a371f7"/></linearGradient></defs></svg>
 <div class="header">
-<div><h1><svg viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z"/></svg> NIGHTMUX WRAPPED</h1><div class="sub">{period} · {agents}</div></div>
+<div><h1><svg viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z"/></svg> VIBE CODING RECAP</h1><div class="sub">POWERED BY NIGHTMUX · {period} · {agents}</div></div>
 </div>
 <div class="card">
 <div class="grid">{cells}</div>
-<div><h2>TOKENS BY AGENT</h2>{split}</div>
-<div class="two"><div><h2>TOP PROJECTS</h2>{projects}</div><div><h2>WHEN I CODE</h2>{hours}<ul>{insights}</ul></div></div>
+<div><h2>MODELS DEPLOYED</h2>{split}</div>
+<div class="two"><div><h2>REPOS DOMINATED</h2>{projects}</div><div><h2>VIBE SESSIONS</h2>{hours}<ul>{insights}</ul></div></div>
 </div>
 <div class="foot">
-<div class="foot-left"><svg viewBox="0 0 16 16" fill="#3fb950"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z"/></svg> POWERED BY NIGHTMUX</div>
-<div class="foot-right">github.com/mmr710/nightmux</div>
+<div class="foot-left"><svg viewBox="0 0 16 16" fill="#3fb950"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z"/></svg> THE ULTIMATE VIBE CODING CO-PILOT</div>
+<div class="foot-right">#nightmux</div>
 </div>
 </body></html>"""
 
@@ -6536,15 +6563,15 @@ def wrapped_data(cfg, days):
     saved, lighter = saved_in(d, days), saved_in(d, days, "model_tokens")
     r = saved / (toks + saved) if saved and toks else 0
     pct = f"{r:.0%}" if r >= 0.01 or not r else f"{r:.2%}"     # 941k of 3.4B is not 0%
-    cells = [(_k(toks), "tokens used"),
-             (pct, f"tokens saved ({_k(saved)})"),
-             (_k(lighter), "tokens' worth saved on lighter models"),
-             (str(prompts), "prompts sent"), (str(len(proj)), "projects worked in"),
-             (str(d.get("night_turns", 0)), "turns while I slept"),
-             (str(d.get("resumes", 0)), "limits survived, auto-resumed"),
-             (str(d.get("greens", 0)), "checks turned green"),
-             (str(sum(a["sessions"] or 0 for a in ag.values())), "agent sessions")]
-    cells = [c for c in cells if c[0] not in ("0", "0k")][:6]   # a fresh install has zeros
+    cells = [(_k(toks), "TOKENS CRUNCHED"),
+             (pct, f"SAVED FROM THE ABYSS ({_k(saved)})"),
+             (_k(lighter), "SAVED VIA SMART ROUTING"),
+             (str(prompts), "VIBE DIRECTIVES ISSUED"),
+             (str(len(proj)), "REPOS DOMINATED"),
+             (str(d.get("night_turns", 0)), "GHOST CODING (WHILE SLEEPING)"),
+             (str(d.get("resumes", 0)), "API LIMITS OBLITERATED"),
+             (str(d.get("greens", 0)), "CI CHECKS RESCUED"),
+             (str(sum(a["sessions"] or 0 for a in ag.values())), "AGENT SESSIONS")]
     ins = []
     if w.get("peak_hour") is not None:
         h = w["peak_hour"]
@@ -10520,12 +10547,11 @@ button.snd:hover{transform:scale(1.1)}
 .empty{color:#8b949e;padding:24px;text-align:center;font-size:16px}
 body.pub .nav,body.pub #sheet{display:none}
 body.demo{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;
-background:radial-gradient(100% 100% at 50% 0%, rgba(138,43,226,0.15) 0%, transparent 80%), #050505;
-font-family:system-ui,-apple-system,sans-serif;}
+background:radial-gradient(circle at 50% 50%, #161b22 0%, #050505 100%)}
 body.demo header,body.demo main,body.demo #sheet{display:none}
-#stage{display:none}
-body.demo h1{margin:0 0 24px;font-size:24px;font-weight:800;color:#fff;letter-spacing:4px;text-transform:uppercase;text-shadow:0 2px 10px rgba(0,0,0,0.5)}
-body.demo #stage{display:block;box-shadow:0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.1);border-radius:24px;overflow:hidden}
+body.demo h1{margin:0 0 24px;font-size:32px;font-weight:900;color:#fff;letter-spacing:6px;text-transform:uppercase;
+background:linear-gradient(135deg, #a371f7, #3fb950);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 0 20px rgba(63,185,80,0.4)}
+body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.05);border-radius:32px;overflow:hidden}
 </style></head><body>
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
@@ -14120,11 +14146,11 @@ def selfcheck():
                      sav_data=lambda: {"tokens": 5000000, "model_tokens": 2000000}):
             wd_ = wrapped_data({}, 30)
         pg_ = wrapped_page(30, wd_)
-        assert ("2.0M", "tokens' worth saved on lighter models") in wd_["cells"], wd_["cells"]
-        assert wd_["saved"] == 5000000 and wd_["cells"][1][1] == "tokens saved (5.0M)", wd_
+        assert ("2.0M", "SAVED VIA SMART ROUTING") in wd_["cells"], wd_["cells"]
+        assert wd_["saved"] == 5000000 and wd_["cells"][1][1] == "SAVED FROM THE ABYSS (5.0M)", wd_
         assert wd_["cells"][1][0].endswith("%") and wd_["cells"][1][0] != "0%", wd_["cells"]
-        assert ("1", "projects worked in") in wd_["cells"] and "shop" in pg_, wd_["cells"]
-        assert wd_["split"][0][0] == "claude" and "TOKENS BY AGENT" in pg_, wd_["split"]
+        assert ("1", "REPOS DOMINATED") in wd_["cells"] and "shop" in pg_, wd_["cells"]
+        assert wd_["split"][0][0] == "claude" and "MODELS DEPLOYED" in pg_, wd_["split"]
         sh_ = split_html([("claude", 300, 1), ("codex", 100, 1), ("agy", 0, 40), ("opencode", 0, 0)])
         assert "75%" in sh_ and "25%" in sh_ and "agy <em>0</em>" in sh_, sh_
         assert "opencode <em>0</em>" in sh_, sh_
