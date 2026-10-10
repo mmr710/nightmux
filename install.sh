@@ -33,4 +33,9 @@ else
   echo "no terminal to ask setup questions on — run: python3 ~/nightmux/nightmux.py --setup"
   exit 1
 fi
+echo ""
+echo "🌟 Thanks for trying nightmux!"
+echo "🌟 If it saves you time, please consider leaving a star on GitHub:"
+echo "🌟 https://github.com/mmr710/nightmux"
+echo ""
 echo "✅ Done. Just looking? python3 ~/nightmux/nightmux.py --demo"

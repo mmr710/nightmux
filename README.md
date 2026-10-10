@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/nightmux-logo.jpg" alt="nightmux logo" width="200" height="200">
+
 # 🌙 nightmux
 
 **Your AI coding agents keep working while you sleep.**
@@ -204,6 +206,16 @@ All of them: [docs/COMMANDS.md](docs/COMMANDS.md).
 - [Commands](docs/COMMANDS.md): generated from `!help`, so it is never out of date
 - [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) · [Cookbook](cookbook/README.md) · [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
+
+## Community & Support
+
+**Join the Community:** Connect with other users, share your overnight agent successes, and get help in our [Telegram Group](https://t.me/+SGmmExdMHTQ3OWVk).
+
+**Support the Project:** If `nightmux` saves you time or money, consider supporting its development! ☕
+
+### 💳 Donate Crypto (USDT on TRX Network)
+**Address:** `TG2GZhZHg5N892M3nEzRdqpbDSVT2BffwN`
+<br><img src="docs/usdt-qr.png" alt="USDT TRX QR Code" width="150">
 
 ## Requirements
 
