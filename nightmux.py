@@ -6449,47 +6449,46 @@ def reddit_url(text):
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;width:1200px;height:1200px;color:#fff;
-font:28px/1.4 system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;
-justify-content:space-between;padding:80px;box-sizing:border-box;
-background:#0a0a0c;
+body{margin:0;width:1200px;height:1100px;color:#c9d1d9;
+font:22px/1.4 system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;
+justify-content:space-between;padding:50px 60px;box-sizing:border-box;
+background:#0d1117;
 background-image:
-    radial-gradient(circle at 100% 0%, rgba(210, 168, 255, 0.35) 0%, transparent 50%),
-    radial-gradient(circle at 0% 100%, rgba(63, 185, 80, 0.25) 0%, transparent 50%),
-    radial-gradient(circle at 50% 50%, rgba(22, 27, 34, 0.8) 0%, #0a0a0c 100%);}
+    radial-gradient(circle at 100% 0%, rgba(138, 43, 226, 0.2) 0%, transparent 60%),
+    radial-gradient(circle at 0% 100%, rgba(46, 160, 67, 0.15) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, rgba(22, 27, 34, 0.6) 0%, #0d1117 100%);}
 .header{display:flex;justify-content:space-between;align-items:flex-end;}
-h1{font-size:48px;margin:0;letter-spacing:-1px;font-weight:900;color:#fff;display:flex;align-items:center;gap:16px;text-transform:uppercase;
+h1{font-size:36px;margin:0;letter-spacing:-1px;font-weight:900;color:#fff;display:flex;align-items:center;gap:12px;text-transform:uppercase;
 background:linear-gradient(135deg, #d2a8ff, #a371f7, #3fb950);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-h1 svg { fill: url(#grad); width: 56px; height: 56px; }
-.sub{color:#a5d6ff;font-size:24px;font-weight:600;font-family:ui-monospace,monospace;margin-top:12px;background:rgba(56, 139, 253, 0.15);padding:8px 20px;border-radius:20px;display:inline-block;}
-.card{background:rgba(255, 255, 255, 0.03);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.08);border-radius:32px;padding:50px;box-shadow:0 24px 60px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);display:flex;flex-direction:column;gap:40px;flex:1;margin-top:40px;}
-h2{margin:0 0 20px;font-size:20px;color:#8b949e;letter-spacing:5px;font-weight:800;text-transform:uppercase;display:flex;align-items:center;gap:12px;}
-h2::before{content:"";display:block;width:12px;height:12px;border-radius:50%;background:#3fb950;box-shadow:0 0 10px #3fb950;}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
-.cell{background:rgba(0,0,0,0.2);padding:30px;border-radius:24px;border:1px solid rgba(255,255,255,0.05);transition:transform 0.2s;}
-.n{font-size:64px;font-weight:900;color:#fff;line-height:1;margin-bottom:12px;letter-spacing:-2px;text-shadow:0 4px 12px rgba(0,0,0,0.5);}
-.n.accent{color:#3fb950;}
-.l{font-size:22px;color:#8b949e;font-weight:600;line-height:1.3;}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:60px}
-.p{display:flex;align-items:center;gap:20px;font-size:24px;margin:16px 0}
-.p em{width:240px;font-style:normal;overflow:hidden;white-space:nowrap;font-weight:700;color:#e6edf3}
-.p b{display:inline-block;height:16px;background:linear-gradient(90deg, #3fb950 0%, #2ea043 100%);border-radius:8px;box-shadow:0 0 10px rgba(63,185,80,0.4);}
-.p span{color:#8b949e;margin-left:auto;font-family:ui-monospace,monospace;font-size:22px;font-weight:600;}
-ul{margin:0;padding:0;list-style:none;font-size:24px}
-li{margin:16px 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.05);padding-bottom:16px;}
-li:last-child{border:none}
-li i{color:#d2a8ff;font-style:normal;font-weight:700;text-transform:uppercase;font-size:18px;letter-spacing:1px;}
+h1 svg { fill: url(#grad); width: 44px; height: 44px; }
+.sub{color:#a5d6ff;font-size:20px;font-weight:600;font-family:ui-monospace,monospace;margin-top:8px;background:rgba(56, 139, 253, 0.15);padding:6px 16px;border-radius:16px;display:inline-block;}
+.card{background:rgba(22, 27, 34, 0.6);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:30px;box-shadow:0 16px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:30px;flex:1;margin-top:24px;}
+h2{margin:0 0 16px;font-size:16px;color:#8b949e;letter-spacing:4px;font-weight:800;text-transform:uppercase;display:flex;align-items:center;gap:8px;}
+h2::before{content:"";display:block;width:10px;height:10px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950;}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.cell{background:rgba(0,0,0,0.2);padding:20px;border-radius:16px;border:1px solid rgba(255,255,255,0.03);}
+.n{font-size:48px;font-weight:900;color:#fff;line-height:1;margin-bottom:8px;letter-spacing:-1px;}
+.l{font-size:18px;color:#8b949e;font-weight:600;line-height:1.2;}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:40px}
+.p{display:flex;align-items:center;gap:16px;font-size:20px;margin:12px 0}
+.p em{width:200px;font-style:normal;overflow:hidden;white-space:nowrap;font-weight:700;color:#e6edf3}
+.p b{display:inline-block;height:12px;background:linear-gradient(90deg, #3fb950 0%, #2ea043 100%);border-radius:6px;box-shadow:0 0 8px rgba(63,185,80,0.3);}
+.p span{color:#8b949e;margin-left:auto;font-family:ui-monospace,monospace;font-size:18px;font-weight:600;}
+ul{margin:0;padding:0;list-style:none;font-size:20px}
+li{margin:12px 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03);padding-bottom:12px;}
+li:last-child{border:none;padding-bottom:0;}
+li i{color:#d2a8ff;font-style:normal;font-weight:700;text-transform:uppercase;font-size:16px;letter-spacing:1px;}
 li span{font-weight:600;color:#fff;}
-.split{display:flex;height:32px;border-radius:16px;overflow:hidden;background:#000;box-shadow:inset 0 4px 8px rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.05);}
+.split{display:flex;height:24px;border-radius:12px;overflow:hidden;background:#000;box-shadow:inset 0 2px 4px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.05);}
 .split b{display:block;height:100%;transition:width 1s ease}
-.leg{display:flex;flex-wrap:wrap;gap:16px 32px;margin-top:24px;font-size:20px}
+.leg{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px;font-size:16px}
 .leg span{display:flex;align-items:center;font-weight:700;color:#fff;text-transform:capitalize;}
-.leg span i{display:inline-block;width:16px;height:16px;border-radius:50%;margin-right:12px;box-shadow:0 0 10px currentColor;}
-.leg em{font-style:normal;color:#8b949e;margin-left:10px;font-family:ui-monospace,monospace;font-weight:600;}
-.foot{display:flex;justify-content:space-between;align-items:center;margin-top:40px;padding:24px 40px;background:rgba(255,255,255,0.03);border-radius:24px;border:1px solid rgba(255,255,255,0.08);}
-.foot-left{display:flex;align-items:center;gap:16px;font-size:24px;font-weight:800;color:#fff;}
-.foot-left svg{width:32px;height:32px;}
-.foot-right{font-size:22px;font-family:ui-monospace,monospace;color:#a371f7;font-weight:700;background:rgba(163, 113, 247, 0.1);padding:10px 24px;border-radius:12px;}
+.leg span i{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;box-shadow:0 0 8px currentColor;}
+.leg em{font-style:normal;color:#8b949e;margin-left:8px;font-family:ui-monospace,monospace;font-weight:600;}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:30px;padding:20px 30px;background:rgba(255,255,255,0.03);border-radius:20px;border:1px solid rgba(255,255,255,0.05);}
+.foot-left{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:800;color:#fff;}
+.foot-left svg{width:24px;height:24px;}
+.foot-right{font-size:18px;font-family:ui-monospace,monospace;color:#a371f7;font-weight:700;background:rgba(163, 113, 247, 0.1);padding:8px 20px;border-radius:12px;}
 </style></head><body>
 <svg width="0" height="0"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#d2a8ff"/><stop offset="100%" stop-color="#3fb950"/></linearGradient></defs></svg>
 <div class="header">
@@ -6627,7 +6626,7 @@ def wrapped_page(days, w, share=False):
 
 
 def upload_media(data, ext="png"):
-    import urllib.request, uuid, json
+    import urllib.request, urllib.parse, uuid, json
     boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
     filename_png = f"image_{uuid.uuid4().hex[:8]}.{ext}"
     body_png = (f"--{boundary}\r\n"
@@ -6641,30 +6640,13 @@ def upload_media(data, ext="png"):
     except Exception:
         return ""
         
-    html = f'''<!doctype html><html><head>
-    <meta charset="utf-8">
-    <title>Nightmux Wrapped</title>
-    <meta property="og:title" content="Nightmux Wrapped">
-    <meta property="og:description" content="My AI coding agents">
-    <meta property="og:image" content="{png_url}">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:image" content="{png_url}">
-    <meta http-equiv="refresh" content="0; url=https://github.com/mmr710/nightmux">
-    </head><body>Redirecting to Nightmux repo...</body></html>'''
-    
-    filename_html = f"card_{uuid.uuid4().hex[:8]}.html"
-    body_html = (f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="time"\r\n\r\n12h\r\n'
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="fileToUpload"; filename="{filename_html}"\r\n\r\n').encode() + html.encode() + (f"\r\n--{boundary}--\r\n").encode()
-    req_html = urllib.request.Request("https://litterbox.catbox.moe/resources/internals/api.php", data=body_html, headers={
-        "Content-Type": f"multipart/form-data; boundary={boundary}"
+    md = f"![Nightmux Wrapped]({png_url})\n\nMy AI coding agents run by [nightmux](https://github.com/mmr710/nightmux)."
+    req_html = urllib.request.Request("https://rentry.co/api/new", data=urllib.parse.urlencode({"text": md}).encode(), headers={
+        "Content-Type": "application/x-www-form-urlencoded"
     })
     try:
         url = urllib.request.urlopen(req_html, timeout=15).read().decode().strip()
-        return url if url.startswith("http") else ""
+        return json.loads(url).get("url", "")
     except Exception:
         return ""
 
@@ -6677,8 +6659,8 @@ def wrapped_cmd(cfg, topic, arg):
 
     def go():
         w = wrapped_data(cfg, days)
-        mine = render_html(cfg, wrapped_page(days, w), "1200,1200")
-        pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1200")
+        mine = render_html(cfg, wrapped_page(days, w), "1200,1100")
+        pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1100")
         if not (mine and pub):
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
