@@ -702,7 +702,7 @@ BUSY = re.compile(r"esc (?:to )?(?:interrupt|cancel)"
                   r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
-MENU = re.compile(r"^\s*[│┃]?\s*[❯>]?\s*(\d)[.)]\s+(\S.*?)\s*[│┃]?$")
+MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>]\s*)?(?:(\d)[.)]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
 # opencode's modal draws key hints where the other TUIs write a question, so
 # WAITING saw nothing and the pane read "idle": no 🟠, no buttons, and drain()
 # free to type a queued prompt into an open dialog. The hints are chrome and
@@ -1031,8 +1031,9 @@ def menu_buttons(lines, sess=None):
     opts = {}
     for l in menu_rows(lines):
         m = MENU.match(plain(l))
-        label = m.group(2)
-        opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+        if m.group(1):
+            label = m.group(2)
+            opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
     # No numbers means an arrow-driven selector (agy's trust prompt, /model):
     # the nav row alone drives it, exactly as you would in the terminal.
@@ -2749,7 +2750,7 @@ def menu_digit(lines, want):
     for l in menu_rows(lines):
         m = MENU.match(plain(l))
         if want.match(m.group(2).strip()):
-            return m.group(1)
+            return m.group(1) or m.group(2).strip()
     return None
 
 
@@ -2786,7 +2787,7 @@ def menu_opts(lines):
         # finds nothing, which is the honest answer there.
         codes = [(DIGIT_SGR.search(l) or [""])[0] for l in rows]
         marked = [i for i, c in enumerate(codes) if c and codes.count(c) == 1]
-    return ([MENU.match(plain(l)).group(1) for l in rows],
+    return ([MENU.match(plain(l)).group(1) or MENU.match(plain(l)).group(2).strip() for l in rows],
             marked[0] if len(marked) == 1 else None)
 
 
@@ -3487,8 +3488,18 @@ def autoyes(cfg, state, topic, sess):
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
     st = state.get(sess) or {}
-    if not keys or agent_key(cfg, topic, sess) not in keys:
+    if not keys:
         return
+    ak = agent_key(cfg, topic, sess)
+    if ak not in keys:
+        # If the session is bound manually, it might incorrectly map to the default agent.
+        # But if the user explicitly enabled autoyes for exactly one agent here,
+        # we can assume that agent is the one actually running, if it's the main session.
+        bound = cfg.get("topics", {}).get(str(topic))
+        if bound == sess and len(keys) == 1 and keys[0] in AGENTS and ak == default_agent(cfg):
+            pass
+        else:
+            return
     if st.get("mode") != "waiting":
         st.pop("autoyes_at", None)
         return
@@ -3506,7 +3517,11 @@ def autoyes(cfg, state, topic, sess):
     lines = visible(sess)
     digit = menu_digit(lines, YES_NO["!y"])
     if not digit:
-        return          # nothing here reads as "yes": a human decides this one
+        last_line = plain(lines[-1]) if lines else ""
+        if re.search(r"[\(\[]y/n[\)\]]", last_line, re.I) or (len(lines) > 1 and re.search(r"[\(\[]y/n[\)\]]", plain(lines[-2]), re.I)):
+            digit = "y"
+        else:
+            return          # nothing here reads as "yes": a human decides this one
     st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
     st.pop("autoyes_capped", None)
     question = next((l.strip() for l in lines[-15:] if WAITING.search(l)), "?")
