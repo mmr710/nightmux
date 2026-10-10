@@ -5939,7 +5939,30 @@ h2::before { content:''; display:block; width:12px; height:12px; border-radius:5
 <div class="foot"><span>🚀 Level up with nightmux</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
 
+
+def render_html(cfg, page, size="1200,1100"):
+    b = browser_bin(cfg)
+    if not b: return None
+    import uuid
+    os.makedirs(STATE_DIR, exist_ok=True)
+    f_base = f"render_{uuid.uuid4().hex[:8]}"
+    src, out = os.path.join(STATE_DIR, f"{f_base}.html"), os.path.join(STATE_DIR, f"{f_base}.png")
+    with open(src, "w") as f:
+        f.write(page)
+    run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+        f"--window-size={size}", "--virtual-time-budget=2000", f"--screenshot={out}",
+        "file://" + src, timeout=60)
+    try:
+        with open(out, "rb") as f:
+            png = f.read()
+        os.remove(out)
+        os.remove(src)
+        return png
+    except OSError:
+        return None
+
 def coach_cmd(cfg, topic):
+
     les = prompt_lessons()
     if not les["n"]:
         return "🎯 no Claude prompts in the last 60 days to learn from"
@@ -6645,7 +6668,37 @@ def upload_media(data, ext="png"):
     except Exception:
         return ""
 
+
+def wrapped_cmd(cfg, topic, arg):
+    days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
+    b = browser_bin(cfg)
+    if not b:
+        return 'no Chromium found — install one or set "browser" in the config'
+
+    def go():
+        w = wrapped_data(cfg, days)
+        mine = render_html(cfg, wrapped_page(days, w), "1200,1200")
+        pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1200")
+        if not (mine and pub):
+            send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
+            return
+        cells = w["cells"]
+        top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+        send_file(cfg, topic, "wrapped.png", mine, kind="photo",
+                  caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
+                  + "\n".join(f"• {k}: {v}" for k, v in w["insights"])
+                  + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
+        send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
+                  caption="📤 to share: projects shown as counts only",
+                  buttons=kb([[("🐦 Share on X", tweet_url(
+                      f"My AI coding agents, last {days} days: {top}. Run by nightmux "
+                      f"{REPO_URL} #ClaudeCode #vibecoding\n" + upload_media(pub, "png"))), ("👽 Reddit (attach photo!)", reddit_url(f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"))]]))
+    threading.Thread(target=go, daemon=True).start()
+    return f"🎁 drawing your {days}-day card…"
+
+
 # ---------- !public: a read-only office anyone can open ----------
+
 # Off by default. On, /public/<token> shows the office with states only — no
 # screen text, no prompts, no buttons that act. Tailnet-only until
 # `!public expose`, which puts just that path on the internet with Funnel.
