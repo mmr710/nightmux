@@ -5896,7 +5896,7 @@ COACH_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
 body {
     margin: 0; width: 1200px; height: 1100px; background: #050505; color: #fff;
     font-family: 'Inter', system-ui, sans-serif; display: flex; flex-direction: column;
-    justify-content: space-between; padding: 60px 80px; box-sizing: border-box; overflow: hidden;
+    justify-content: space-between; padding: 30px 50px; box-sizing: border-box; overflow: hidden;
     background-image: 
         radial-gradient(circle at 15% 50%, rgba(255,123,114,0.2) 0%, transparent 60%),
         radial-gradient(circle at 85% 30%, rgba(121,192,255,0.2) 0%, transparent 60%),
@@ -5904,28 +5904,28 @@ body {
 }
 .card {
     background: rgba(22, 27, 34, 0.4); backdrop-filter: blur(40px);
-    border: 1px solid rgba(255,255,255,0.08); border-radius: 32px; padding: 48px;
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 32px; padding: 30px 40px;
     box-shadow: 0 30px 80px rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.1);
-    display: flex; flex-direction: column; gap: 36px; margin-top: 20px;
+    display: flex; flex-direction: column; gap: 24px; margin-top: 10px;
 }
 h1 { 
-    font-size: 52px; margin: 0; letter-spacing: -1.5px; font-weight: 900; color: #fff; 
+    font-size: 42px; margin: 0; letter-spacing: -1.5px; font-weight: 900; color: #fff; 
     display: flex; align-items: center; gap: 16px; text-transform: uppercase; 
     background: linear-gradient(135deg, #ff7b72, #ffa657); -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
 }
 .sub { color: #8b949e; font-size: 22px; margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 800; text-transform: uppercase; letter-spacing: 3px; }
 h2 { margin: 0 0 20px; font-size: 20px; color: #8b949e; letter-spacing: 5px; font-weight: 800; text-transform: uppercase; display: flex; align-items: center; gap: 12px; }
 h2::before { content:''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #79c0ff; box-shadow: 0 0 12px #79c0ff; }
-.score { font-family: 'JetBrains Mono', monospace; font-size: 88px; font-weight: 900; line-height: 1; letter-spacing: -3px; color: #79c0ff; text-align: center; margin: 20px 0; text-shadow: 0 0 40px rgba(121,192,255,0.5); }
+.score { font-family: 'JetBrains Mono', monospace; font-size: 64px; font-weight: 900; line-height: 1; letter-spacing: -3px; color: #79c0ff; text-align: center; margin: 20px 0; text-shadow: 0 0 40px rgba(121,192,255,0.5); }
 .score span { font-family: 'Inter', sans-serif; font-size: 26px; color: #8b949e; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; display: block; margin-top: 12px; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px }
-.insight { background: linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%); padding: 30px; border-radius: 24px; border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+.insight { background: linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%); padding: 20px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
 .insight h3 { margin: 0 0 12px; font-size: 26px; color: #d2a8ff; }
 .insight p { margin: 0; font-size: 22px; color: #c9d1d9; font-weight: 600; }
 .bar-wrap { margin-top: 20px; background: #000; border-radius: 10px; height: 20px; overflow: hidden; display: flex; border: 1px solid rgba(255,255,255,0.05); }
 .bar-wrap b { display: block; height: 100%; background: linear-gradient(90deg, #79c0ff, #d2a8ff); box-shadow: inset 0 0 10px rgba(255,255,255,0.3); }
 .list { display: flex; flex-direction: column; gap: 16px; }
-.list-item { display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 20px 28px; border-radius: 16px; font-size: 24px; font-weight: 700; border: 1px solid rgba(255,255,255,0.02); }
+.list-item { display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 14px 20px; border-radius: 12px; font-size: 20px; font-weight: 700; border: 1px solid rgba(255,255,255,0.02); }
 .list-item span { color: #ffa657; font-family: 'JetBrains Mono', monospace; font-weight: 800; }
 .foot { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding: 24px 40px; background: rgba(121, 192, 255, 0.1); border: 1px solid rgba(121, 192, 255, 0.2); border-radius: 20px; box-shadow: 0 0 30px rgba(121, 192, 255, 0.1); font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 22px; color: #79c0ff; }
 .foot span:last-child { color: #fff; }
@@ -5940,7 +5940,7 @@ h2::before { content:''; display: block; width: 12px; height: 12px; border-radiu
 <h2>TOP CORRECTIONS ISSUED</h2>
 <div class="list">{corrections}</div>
 </div>
-<div class="foot"><span>🚀 LEVEL UP WITH NIGHTMUX</span><span>#nightmux</span></div>
+<div class="foot"><span>🚀 LEVEL UP WITH NIGHTMUX</span><span>github.com/mmr710/nightmux</span></div>
 </body></html>"""
 
 
@@ -6463,25 +6463,25 @@ body {
         radial-gradient(circle at 100% 100%, rgba(56, 139, 253, 0.3) 0%, transparent 60%),
         radial-gradient(circle at 50% 100%, rgba(46, 160, 67, 0.15) 0%, transparent 60%);
     display: flex; flex-direction: column; justify-content: space-between;
-    padding: 50px 70px; box-sizing: border-box; overflow: hidden;
+    padding: 30px 40px; box-sizing: border-box; overflow: hidden;
 }
 h1 {
-    font-size: 56px; font-weight: 900; margin: 0; letter-spacing: -2px;
+    font-size: 44px; font-weight: 900; margin: 0; letter-spacing: -2px;
     background: linear-gradient(135deg, #fff, #a5d6ff);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     display: flex; align-items: center; gap: 16px; text-transform: uppercase;
 }
-h1 svg { fill: url(#grad); width: 64px; height: 64px; filter: drop-shadow(0 0 12px rgba(56, 139, 253, 0.6)); }
+h1 svg { fill: url(#grad); width: 44px; height: 44px; filter: drop-shadow(0 0 12px rgba(56, 139, 253, 0.6)); }
 .sub {
-    font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 800; color: #3fb950;
+    font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 800; color: #3fb950;
     margin-top: 8px; letter-spacing: 2px; text-transform: uppercase;
     text-shadow: 0 0 10px rgba(63, 185, 80, 0.4);
 }
 .card {
     background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(40px);
     border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 32px;
-    padding: 40px; box-shadow: 0 30px 80px rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.1);
-    display: flex; flex-direction: column; gap: 32px; flex: 1; margin-top: 30px;
+    padding: 30px 40px; box-shadow: 0 30px 80px rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.1);
+    display: flex; flex-direction: column; gap: 20px; flex: 1; margin-top: 15px;
 }
 h2 {
     font-size: 18px; color: #8b949e; letter-spacing: 6px; font-weight: 800;
@@ -6491,18 +6491,18 @@ h2::before { content: ''; display: block; width: 12px; height: 12px; border-radi
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
 .cell {
     background: linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.01));
-    border: 1px solid rgba(255,255,255,0.04); padding: 28px; border-radius: 24px;
+    border: 1px solid rgba(255,255,255,0.04); padding: 16px 24px; border-radius: 16px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.2); transition: transform 0.2s;
 }
-.n { font-family: 'JetBrains Mono', monospace; font-size: 56px; font-weight: 800; line-height: 1; margin-bottom: 12px; color: #fff; text-shadow: 0 0 20px rgba(255,255,255,0.3); }
+.n { font-family: 'JetBrains Mono', monospace; font-size: 40px; font-weight: 800; line-height: 1; margin-bottom: 8px; color: #fff; text-shadow: 0 0 20px rgba(255,255,255,0.3); }
 .l { font-size: 18px; color: #8b949e; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; line-height: 1.2; }
-.two { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 48px; }
-.p { display: flex; align-items: center; gap: 20px; margin: 16px 0; font-size: 22px; }
+.two { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 32px; }
+.p { display: flex; align-items: center; gap: 16px; margin: 10px 0; font-size: 18px; }
 .p em { width: 220px; font-style: normal; font-weight: 700; color: #e6edf3; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .p b { display: inline-block; height: 14px; background: linear-gradient(90deg, #3fb950, #2ea043); border-radius: 7px; box-shadow: 0 0 12px rgba(63,185,80,0.5); }
 .p span { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; color: #8b949e; }
 ul { list-style: none; padding: 0; margin: 0; }
-li { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 14px 0; font-size: 20px; }
+li { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 8px 0; font-size: 16px; }
 li:last-child { border: none; padding-bottom: 0; }
 li i { color: #d2a8ff; font-style: normal; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
 li span { font-weight: 700; color: #fff; }
@@ -6512,8 +6512,8 @@ li span { font-weight: 700; color: #fff; }
 .leg span { display: flex; align-items: center; font-size: 18px; font-weight: 800; color: #fff; }
 .leg span i { width: 14px; height: 14px; border-radius: 50%; margin-right: 10px; box-shadow: 0 0 10px currentColor; }
 .leg em { font-family: 'JetBrains Mono', monospace; font-style: normal; color: #8b949e; margin-left: 10px; }
-.foot { display: flex; justify-content: space-between; align-items: center; margin-top: 30px; padding: 24px 40px; background: rgba(56, 139, 253, 0.1); border: 1px solid rgba(56, 139, 253, 0.2); border-radius: 20px; box-shadow: 0 0 30px rgba(56, 139, 253, 0.1); }
-.foot-left { display: flex; align-items: center; gap: 16px; font-size: 26px; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
+.foot { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; padding: 16px 30px; background: rgba(56, 139, 253, 0.1); border: 1px solid rgba(56, 139, 253, 0.2); border-radius: 20px; box-shadow: 0 0 30px rgba(56, 139, 253, 0.1); }
+.foot-left { display: flex; align-items: center; gap: 16px; font-size: 20px; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
 .foot-left svg { width: 32px; height: 32px; filter: drop-shadow(0 0 8px #3fb950); }
 .foot-right { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 800; color: #a5d6ff; background: rgba(165, 214, 255, 0.1); padding: 10px 24px; border-radius: 12px; border: 1px solid rgba(165, 214, 255, 0.2); }
 </style></head><body>
@@ -6528,7 +6528,7 @@ li span { font-weight: 700; color: #fff; }
 </div>
 <div class="foot">
 <div class="foot-left"><svg viewBox="0 0 16 16" fill="#3fb950"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z"/></svg> THE ULTIMATE VIBE CODING CO-PILOT</div>
-<div class="foot-right">#nightmux</div>
+<div class="foot-right">github.com/mmr710/nightmux</div>
 </div>
 </body></html>"""
 
