@@ -6104,59 +6104,78 @@ h1 svg { width: 44px; height: 44px; filter: drop-shadow(0 0 12px rgba(255, 123, 
 <div class="grid">
     <div class="card">
         <div class="card-header">
-            <div class="card-title">📌 Exact File & Symbol Anchors</div>
+            <div class="card-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#79c0ff" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/></svg>
+                Exact File & Symbol Anchors
+            </div>
             <div class="card-tag">+93% 1st-Try</div>
         </div>
         <div class="card-body">
             Directly naming the file path, function, or symbol eliminates speculative repo scans, cutting 3–8 exploratory tool calls and sparing up to 45k context tokens per task.
         </div>
         <div class="card-tip">
-            💡 Pro-Tip: Name the exact file (`lexer.py`) and symbol so the agent goes straight to editing.
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#79c0ff" stroke-width="2.5" style="vertical-align:text-top;margin-right:4px;"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/></svg>
+            <strong>Pro-Tip:</strong> Name the exact file (`lexer.py`) and symbol so the agent goes straight to editing.
         </div>
     </div>
 
     <div class="card">
         <div class="card-header">
-            <div class="card-title">🎯 Explicit Acceptance Criteria</div>
+            <div class="card-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7ee787" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                Explicit Acceptance Criteria
+            </div>
             <div class="card-tag">+95% 1st-Try</div>
         </div>
         <div class="card-body">
             Stating "Done when `pytest tests/` passes" or specifying required behavior provides an objective exit condition, reducing agent hallucination loops by over 30%.
         </div>
         <div class="card-tip">
-            💡 Pro-Tip: Always attach a verification command or expected output to stop early.
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7ee787" stroke-width="2.5" style="vertical-align:text-top;margin-right:4px;"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/></svg>
+            <strong>Pro-Tip:</strong> Always attach a verification command or expected output to stop early.
         </div>
     </div>
 
     <div class="card">
         <div class="card-header">
-            <div class="card-title">⚠️ The 18% Follow-Up Tax</div>
+            <div class="card-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffa657" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                The Follow-Up Tax
+            </div>
             <div class="card-tag warn">{nudge_pct}% of Prompts</div>
         </div>
         <div class="card-body">
             Single-word follow-ups ('continue', 'update', 'fix it') force the model to re-read up to 150k context tokens with zero new constraints, burning massive input tokens.
         </div>
         <div class="card-tip warn">
-            ⚡ Pro-Tip: Give the full multi-step plan up front, or use `!shift` to queue sequential steps.
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffa657" stroke-width="2.5" style="vertical-align:text-top;margin-right:4px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <strong>Pro-Tip:</strong> Give the full multi-step plan up front, or use `!shift` to queue sequential steps.
         </div>
     </div>
 
     <div class="card">
         <div class="card-header">
-            <div class="card-title">🧼 Context Compaction Hygiene</div>
+            <div class="card-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d2a8ff" stroke-width="2.5"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+                Context Compaction Hygiene
+            </div>
             <div class="card-tag">Saved {saved_tokens}</div>
         </div>
         <div class="card-body">
             When context swells past 80k tokens, attention drifts and costs skyrocket. Clean context drops (/compact, /clear, !fresh) immediately stop re-reading redundant logs.
         </div>
         <div class="card-tip">
-            💡 Pro-Tip: Run `/compact` or `!fresh` when starting an unrelated sub-task.
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d2a8ff" stroke-width="2.5" style="vertical-align:text-top;margin-right:4px;"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/></svg>
+            <strong>Pro-Tip:</strong> Run `/compact` or `!fresh` when starting an unrelated sub-task.
         </div>
     </div>
 </div>
 
 <div class="hall">
-    <div class="hall-title">🏆 Top Performing Prompt Pattern from Your History</div>
+    <div class="hall-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffa657" stroke-width="2.2" style="vertical-align:text-bottom;margin-right:4px;"><path d="M6 9H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h2"/><path d="M18 9h2a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-2"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.45 1-1 1H7v4h10v-4h-2c-.55 0-1-.45-1-1v-2.34"/><path d="M6 2h12v7a6 6 0 0 1-12 0V2z"/></svg>
+        Top Performing Prompt Pattern from Your History
+    </div>
     <div class="hall-code">{winning_prompt}</div>
 </div>
 
@@ -6209,8 +6228,8 @@ def coach_cmd(cfg, topic):
     nudge_pct = int(nud_prompts / tot_prompts * 100) if tot_prompts else 18
 
     saved_tokens = _k(saved_in(sav_data(), 30)) or "2.5M"
-    winner = (les.get("winners") or ["fix the parser in lexer.py so tokens() handles tabs, done when tests pass without regression"])[0]
-    winner_sanitized = html.escape(winner.replace("\n", " ")[:140])
+    raw_w = "".join(c if (ord(c) < 128 or c in "—–•·‘’“”") else " " for c in winner.replace("\n", " "))
+    winner_sanitized = html.escape(re.sub(r"\s+", " ", raw_w).strip()[:140])
 
     # Determine archetype
     w_sum = when_summary(cfg, an.get("when") or {})
