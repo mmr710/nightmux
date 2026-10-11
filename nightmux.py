@@ -676,16 +676,17 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 # prints one is not waiting for anything. The pane then sat "waiting" forever,
 # swallowing typed text and nudging about an answer nobody owed.
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
-                     r"[❯>]\s*\d[.)]\s"          # ❯ 1. Yes
-                     r"|\d[.)]\s*(?:Yes|No)\b"    # 1. Yes / 2. No
+                     r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
+                     r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
                      r"|Do you want\b"
                      r"|Do you trust\b"
                      r"|Continue\?"
                      r"|Press Enter to continue"
                      r"|Requesting permission"
+                     r"|Run this command\?"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
-                     r"|\(y/n\)|Navigate ·|enter Confirm"
+                     r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
                      r"|Enter to select ·", re.M)   # Claude Code's select menu
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
@@ -702,7 +703,7 @@ BUSY = re.compile(r"esc (?:to )?(?:interrupt|cancel)"
                   r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
-MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>]\s*)?(?:(\d)[.)]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
+MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
 # opencode's modal draws key hints where the other TUIs write a question, so
 # WAITING saw nothing and the pane read "idle": no 🟠, no buttons, and drain()
 # free to type a queued prompt into an open dialog. The hints are chrome and
@@ -2735,9 +2736,16 @@ KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 # answered — the commonest way nightmux looks hung. So send the key, look at the
 # pane, and add Enter only when the same question is still sitting there.
 CONFIRM_AFTER = 1.5   # how long the TUI gets to act on the key by itself
-# A numbered menu does not answer to "y": Claude Code's permission prompt is a
-# list, and the letter goes nowhere. Take the digit of the matching option.
-YES_NO = {"!y": re.compile(r"^ye?s?\b", re.I), "!n": re.compile(r"^no\b", re.I)}
+YES_NO = {
+    "!y": re.compile(
+        r"^(?:ye?s?|allow(?:ed)?|always allow|approve|confirm|proceed|accept|grant|run(?: (?:this )?command)?|ok(?:ay)?)\b",
+        re.I,
+    ),
+    "!n": re.compile(
+        r"^(?:no|deny|denied|reject|cancel|abort|dismiss|don'?t|refuse|stop)\b",
+        re.I,
+    ),
+}
 
 
 def dialog_id(lines):
@@ -3503,7 +3511,14 @@ AUTOYES_MAX = 25      # ...and this many in an hour, then stop and say so
 
 def agent_key(cfg, topic, sess):
     """Which bench key this session is for this topic, or None."""
-    return next((k for k, s in bench_of(cfg, topic).items() if s == sess), None)
+    k = next((k for k, s in bench_of(cfg, topic).items() if s == sess), None)
+    if k:
+        return k
+    # Main bound session for this topic: resolve its running or started agent
+    stopic = str(topic)
+    if cfg.get("topics", {}).get(stopic) == sess:
+        return _agent.get(sess) or (cfg.get("started") or {}).get(stopic) or default_agent(cfg)
+    return _agent.get(sess)
 
 
 def autoyes(cfg, state, topic, sess):
@@ -3522,18 +3537,22 @@ def autoyes(cfg, state, topic, sess):
     if not keys:
         return
     ak = agent_key(cfg, topic, sess)
-    if ak not in keys:
-        # If the session is bound manually, it might incorrectly map to the default agent.
-        # But if the user explicitly enabled autoyes for exactly one agent here,
-        # we can assume that agent is the one actually running, if it's the main session.
+    if ak not in keys and "on" not in keys and "all" not in keys:
         bound = cfg.get("topics", {}).get(str(topic))
-        if bound == sess and len(keys) == 1 and keys[0] in AGENTS and ak == default_agent(cfg):
-            pass
+        live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
+        if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
+            ak = live_key
+        elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and (ak is None or ak == default_agent(cfg)):
+            ak = keys[0]
         else:
             return
     if st.get("mode") != "waiting":
-        st.pop("autoyes_at", None)
-        return
+        lines_chk = visible(sess)
+        if pane_state(lines_chk) == "waiting":
+            st["mode"] = "waiting"
+        else:
+            st.pop("autoyes_at", None)
+            return
     now = time.time()
     if now - st.get("autoyes_at", 0) < AUTOYES_GAP:
         return
@@ -3548,19 +3567,22 @@ def autoyes(cfg, state, topic, sess):
     lines = visible(sess)
     digit = menu_digit(lines, YES_NO["!y"])
     if not digit:
-        last_line = plain(lines[-1]) if lines else ""
-        if re.search(r"[\(\[]y/n[\)\]]", last_line, re.I) or (len(lines) > 1 and re.search(r"[\(\[]y/n[\)\]]", plain(lines[-2]), re.I)):
+        tail = [plain(l) for l in (lines[-15:] if lines else [])]
+        tail_text = "\n".join(tail)
+        if re.search(r"[\(\[][yY]/[nN](?:/[aA])?[\)\]]", tail_text) or re.search(r"\b(?:y/n|yes/no)\b", tail_text, re.I):
             digit = "y"
-        elif re.search(r"Do you want to proceed|Continue\?|Press Enter to continue", last_line, re.I) or (len(lines) > 1 and re.search(r"Do you want to proceed|Continue\?|Press Enter to continue", plain(lines[-2]), re.I)):
+        elif re.search(r"(?:Do you want to proceed|Continue\?|Press Enter to continue)", tail_text, re.I):
             digit = "y"
         else:
             return          # nothing here reads as "yes": a human decides this one
     st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
     st.pop("autoyes_capped", None)
-    question = next((l.strip() for l in lines[-15:] if WAITING.search(l)), "?")
+    non_empty = [l.strip() for l in lines[-15:] if l.strip()]
+    question = next((l for l in non_empty if WAITING.search(l)), non_empty[0] if non_empty else "?")
     send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
          "!autoyes off to stop", mode="plain")
-    if pick(sess, digit) is None:      # not an arrow menu: the digit is the answer
+    res = pick(sess, digit)
+    if res is None or res:      # not an arrow menu, or arrow navigation errored: press digit with confirm
         press(sess, digit, confirm=True)
     remember(state, sess, digit)
 
@@ -3573,9 +3595,10 @@ def bench_of(cfg, topic):
     is folded in here rather than in each of the three callers.
     """
     bench = dict((cfg.get("bench") or {}).get(str(topic)) or {})
-    cur = cfg.get("topics", {}).get(topic)
+    stopic = str(topic)
+    cur = cfg.get("topics", {}).get(stopic)
     if cur:
-        key = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+        key = (cfg.get("started") or {}).get(stopic) or default_agent(cfg)
         bench.setdefault(_agent.get(cur) if key in AGENTS and _agent.get(cur) else key, cur)
     # A session filed under an agent its pane is not running (claude's session
     # listed as agy) sends !agy into claude. Refile it under what is running.
@@ -4329,7 +4352,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "auto-yes off in this topic"
         if arg:
             bench = bench_of(cfg, topic)
-            picks = [a for a in arg.replace(",", " ").split() if a in bench]
+            if arg in ("on", "all", "yes", "true"):
+                live = (agent_key(cfg, topic, cfg.get("topics", {}).get(str(topic)))
+                        or (cfg.get("started") or {}).get(str(topic))
+                        or default_agent(cfg))
+                picks = [live] if arg in ("on", "yes", "true") else (list(bench.keys()) or [live])
+            else:
+                picks = [a for a in arg.replace(",", " ").split() if a in bench or a in AGENTS]
             if not picks:
                 return ("usage: !autoyes <agent[,agent]> | off\n"
                         "this topic has: " + (", ".join(sorted(bench)) or "nothing"))
@@ -16304,6 +16333,16 @@ def selfcheck():
         assert ypress == ["1"] and "auto-yes stopped" in ysent[-1], ysent[-1]
         autoyes(ycfg, yst, "7", "ay")
         assert len(ysent) == n_ + 1, "said it was capped more than once"
+        # Allow / Approve / bracketed options are recognized as affirmative
+        yst["ay"].update(mode="waiting", autoyes_at=0, autoyes_hits=[])
+        with stubbed(visible=lambda x: ["Requesting permission:", "> 1. Allow once", "  2. Deny"]):
+            autoyes(ycfg, yst, "7", "ay")
+        assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
+        yst["ay"].update(mode="waiting", autoyes_at=0)
+        with stubbed(visible=lambda x: ["Run this command?", "> [1] Approve", "  [2] Reject"]):
+            autoyes(ycfg, yst, "7", "ay")
+        assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
+    assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
