@@ -1,0 +1,56 @@
+name: drift-guard
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/drift-guard.yml'
+      - 'tests/**'
+
+jobs:
+  drift-guard:
+    runs-on: ubuntu-22.04
+    continue-on-error: true # Allowed to fail, posts a summary
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: install tmux
+        run: sudo apt-get update -qq && sudo apt-get install -y tmux
+
+      - name: install headless agent CLIs
+        run: |
+          echo "Installing available headless agent CLIs..."
+          npm install -g @google/gemini-cli || true
+          npm install -g @qwen-code/qwen-code || true
+          pip install --no-cache-dir aider-chat || true
+
+      - name: verify CLI versions
+        id: versions
+        run: |
+          python3 -c "
+          import nightmux
+          print('### Drift Guard: Installed CLI Versions')
+          for a, ad in nightmux.AGENT_ADAPTERS.items():
+              vcmd = ad.get('version_cmd', [a, '--version'])
+              bin_name = vcmd[0]
+              ver = nightmux.agent_version(bin_name)
+              print(f'- **{a}**: \`{ver}\`')
+          " >> $GITHUB_STEP_SUMMARY
+
+      - name: run pane classifier tests
+        run: python3 tests/test_panes.py
+
+      - name: run reader fixture tests
+        run: python3 tests/test_readers.py
+
+      - name: run nightmux selfcheck
+        run: python3 nightmux.py --selfcheck

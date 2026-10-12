@@ -2262,6 +2262,10 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         st["prev"], st["changed"] = lines, time.time()
     was_busy = st.get("mode") == "busy"   # a turn was in flight on the last tick
     st["mode"] = pane_state(scr)
+    if st["mode"] == "unknown":
+        _unknown_pane_since.setdefault(sess, time.time())
+    else:
+        _unknown_pane_since.pop(sess, None)
     if st["mode"] == "busy" and not was_busy:
         now = time.time()
         turns = [t for t in st.get("turns", []) if now - t < 300]
@@ -4179,6 +4183,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
+    if cmd in ("!doctor", "!doc"):
+        return doctor_report(cfg)
     if cmd == "!upgrade":
         return upgrade_cmd(cfg, topic, arg)
     if cmd == "!skill":
@@ -8867,6 +8873,26 @@ def server_metrics():
     return out
 
 
+def claude_limits(snap=None):
+    """5-hour and 7-day usage windows for Claude Code from status snapshot."""
+    if not snap:
+        return []
+    windows = []
+    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = window(snap, k)
+        if w:
+            windows.append({"label": label, "pct": w.get("used_percentage"), "resets_at": w.get("resets_at")})
+    return windows
+
+
+def opencode_limits(home=None):
+    return []
+
+
+def gemini_limits(home=None):
+    return []
+
+
 _codex_rl = {"at": 0, "val": None}
 
 
@@ -8932,18 +8958,33 @@ def agent_limits(cfg, state, home=None):
     blank = {"sessions": 0, "live": 0, "busy": 0, "held": 0, "until": None}
     snaps = [s["snap"] for s in state.values() if isinstance(s, dict) and s.get("snap")]
     fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})
-    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        w = window(fresh, k)
-        if w:
-            rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].append(
-                {"label": label, "pct": w["used_percentage"], "resets_at": w.get("resets_at")})
-    rl = codex_limits(home) or {}
+
+    # Claude limit windows
+    c_ad = AGENT_ADAPTERS.get("claude", {}) if "AGENT_ADAPTERS" in globals() else {}
+    lr_c = c_ad.get("limit_reader") or claude_limits
+    wins_c = lr_c(fresh)
+    if wins_c:
+        rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].extend(wins_c)
+
+    # Codex limit windows
+    cx_ad = AGENT_ADAPTERS.get("codex", {}) if "AGENT_ADAPTERS" in globals() else {}
+    lr_cx = cx_ad.get("limit_reader") or codex_limits
+    rl = lr_cx(home) or {}
     for k in ("primary", "secondary"):
         w = rl.get(k)
         if w and w.get("used_percent") is not None and (w.get("resets_at") or now + 1) > now:
             rows.setdefault("codex", dict(blank, agent="codex", windows=[]))["windows"].append(
                 {"label": _win_label(w.get("window_minutes") or 0),
                  "pct": w["used_percent"], "resets_at": w.get("resets_at")})
+
+    # Agy limit windows
+    ag_ad = AGENT_ADAPTERS.get("agy", {}) if "AGENT_ADAPTERS" in globals() else {}
+    if ag_ad.get("limit_reader"):
+        ag_lim = ag_ad["limit_reader"]() or {}
+        if ag_lim.get("pct"):
+            rows.setdefault("agy", dict(blank, agent="agy", windows=[]))["windows"].append(
+                {"label": "5h", "pct": ag_lim["pct"], "resets_at": None})
+
     for r in rows.values():
         for w in r["windows"]:
             w["eta"] = forecast(f"{r['agent']}:{w['label']}")
@@ -9482,29 +9523,68 @@ def _scan_opencode(stats, home, since):
     b = _chat_bucket(stats, "opencode")
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
+        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        sess_tbl = "session_v2" if "session_v2" in tables else ("session" if "session" in tables else None)
+        msg_tbl = "session_message" if "session_message" in tables else ("message" if "message" in tables else None)
+        part_tbl = "session_part" if "session_part" in tables else ("part" if "part" in tables else None)
+        if not msg_tbl:
+            return
+
+        cols = {row[1] for row in con.execute(f"PRAGMA table_info({msg_tbl})")}
+        time_col = "time_created" if "time_created" in cols else ("created_at" if "created_at" in cols else None)
+        data_col = "data" if "data" in cols else ("content" if "content" in cols else None)
+        sid_col = "session_id" if "session_id" in cols else ("session" if "session" in cols else "id")
+        type_col = "type" if "type" in cols else None
+        if not data_col:
+            return
+
+        since_ms = int(since * 1000)
         sess = set()
-        for sid, data in con.execute("SELECT session_id, data FROM message "
-                                     "WHERE time_created >= ?", (int(since * 1000),)):
+        where_time = f"WHERE {time_col} >= {since_ms}" if time_col else ""
+        sel_cols = f"{sid_col}, {data_col}" + (f", {type_col}" if type_col else "")
+        for row in con.execute(f"SELECT {sel_cols} FROM {msg_tbl} {where_time}"):
+            sid, data = row[0], row[1]
+            type_val = row[2] if type_col else None
             sess.add(sid)
-            d = json.loads(data)
-            if d.get("role") != "assistant":
+            try:
+                d = json.loads(data) if isinstance(data, str) else (data or {})
+            except (ValueError, TypeError):
                 continue
-            if d.get("error"):
-                b["errors"] += 1
-            t = d.get("tokens") or {}
-            if t.get("input") or t.get("output"):
-                c = t.get("cache") or {}
-                _chat_call(b, d.get("modelID"), t.get("input") or 0, c.get("read") or 0,
-                           c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+            role = type_val or d.get("role")
+            if role == "assistant":
+                if d.get("error"):
+                    b["errors"] += 1
+                t = d.get("tokens") or d.get("usage") or {}
+                if t.get("input") or t.get("output"):
+                    c = t.get("cache") or {}
+                    m = d.get("modelID") or d.get("model")
+                    m_name = m.get("id") if isinstance(m, dict) else m
+                    _chat_call(b, m_name,
+                               t.get("input") or 0, c.get("read") or 0,
+                               c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+            elif role == "user":
+                p_text = d.get("text") or d.get("content")
+                if isinstance(p_text, list):
+                    p_text = " ".join(i.get("text", "") for i in p_text if isinstance(i, dict) and i.get("text"))
+                if isinstance(p_text, str) and not d.get("synthetic"):
+                    _chat_prompt(b, p_text)
+
         b["sessions"] += len(sess)
-        for data, at, cwd in con.execute(
-                "SELECT p.data, m.time_created, s.directory FROM part p "
-                "JOIN message m ON m.id = p.message_id LEFT JOIN session s ON s.id = m.session_id "
-                "WHERE m.time_created >= ? AND m.data LIKE '%\"role\":\"user\"%'",
-                (int(since * 1000),)):
-            d = json.loads(data)
-            if d.get("type") == "text" and not d.get("synthetic"):
-                _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
+
+        if part_tbl and sess_tbl and time_col:
+            sess_cols = {row[1] for row in con.execute(f"PRAGMA table_info({sess_tbl})")}
+            dir_col = "directory" if "directory" in sess_cols else ("project_path" if "project_path" in sess_cols else "cwd")
+            try:
+                for data, at, cwd in con.execute(
+                        f"SELECT p.data, m.{time_col}, s.{dir_col} FROM {part_tbl} p "
+                        f"JOIN {msg_tbl} m ON m.id = p.message_id LEFT JOIN {sess_tbl} s ON s.id = m.{sid_col} "
+                        f"WHERE m.{time_col} >= ? AND (m.{data_col} LIKE '%\"role\":\"user\"%' OR m.{data_col} LIKE '%\"role\": \"user\"%')",
+                        (since_ms,)):
+                    d = json.loads(data) if isinstance(data, str) else (data or {})
+                    if d.get("type") == "text" and not d.get("synthetic"):
+                        _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
+            except Exception:
+                pass
     finally:
         con.close()
 
@@ -9512,50 +9592,80 @@ def _scan_opencode(stats, home, since):
 def _scan_agy(stats, home, since):
     import sqlite3
     db = os.path.join(home, ".gemini", "antigravity-cli", "conversation_summaries.db")
-    if not os.path.exists(db):
-        return
     b = _chat_bucket(stats, "agy")
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    scanned_cids = set()
+    if os.path.exists(db):
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
+            for cid, steps, ws, last in con.execute(
+                    "SELECT conversation_id, step_count, workspace_uris, last_user_input_time FROM "
+                    "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
+                scanned_cids.add(cid)
+                b["sessions"] += 1
+                m = re.search(r"file://(/[^\"',\s]+)", ws or "")
+                if m:      # no prompts on disk: a conversation counts once for its project
+                    n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
+                    b["projects"][n] = b["projects"].get(n, 0) + 1
+                b["requests"] += steps or 0
+                _scan_agy_transcript(b, home, cid)
+        finally:
+            con.close()
+
+    brain_dir = os.path.join(home, ".gemini", "antigravity-cli", "brain")
+    if os.path.isdir(brain_dir):
+        for cid in os.listdir(brain_dir):
+            if cid in scanned_cids:
+                continue
+            tf = os.path.join(brain_dir, cid, ".system_generated", "logs", "transcript.jsonl")
+            if os.path.exists(tf) and os.path.getmtime(tf) >= since:
+                b["sessions"] += 1
+                _scan_agy_transcript(b, home, cid)
+
+
+def _scan_agy_transcript(b, home, cid):
+    tf = os.path.join(home, ".gemini", "antigravity-cli", "brain", cid, ".system_generated", "logs", "transcript.jsonl")
+    if not os.path.exists(tf):
+        return
     try:
-        cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for cid, steps, ws, last in con.execute("SELECT conversation_id, step_count, workspace_uris, last_user_input_time FROM "
-                                     "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
-            b["sessions"] += 1
-            m = re.search(r"file://(/[^\"',\s]+)", ws or "")
-            if m:      # no prompts on disk: a conversation counts once for its project
-                n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
-                b["projects"][n] = b["projects"].get(n, 0) + 1
-            b["requests"] += steps or 0
-            
-            tf = os.path.join(home, ".gemini", "antigravity-cli", "brain", cid, ".system_generated", "logs", "transcript.jsonl")
-            if os.path.exists(tf):
-                import json
-                try:
-                    with open(tf, "r") as f_in:
-                        for line in f_in:
-                            if "PLANNER_RESPONSE" in line:
-                                try:
-                                    js = json.loads(line)
-                                    if js.get("type") == "PLANNER_RESPONSE":
-                                        if js.get("status") == "ERROR":
-                                            b["errors"] += 1
-                                        i = js.get("input_tokens") or 0
-                                        cr = js.get("cache_read_tokens") or 0
-                                        o = js.get("output_tokens") or 0
-                                        _chat_call(b, "agy", i, cr, 0, o, 0)
-                                except: pass
-                            elif "USER_INPUT" in line:
-                                try:
-                                    js = json.loads(line)
-                                    if js.get("type") == "USER_INPUT":
-                                        b["prompts"] += 1
-                                        c = js.get("content")
-                                        if c: b["prompt_chars"] += len(c)
-                                        _chat_prompt(b, c or "")
-                                except: pass
-                except: pass
-    finally:
-        con.close()
+        with open(tf, "r", encoding="utf-8", errors="replace") as f_in:
+            for line in f_in:
+                if "PLANNER_RESPONSE" in line:
+                    try:
+                        js = json.loads(line)
+                        if js.get("type") == "PLANNER_RESPONSE":
+                            if js.get("status") == "ERROR":
+                                b["errors"] += 1
+                            i = js.get("input_tokens")
+                            cr = js.get("cache_read_tokens")
+                            o = js.get("output_tokens")
+                            th = js.get("thinking_tokens") or 0
+                            if i is None or cr is None or o is None:
+                                u = js.get("usage") or js.get("tokens") or {}
+                                i = i or u.get("input_tokens") or u.get("input") or 0
+                                cr = cr or u.get("cache_read_tokens") or u.get("cache_read") or 0
+                                o = o or u.get("output_tokens") or u.get("output") or 0
+                                th = th or u.get("thinking_tokens") or u.get("thinking") or 0
+                            _chat_call(b, "agy", i or 0, cr or 0, 0, o or 0, th or 0)
+                    except Exception:
+                        pass
+                elif "USER_INPUT" in line:
+                    try:
+                        js = json.loads(line)
+                        if js.get("type") == "USER_INPUT":
+                            c = js.get("content") or ""
+                            m_req = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", c, re.DOTALL)
+                            clean_c = m_req.group(1).strip() if m_req else c.strip()
+                            if clean_c:
+                                _chat_prompt(b, clean_c)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _scan_gemini(stats, home, since):
+    pass
 
 
 def chat_tips(stats):
@@ -9614,22 +9724,6 @@ def chat_tips(stats):
     return tips
 
 
-
-    try:
-        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
-        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        if m_gem:
-            # Output says "Remaining 73%", we want "used percentage" which is 100 - remaining
-            _agy_usage["pct"] = 100 - int(m_gem.group(1))
-        if m_cla:
-            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
-        _agy_usage["at"] = time.time()
-    except Exception:
-        pass
-    return _agy_usage
-
-
 _agy_usage = {"at": 0, "pct": 0, "claude_pct": 0}
 
 def agy_limits():
@@ -9649,6 +9743,97 @@ def agy_limits():
         pass
     return _agy_usage
 
+
+# Unified Agent Adapter Table: launch command, screen-state detector,
+# transcript/usage reader, limit reader, and version check.
+AGENT_ADAPTERS = {
+    "claude": {
+        "launch": AGENTS["claude"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_claude,
+        "limit_reader": claude_limits,
+        "version_cmd": ["claude", "--version"],
+    },
+    "agy": {
+        "launch": AGENTS["agy"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_agy,
+        "limit_reader": agy_limits,
+        "version_cmd": ["agy", "--version"],
+    },
+    "codex": {
+        "launch": AGENTS["codex"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_codex,
+        "limit_reader": codex_limits,
+        "version_cmd": ["codex", "--version"],
+    },
+    "opencode": {
+        "launch": AGENTS["opencode"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_opencode,
+        "limit_reader": opencode_limits,
+        "version_cmd": ["opencode", "--version"],
+    },
+    "gemini": {
+        "launch": AGENTS["gemini"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_gemini,
+        "limit_reader": gemini_limits,
+        "version_cmd": ["gemini", "--version"],
+    },
+    "aider": {
+        "launch": AGENTS["aider"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["aider", "--version"],
+    },
+    "cursor": {
+        "launch": AGENTS["cursor"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["cursor-agent", "--version"],
+    },
+    "amp": {
+        "launch": AGENTS["amp"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["amp", "--version"],
+    },
+    "goose": {
+        "launch": AGENTS["goose"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["goose", "--version"],
+    },
+    "qwen": {
+        "launch": AGENTS["qwen"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["qwen", "--version"],
+    },
+}
+
+
+def adapter_for(name):
+    """Adapter entry for `name`, falling back to standard CLI defaults."""
+    ad = AGENT_ADAPTERS.get(name)
+    if ad:
+        return ad
+    return {
+        "launch": [name, "--continue"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": [name, "--version"],
+    }
+
+
 def analyze_chats(days=30, home=None):
     """Read every agent's own transcripts on this machine and summarise them.
 
@@ -9661,11 +9846,13 @@ def analyze_chats(days=30, home=None):
         return hit
     t0, stats = time.time(), {}
     since = t0 - days * 86400
-    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
-        try:
-            scan(stats, home or os.path.expanduser("~"), since)
-        except Exception as e:     # one unreadable store must not hide the rest
-            print(f"analysis: {scan.__name__}: {e}", file=sys.stderr)
+    for a, ad in AGENT_ADAPTERS.items():
+        reader = ad.get("usage_reader")
+        if reader:
+            try:
+                reader(stats, home or os.path.expanduser("~"), since)
+            except Exception as e:     # one unreadable store must not hide the rest
+                print(f"analysis: {a}: {e}", file=sys.stderr)
     tips = chat_tips(stats)
     agents_ = {}
     for a, s in stats.items():
@@ -14439,11 +14626,51 @@ def selfcheck():
                            "rate_limits": {"primary": {"used_percent": 42.0, "window_minutes": 300,
                                                        "resets_at": time.time() + 600}}}}):
                 f.write(json.dumps(l_) + "\n")
+        # OpenCode v2 (session_v2 & session_message) fixture test
+        os.makedirs(os.path.join(h_, ".local", "share", "opencode"))
+        import sqlite3
+        con_oc = sqlite3.connect(os.path.join(h_, ".local", "share", "opencode", "opencode.db"))
+        con_oc.execute("CREATE TABLE session_v2 (id TEXT, directory TEXT, time_created INTEGER)")
+        con_oc.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+        now_ms_ = int(time.time() * 1000)
+        con_oc.execute("INSERT INTO session_v2 VALUES ('s_oc', NULL, ?)", (now_ms_,))
+        con_oc.execute("INSERT INTO session_message VALUES ('m_oc1', 's_oc', ?, ?)",
+                       (now_ms_, json.dumps({"role": "user", "content": "build feature"})))
+        con_oc.execute("INSERT INTO session_message VALUES ('m_oc2', 's_oc', ?, ?)",
+                       (now_ms_, json.dumps({"role": "assistant", "tokens": {"input": 500, "output": 100, "cache": {"read": 200}}})))
+        con_oc.commit()
+        con_oc.close()
+
+        # Agy transcript.jsonl fixture test
+        agy_logs = os.path.join(h_, ".gemini", "antigravity-cli", "brain", "cid_1", ".system_generated", "logs")
+        os.makedirs(agy_logs)
+        with open(os.path.join(agy_logs, "transcript.jsonl"), "w") as f_agy:
+            f_agy.write(json.dumps({"type": "USER_INPUT", "content": "<USER_REQUEST>\nfix test\n</USER_REQUEST>"}) + "\n")
+            f_agy.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 1000, "cache_read_tokens": 2000, "output_tokens": 150}) + "\n")
+
         r_ = analyze_chats(30, home=h_)
         c_ = r_["agents"]["claude"]
         assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
+        assert r_["agents"]["opencode"]["prompts"] == 1 and r_["agents"]["opencode"]["tokens"]["input"] == 500
+        assert r_["agents"]["agy"]["prompts"] == 1 and r_["agents"]["agy"]["tokens"]["input"] == 1000
+        assert check_reader_drift(home=h_)[1] is True
+        assert "claude" in AGENT_ADAPTERS and callable(adapter_for("opencode")["usage_reader"])
+        assert "🩺 doctor check:" in doctor_report()
+        assert "🩺 doctor check:" in handle({"topics": {"1": "s"}}, {}, threading.Lock(), "1", "!doctor")
+
+        with tempfile.TemporaryDirectory() as h_drift:
+            os.makedirs(os.path.join(h_drift, ".local", "share", "opencode"))
+            con_dr = sqlite3.connect(os.path.join(h_drift, ".local", "share", "opencode", "opencode.db"))
+            con_dr.execute("CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER)")
+            con_dr.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+            con_dr.execute("INSERT INTO session VALUES ('s_d', '/tmp', ?)", (now_ms_,))
+            con_dr.execute("INSERT INTO message VALUES ('m_d', 's_d', ?, '{\"role\":\"assistant\",\"broken\":1}')", (now_ms_,))
+            con_dr.commit()
+            con_dr.close()
+            chk_d, ok_d, fix_d = check_reader_drift(home=h_drift)
+            assert ok_d is False and "opencode" in fix_d and "0 parsed tokens" in fix_d
         assert "SECRETPROMPT" not in json.dumps(r_) + stats_report(r_)
         assert r_["when"]["projects"] == [("shop", 30)], r_["when"]
         w_ = when_summary({}, r_["when"])
@@ -16583,6 +16810,47 @@ def selfcheck():
     print("selfcheck ok")
 
 
+_unknown_pane_since = {}
+
+
+def check_reader_drift(cfg=None, home=None):
+    """Detect if an agent shows activity but 0 parsed tokens, or screen stuck in unknown."""
+    warnings = []
+    # 1. Check readers for activity with 0 parsed tokens
+    try:
+        r = analyze_chats(days=30, home=home)
+        ag_data = r.get("agents") or {}
+        for a, ad in AGENT_ADAPTERS.items():
+            if not ad.get("usage_reader"):
+                continue
+            s = ag_data.get(a)
+            if not s:
+                continue
+            errs = s.get("errors") or 0
+            prompts = s.get("prompts") or 0
+            requests = s.get("requests") or 0
+            sessions = s.get("sessions") or 0
+            effective_activity = requests + max(0, prompts - errs) + max(0, sessions - errs)
+            toks = sum((s.get("tokens") or {}).values())
+            if effective_activity > 0 and toks == 0:
+                bin_name = ad.get("version_cmd", [a])[0]
+                ver = agent_version(bin_name)
+                warnings.append(f"{a} ({ver}): {effective_activity} active items but 0 parsed tokens")
+    except Exception as e:
+        warnings.append(f"reader check error: {e}")
+
+    # 2. Check screen classification stuck in unknown > 5 minutes
+    now = time.time()
+    for sess, t_seen in list(_unknown_pane_since.items()):
+        if now - t_seen > 300:
+            mins = int((now - t_seen) // 60)
+            warnings.append(f"session '{sess}' screen classified as unknown for {mins}m")
+
+    if warnings:
+        return "reader drift", False, "; ".join(warnings) + " — CLI format may have changed"
+    return "reader drift", True, ""
+
+
 def setup_checks(cfg=None):
     """[(label, ok, how to fix)] — ok None means optional and not set up. The
     one list behind --doctor and the dashboard's setup panel."""
@@ -16654,6 +16922,7 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
+    add(*check_reader_drift(cfg))
     return out
 
 
@@ -16666,6 +16935,18 @@ def doctor():
         print(f"{mark} {label}" + (f" — {fix}" if fix and not passed else
                                    f" — {fix}" if fix and passed and label.startswith(("Claude", "agents")) else ""))
     return ok
+
+
+def doctor_report(cfg=None):
+    """Format doctor checks for Telegram or chat display."""
+    lines = ["🩺 doctor check:"]
+    for label, passed, fix in setup_checks(cfg):
+        mark = "✓" if passed else "–" if passed is None else "✗"
+        line = f"{mark} {label}"
+        if fix and (not passed or label.startswith(("Claude", "agents", "reader"))):
+            line += f" — {fix}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ---------- --demo: the office with a made-up night, no bot, no keys ----------

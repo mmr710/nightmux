@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"cwd":"/projects/my-api"}}
+{"type":"turn_context","payload":{"model":"gpt-4o"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"implement auth route"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2500,"cached_input_tokens":1800,"output_tokens":400},"last_token_usage":{"input_tokens":2500,"cached_input_tokens":1800,"output_tokens":400}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2500,"cached_input_tokens":1800,"output_tokens":400},"last_token_usage":{"input_tokens":2500,"cached_input_tokens":1800,"output_tokens":400}},"rate_limits":{"primary":{"used_percent":35.0,"window_minutes":300,"resets_at":1791809000}}}}
