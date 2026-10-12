@@ -339,6 +339,8 @@ def run(*argv, **kw):
     except subprocess.TimeoutExpired:
         print(f"timeout {timeout}s: {' '.join(argv)}", file=sys.stderr)
         return f"[{argv[0]} timed out after {timeout}s]"
+    except FileNotFoundError:
+        return ""
     return (p.stdout + p.stderr).rstrip("\n")
 
 
@@ -3020,6 +3022,8 @@ _updating = threading.Lock()   # one run at a time: two installs into one prefix
 
 def agent_version(binary):
     """First line of `<binary> --version`, or '?' when it says nothing."""
+    if not shutil.which(binary):
+        return "?"
     out = run(binary, "--version", timeout=20).strip()
     return out.splitlines()[0][:60] if out else "?"
 
