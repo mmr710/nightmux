@@ -683,11 +683,12 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r"|Continue\?"
                      r"|Press Enter to continue"
                      r"|Requesting permission"
+                     r"|(?:△\s*)?Permission required"   # opencode 2.x
                      r"|Run this command\?"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
                      r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
-                     r"|Enter to select ·", re.M)   # Claude Code's select menu
+                     r"|Enter to select ·|⇆ select", re.M)   # Claude Code's select menu
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
 # Perusing… — so matching the word list caught almost nothing and read a working
@@ -741,6 +742,14 @@ BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
 # because ❯ turns up in ordinary output; it counts only next to one of ARROWED's
 # footers, which render on menus and nowhere else.
 CHOICE = re.compile(r"^\s*[│┃]?\s*❯\s+\S")
+# opencode 2.x draws a permission dialog as one row of buttons, not a list:
+#
+#   ┃   Allow once   Always allow   Reject  ctrl+f fullscreen  ⇆ select  enter confirm
+#
+# No digits, no ❯, ← → move a background highlight. MENU matched none of it, so
+# the topic got no Allow/Reject buttons and auto-yes never found its "yes".
+BAR = re.compile(r"⇆\s*select")
+BAR_HINT = re.compile(r"\s{2,}(?=ctrl\+|⇆|enter\b|esc\b)")
 # The usage-limit banner. Phrasing lifted from Claude Code's own detector, so it
 # tracks what the CLI actually prints rather than what a changelog once said.
 LIMIT_HIT = re.compile(
@@ -1034,6 +1043,53 @@ def strip_noise(lines, verbose=False):
     return out
 
 
+def _bg(code, bg):
+    """The background colour in force after one SGR escape."""
+    ps, i = code[2:-1].split(";"), 0
+    while i < len(ps):
+        if ps[i] in ("38", "48"):
+            n = 3 if ps[i + 1:i + 2] == ["5"] else 5
+            bg = ";".join(ps[i:i + n]) if ps[i] == "48" else bg
+            i += n
+            continue
+        if ps[i] in ("", "0", "49"):
+            bg = ""
+        elif ps[i].isdigit() and (40 <= int(ps[i]) <= 47 or 100 <= int(ps[i]) <= 107):
+            bg = ps[i]
+        i += 1
+    return bg
+
+
+def bar_opts(lines):
+    """(labels, index of the highlighted one or None) of a button-row dialog, or None.
+
+    The highlight is a background colour, so it is only readable on a -e
+    capture: the button whose background differs from the gap before the key
+    hints is the selected one. Anything else (plain capture, two odd ones out)
+    is None, and nothing should move on a guess.
+    """
+    for l in reversed(lines[-25:]):
+        if not BAR.search(plain(l)):
+            continue
+        text, bgs, bg = "", [], ""
+        for part in re.split(r"(\x1b\[[0-9;]*m)", l):
+            if part.startswith("\x1b["):
+                bg = _bg(part, bg)
+            else:
+                text += part
+                bgs += [bg] * len(part)
+        cut = BAR_HINT.search(text)
+        if not cut:
+            return None
+        labs = [m for m in re.finditer(r"\S+(?: \S+)*", text[:cut.start()])
+                if m.group() not in ("┃", "│")]
+        if not labs:
+            return None
+        marked = [i for i, m in enumerate(labs) if bgs[m.start()] != bgs[cut.end() - 1]]
+        return [m.group() for m in labs], marked[0] if len(marked) == 1 else None
+    return None
+
+
 def menu_buttons(lines, sess=None):
     """One tap-button per option of the menu the pane is waiting on.
 
@@ -1048,12 +1104,17 @@ def menu_buttons(lines, sess=None):
         if m.group(1):
             label = m.group(2)
             opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+    bar = bar_opts(lines)
+    for i, label in enumerate(bar[0] if bar else []):
+        opts[str(i + 1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
     # No numbers means an arrow-driven selector (agy's trust prompt, /model):
     # the nav row alone drives it, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
-    rows.append([("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
-                ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
+    rows.append([("esc", f"!esc{suffix}"), ("←", f"!left{suffix}"),
+                 ("→", f"!right{suffix}"), ("⏎", f"!enter{suffix}")] if bar else
+                [("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
+                 ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
     return kb(rows)
 
 
@@ -2763,7 +2824,7 @@ def watcher(cfg, state, lock):
 # ---------- commands ----------
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
-        "!down": "Down", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
+        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 
 # The dialogs disagree about Enter. Claude Code's permission prompt acts on the
@@ -2792,6 +2853,9 @@ def dialog_id(lines):
 
 def menu_digit(lines, want):
     """The digit of the first menu option whose label matches `want`."""
+    bar = bar_opts(lines)
+    if bar:
+        return next((str(i + 1) for i, l in enumerate(bar[0]) if want.match(l)), None)
     for l in menu_rows(lines):
         m = MENU.match(plain(l))
         if want.match(m.group(2).strip()):
@@ -2850,21 +2914,26 @@ def pick(sess, want):
     a highlight it must not confirm.
     """
     lines = coloured(sess)      # the highlight is a colour, not a character
-    if not ARROWED.search(plain("\n".join(lines[-25:]))):
+    across = bool(bar_opts(lines))      # opencode 2.x: one row, ← →
+    if not across and not ARROWED.search(plain("\n".join(lines[-25:]))):
         return None
-    opts, at = menu_opts(lines)
+
+    def read(ls):
+        b = bar_opts(ls)
+        return ([str(i + 1) for i in range(len(b[0]))], b[1]) if b else menu_opts(ls)
+    opts, at = read(lines)
     if want not in opts:
         return f"option {want} is not on '{sess}' right now"
     if at is None:
         return f"can't tell which option '{sess}' is on — use ↑ ↓ ⏎"
     step = opts.index(want) - at
     if step:
-        tmux("send-keys", "-t", tgt(sess),
-             *[("Down" if step > 0 else "Up")] * abs(step))
+        fwd, back = ("Right", "Left") if across else ("Down", "Up")
+        tmux("send-keys", "-t", tgt(sess), *[fwd if step > 0 else back] * abs(step))
         time.sleep(0.4)
     # Re-read before confirming: the marker above is a guess about someone
     # else's TUI, and the pane is the only thing that can settle it.
-    opts, at = menu_opts(coloured(sess))
+    opts, at = read(coloured(sess))
     if at is None or opts[at] != want:
         return f"could not move '{sess}' onto option {want} — use ↑ ↓ ⏎"
     tmux("send-keys", "-t", tgt(sess), "Enter")
@@ -3619,8 +3688,11 @@ def autoyes(cfg, state, topic, sess):
     send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
          "!autoyes off to stop", mode="plain")
     res = pick(sess, digit)
-    if res is None or res:      # not an arrow menu, or arrow navigation errored: press digit with confirm
+    if res is None:             # not an arrow menu: the digit is the answer
         press(sess, digit, confirm=True)
+    elif res:                   # a highlight it could not read or move: Enter
+        send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
+        return
     remember(state, sess, digit)
 
 
@@ -13748,6 +13820,36 @@ def selfcheck():
         sel[0] = ""                               # every row alike: unreadable
         assert pick("s", "3").startswith("can't tell") and keyed == []
     assert pane_state([l for l in oc if "┃" not in l]) == "unknown"  # prose alone
+    # opencode 2.x: the permission dialog is one row of buttons, the highlight a
+    # background colour (captured from opencode v2.0.24, cut off at the pane edge).
+    E = "\x1b[%sm".__mod__
+    ocbar = lambda on: [
+        "  ┃  △ Permission required", "  ┃    ← Access external directory ~/x", "  ┃",
+        "  " + E("38;5;216") + E("48;5;233") + "┃" + E("38;5;15") + E("48;5;234") + "  "
+        + "".join((E("48;5;216") if i == on else E("48;5;234")) + " " + E("38;5;232") + lab
+                  + E("38;5;15") + " " + E("48;5;234") + " " for i, lab in
+                  enumerate(["Allow once", "Always allow", "Reject"]))
+        + " " + E("38;5;255") + "ctrl+f " + E("38;5;8") + "fullscreen  " + E("38;5;255")
+        + "⇆ " + E("38;5;8") + "select" + E("38;5;15") + "  enter con"]
+    assert bar_opts(ocbar(0)) == (["Allow once", "Always allow", "Reject"], 0)
+    assert bar_opts(ocbar(2))[1] == 2
+    flat = [plain(l) for l in ocbar(0)]
+    assert bar_opts(flat) == (["Allow once", "Always allow", "Reject"], None)
+    assert pane_state(flat) == "waiting"
+    assert menu_digit(flat, YES_NO["!y"]) == "1" and menu_digit(flat, YES_NO["!n"]) == "3"
+    assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
+        == ["!1 o", "!2 o", "!3 o", "!esc o"]
+    bsel, bkeyed = [0], []
+
+    def bar_tmux(*a):
+        if a[0] != "send-keys":
+            return "\n".join(ocbar(bsel[0]))
+        bkeyed.append(a[3:])
+        bsel[0] += sum({"Right": 1, "Left": -1}.get(k, 0) for k in a[3:])
+        return ""
+    with stubbed(tmux=bar_tmux):
+        assert pick("o", "3") == "" and bkeyed == [("Right", "Right"), ("Enter",)], bkeyed
+        assert bsel[0] == 2
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                  "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
     assert pane_state(agy_trust) == "waiting"
