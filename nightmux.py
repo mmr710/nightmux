@@ -16896,7 +16896,7 @@ def setup_checks(cfg=None):
     drift = reader_drift()
     for a, why in drift:
         add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "
-            f"({agent_version(a) or "version unknown"}); "
+            f"({agent_version(a) or 'version unknown'}); "
             "token stats for it are wrong until nightmux is updated")
     if not drift:
         add("token readers match the installed CLIs", True)
