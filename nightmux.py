@@ -19,6 +19,7 @@ import concurrent.futures
 import contextlib
 import hmac
 import glob
+import hashlib
 import html
 import json
 import os
@@ -990,6 +991,15 @@ def tail_transcript(st, path, ladder=False):
                     st["ctx_tok"] = (u.get("input_tokens", 0)
                                      + u.get("cache_creation_input_tokens", 0)
                                      + u.get("cache_read_input_tokens", 0))
+                # A compaction writes no usage record, only this. Without it the
+                # context figure stayed at the pre-compact size, autocompact read
+                # that as "/compact did not take" and ran it again two minutes
+                # later: a second summarising pass over a 14k context that made
+                # it bigger and squeezed the summary a second time.
+                cm = rec.get("compactMetadata") if rec.get("subtype") == "compact_boundary" else None
+                if cm and isinstance(cm.get("postTokens"), int):
+                    sav_ctx(st, cm["postTokens"])        # book the drop before it is the baseline
+                    st["ctx_tok"] = cm["postTokens"]
                 out += render(rec)
     st["tpos"] = pos
     if spent:
@@ -1554,7 +1564,7 @@ def warn_ctx(cfg, st, topic, sess):
         return
         
     pct = (st.get("snap") or {}).get("ctx_pct")
-    if pct is None:
+    if pct is None and st.get("ctx_tok") is None:      # the transcript is a figure too
         if cfg.get("autocompact") and st.get("mode"):   # set by hand: they expect it
             wk = f"ctx_blind_{sess}"
             with _warned_lock:   # wk is sess-scoped, but save_warned() writes one shared file
@@ -3851,7 +3861,7 @@ def start_session(cfg, state, lock, topic, arg, key):
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
-    mem_greet(cfg, state, topic, name, cwd)
+    mem_greet(cfg, state, topic, name, cwd, fresh=True)
     return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
             "topic bound").replace("  ", " ")
 
@@ -5749,7 +5759,11 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["claude-3-5-haiku-20241022", "haiku 5.5", "sonnet", "opus"], "agy": ["low", "medium", "high"]}
+# Aliases, never dated IDs: a pinned ID retires and every light turn then fails
+# (claude-3-5-haiku-20241022 did), and "haiku 5.5" is not an alias /model takes.
+# Tier index = LADDER_START: light → haiku, normal → sonnet, heavy → opus.
+# agy: gemini-3.1-pro offers only low and high effort; /effort medium is refused.
+LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
@@ -8412,7 +8426,8 @@ MEM_UPDATE = (
 MEM_READ = ("Before anything else, read .nightmux/memory.md — notes left by earlier sessions "
             "on this project: how to run it, decisions, gotchas, what is in progress. "
             "Reply with one line: ready.")
-_mem = {}          # topic -> {"turns": n, "wait": session}
+_mem = {}          # topic -> {"turns": n, "wait": session, "fp": repo state at last update}
+_mem_seen = {}     # session -> memory.md mtime its conversation already holds
 
 
 def mem_on(cfg, topic):
@@ -8432,9 +8447,35 @@ def mem_exclude(cwd):
             pass
 
 
-def mem_greet(cfg, state, topic, sess, cwd):
-    if cwd and mem_on(cfg, topic) and os.path.exists(os.path.join(cwd, MEM_REL)):
-        state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+def mem_greet(cfg, state, topic, sess, cwd, fresh=False):
+    """Queue MEM_READ — once per conversation and version of the notes.
+
+    Switching back to a bench session that already read them cost a whole turn
+    over its full context to answer "ready": on a 250k session that is ~25k
+    tokens to learn nothing. fresh: a new conversation, which holds nothing.
+    """
+    path = os.path.join(cwd or "", MEM_REL)
+    if not (cwd and mem_on(cfg, topic) and os.path.exists(path)):
+        return
+    if fresh:
+        _mem_seen.pop(sess, None)
+    mt = os.path.getmtime(path)
+    if _mem_seen.get(sess, 0) >= mt:
+        return
+    _mem_seen[sess] = mt
+    state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+
+
+def mem_print(cwd):
+    """What the repo holds right now — HEAD, the diff, untracked names — or None.
+
+    .nightmux/ is git-excluded, so the notes' own rewrite does not move it.
+    """
+    if not cwd or tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    return hashlib.sha1("\0".join(tmux_git(cwd, *a) for a in (
+        ("rev-parse", "HEAD"), ("diff", "HEAD"),
+        ("ls-files", "--others", "--exclude-standard"))).encode()).hexdigest()
 
 
 def mem_capture(cfg, topic, sess):
@@ -8449,6 +8490,9 @@ def mem_reply_capture(cfg, topic, sess, body):
     if not m or m.get("wait") != sess:
         return False
     m.pop("wait")
+    path = os.path.join((cfg.get("dirs") or {}).get(topic) or "", MEM_REL)
+    if os.path.exists(path):        # it wrote them: no need to read them back
+        _mem_seen[sess] = os.path.getmtime(path)
     send(cfg, topic, "🧠 project memory updated", mode="plain", quiet=True)
     return True
 
@@ -8458,7 +8502,7 @@ def mem_ask(cfg, state, topic, sess):
     if cwd:
         os.makedirs(os.path.join(cwd, ".nightmux"), exist_ok=True)
         mem_exclude(cwd)
-    _mem[topic] = {"turns": 0, "wait": sess}
+    _mem[topic] = {"turns": 0, "wait": sess, "fp": mem_print(cwd)}
     state.setdefault(sess, {}).setdefault("queue", []).append(MEM_UPDATE)
 
 
@@ -8471,6 +8515,10 @@ def mem_tick(cfg, state):
                 or st.get("mode") != "idle" or st.get("queue")
                 or now - st.get("changed", now) < MEM_QUIET
                 or topic in _goal_run or (_pair.get(topic) or {}).get("wait")):
+            continue
+        fp = m.get("fp") and mem_print((cfg.get("dirs") or {}).get(topic))
+        if fp and fp == m["fp"]:
+            m["turns"] = 0      # talk, no change to the project: the notes still hold
             continue
         mem_ask(cfg, state, topic, sess)
 
@@ -13669,6 +13717,25 @@ def selfcheck():
     with open(tp, "w") as f:                       # /clear: file shrank, rebaseline
         f.write(rec + "\n")
     assert tail_transcript(tst, tp) == []
+    # /compact: a boundary record and no usage. The figure must drop with it,
+    # or autocompact reads the stale size and compacts the summary again.
+    booked, ct = [], {}
+    tail_transcript(ct, tp)                        # its own baseline
+    with open(tp, "a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"content": [], "usage": {
+            "input_tokens": 5, "cache_read_input_tokens": 200580}}}) + "\n")
+        f.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                            "compactMetadata": {"preTokens": 204183, "postTokens": 14219}}) + "\n")
+    with stubbed(sav_add=lambda *a: booked.append(a)):
+        tail_transcript(ct, tp)
+    assert ct["ctx_tok"] == 14219 and ("drops",) in booked, (ct.get("ctx_tok"), booked)
+    actx, asent = {"autocompact": "200k"}, []
+    with stubbed(send=lambda *a, **k: asent.append(a), inject=lambda *a: asent.append(a)):
+        autocompact(actx, {"s": dict(ct, mode="idle", compacted=True)}, "1", "s")
+    assert asent == [], asent                      # under the line: re-armed, not retried
+    with open(tp, "w") as f:                       # leave the file as the next check expects
+        f.write(rec + "\n")
+    tail_transcript(tst, tp)
     assert "spend" not in tst                      # no usage records, nothing to weigh
     with open(tp, "a") as f:                       # what a turn actually cost
         f.write(json.dumps({"type": "assistant", "message": {
@@ -15219,18 +15286,18 @@ def selfcheck():
         assert "9" not in _lint_pass and "9" not in _lint_hold
         note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
         assert queued and "haiku" in note and cst_["k"]["queue"] == [
-            "/model claude-3-5-haiku-20241022", "rename foo to bar in utils"], cst_
+            "/model haiku", "rename foo to bar in utils"], cst_
         assert _route_last["9"] == ("light", "claude")
         cst_["k"]["queue"] = []
         assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
         assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
         _route_last["9"] = ("light", "claude")
         coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
-        assert cst_["k"]["queue"] == ["/model haiku 5.5"], cst_    # two corrections: step up
+        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
         assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model haiku 5.5"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
         cst_["k"]["queue"] = []
         ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
         assert cst_["k"]["queue"] == [], cst_
@@ -15677,6 +15744,24 @@ def selfcheck():
         open(os.path.join(md_, MEM_REL), "w").write("## What this is\nx")
         mem_greet(mcfg2_, st3_, "3", "m2", md_)
         assert st3_["m2"]["queue"] == [MEM_READ]
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # back to it: already read
+        assert st3_["m2"]["queue"] == [MEM_READ]
+        later_ = time.time() + 5
+        os.utime(os.path.join(md_, MEM_REL), (later_, later_))
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # notes rewritten since
+        assert st3_["m2"]["queue"] == [MEM_READ] * 2
+        mem_greet(mcfg2_, st3_, "3", "m2", md_, fresh=True)  # new conversation, same name
+        assert st3_["m2"]["queue"] == [MEM_READ] * 3
+        # No change to the project since the last rewrite: no rewrite.
+        _mem["3"] = {"turns": MEM_TURNS, "fp": "same"}
+        mst2_["m"]["queue"] = []
+        with stubbed(mem_print=lambda c: "same"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [] and _mem["3"]["turns"] == 0
+        _mem["3"]["turns"] = MEM_TURNS
+        with stubbed(mem_print=lambda c: "moved"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [MEM_UPDATE]
         mcfg2_["memory"] = {"3": "off"}
         mem_capture(mcfg2_, "3", "m")
         assert _mem["3"]["turns"] == 0
