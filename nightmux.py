@@ -15043,6 +15043,21 @@ def selfcheck():
     assert task_class("rename foo to bar in utils") == "light"
     assert task_class("why does the websocket drop under load?") == "heavy"
     assert task_class("add a dark mode toggle to settings") == "normal"
+    # Drift: opencode 2 left its old tables behind, empty. The reader neither
+    # throws nor finds anything; the freshly written database gives it away.
+    import sqlite3
+    dh = tempfile.mkdtemp(prefix="nightmux-selfcheck-drift-")
+    os.makedirs(os.path.join(dh, ".local/share/opencode"))
+    con_ = sqlite3.connect(os.path.join(dh, DRIFT_STORES["opencode"]))
+    con_.executescript("CREATE TABLE message (id, session_id, data, time_created);"
+                       "CREATE TABLE part (message_id, data);"
+                       "CREATE TABLE session (id, directory);")
+    con_.close()
+    assert [a_ for a_, _ in reader_drift(home=dh)] == ["opencode"], reader_drift(home=dh)
+    old_ = time.time() - 30 * 86400
+    os.utime(os.path.join(dh, DRIFT_STORES["opencode"]), (old_, old_))
+    assert reader_drift(home=dh) == []        # untouched for a month: nothing to say
+    shutil.rmtree(dh, ignore_errors=True)
     assert task_class("make a snake game") == "heavy"          # creative: not the cheap model
     assert task_class("build a landing page for my app") == "heavy"
     assert task_class("fix typo in the history page") == "light"  # "story" is a word, not a substring
@@ -16722,7 +16737,7 @@ def selfcheck():
 
     with stubbed(load_cfg=_boom):
         assert doctor() is False               # no config at all: nothing else to check
-    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
+    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]}, reader_drift=lambda: [],
                 api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
                 run=lambda *a, **kw: "process" if "KillMode" in a else "active",
                 shutil=_FakeShutil(), installed_agents=lambda c: ["claude"]):
@@ -16764,6 +16779,47 @@ def selfcheck():
     # debris in the live upload cache, where prune would not touch it for a week.
     os.path.exists(CFG_PATH) and os.remove(CFG_PATH)
     print("selfcheck ok")
+
+
+_drift = {}
+# Database stores, where a renamed table reads as "nothing happened" rather than
+# an error: the old table stays behind, empty. The files' mtime is the activity
+# signal that does not go through the reader being checked.
+DRIFT_STORES = {"opencode": ".local/share/opencode/opencode.db",
+                "agy": ".gemini/antigravity-cli/conversation_summaries.db"}
+
+
+def reader_drift(home=None, days=7):
+    """[(agent, what is wrong)] for token readers that broke without saying so.
+
+    Every agent CLI owns its storage and changes it without notice — opencode 2
+    moved its messages to a new table, and the reader kept answering 0, so
+    Wrapped, !stats and the savings all quietly lost an agent. Two symptoms are
+    checkable from here: the reader throws, or it finds activity and no tokens.
+    """
+    hit = _drift.get(days)
+    if home is None and hit and time.time() - hit[0] < 600:
+        return hit[1]
+    out, stats, since = [], {}, time.time() - days * 86400
+    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
+        a = scan.__name__[len("_scan_"):]
+        try:
+            scan(stats, home or os.path.expanduser("~"), since)
+        except Exception as e:
+            out.append((a, f"reader failed: {str(e)[:80]}"))
+            continue
+        s = stats.get(a) or _chat_bucket({}, a)
+        db = os.path.join(home or os.path.expanduser("~"), DRIFT_STORES.get(a, "\0"))
+        wrote = max([os.path.getmtime(f) for f in (db, db + "-wal") if os.path.exists(f)] or [0])
+        if wrote >= since and not (s["sessions"] or s["requests"]):
+            out.append((a, f"its store was written {left(time.time() - wrote)} ago "
+                           "but the reader found no sessions"))
+        elif (s["sessions"] or s["prompts"]) and not (s["input"] + s["output"] + s["cache_read"]):
+            out.append((a, f"{s['sessions']} sessions, {s['prompts']} prompts in {days}d "
+                           "but 0 tokens parsed"))
+    if home is None:
+        _drift[days] = (time.time(), out)
+    return out
 
 
 def setup_checks(cfg=None):
@@ -16837,6 +16893,13 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
+    drift = reader_drift()
+    for a, why in drift:
+        add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "
+            f"({agent_version(a) or "version unknown"}); "
+            "token stats for it are wrong until nightmux is updated")
+    if not drift:
+        add("token readers match the installed CLIs", True)
     return out
 
 
