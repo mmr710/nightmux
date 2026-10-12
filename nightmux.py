@@ -5607,7 +5607,11 @@ LIGHT = re.compile(r"^\W*(?:rename|format|lint|fix (?:the |a )?typo|typo|add (?:
                    r"run (?:the )?tests|translate|reword)\b", re.I)
 HEAVY = re.compile(r"\b(?:design|architect\w*|refactor\w*|why\b|debug\w*|investigat\w*|"
                    r"race condition|deadlock|security|vulnerab\w*|performance|optimi[sz]\w*|"
-                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*)", re.I)
+                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*|"
+                   # Creative work: the cheap model ships something that runs and
+                   # nobody wants, and no correction ever says "be more creative".
+                   r"game|landing page|ui\b|ux\b|animat\w*|beautiful|polish\w*|"
+                   r"redesign\w*|look (?:better|nicer|good)|creative|brand\w*|story)", re.I)
 _route_last = {}  # topic -> (class, agent) of the last task, for learning
 ROUTE_MIN_N = 5  # outcomes before a learned rate outranks the defaults
 
@@ -7047,6 +7051,8 @@ def upload_media(data, ext="png"):
 
 
 def wrapped_cmd(cfg, topic, arg):
+    share = arg.startswith("share")
+    arg = arg[5:].strip() if share else arg
     days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
     b = browser_bin(cfg)
     if not b:
@@ -7054,24 +7060,35 @@ def wrapped_cmd(cfg, topic, arg):
 
     def go():
         w = wrapped_data(cfg, days)
-        mine = render_html(cfg, wrapped_page(days, w), "1200,1100")
+        mine = None if share else render_html(cfg, wrapped_page(days, w), "1200,1100")
         pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1100")
-        if not (mine and pub):
+        if not (pub and (share or mine)):
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
         cells = w["cells"]
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+        if share:
+            # Only now, on a tap: the card goes to uguu.se + rentry.co so the
+            # post can carry it. Never on a plain !wrapped — that is private.
+            link = upload_media(pub, "png")
+            send(cfg, topic, "📤 card uploaded" + (f": {link}" if link else
+                 " — failed, attach wrapped-share.png yourself"), mode="plain",
+                 buttons=kb([[("🐦 Share on X", tweet_url(
+                     f"My AI coding agents, last {days} days: {top}. Run by nightmux "
+                     f"{REPO_URL} #ClaudeCode #vibecoding\n" + link)),
+                     ("👽 Reddit", reddit_url(f"My AI coding agents, last {days} days: "
+                                              f"{top}. Run by nightmux {REPO_URL}"))]]))
+            return
         send_file(cfg, topic, "wrapped.png", mine, kind="photo",
                   caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
                   + "\n".join(f"• {k}: {v}" for k, v in w["insights"])
                   + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
-                  caption="📤 to share: projects shown as counts only",
-                  buttons=kb([[("🐦 Share on X", tweet_url(
-                      f"My AI coding agents, last {days} days: {top}. Run by nightmux "
-                      f"{REPO_URL} #ClaudeCode #vibecoding\n" + upload_media(pub, "png"))), ("👽 Reddit (attach photo!)", reddit_url(f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"))]]))
+                  caption="📤 to share: projects shown as counts only — "
+                  "tapping share uploads this card (uguu.se + rentry.co) for the link",
+                  buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
-    return f"🎁 drawing your {days}-day card…"
+    return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
 
 
 # ---------- !public: a read-only office anyone can open ----------
@@ -10437,6 +10454,7 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
     <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
     <label id="srvl">server<select name="server"></select></label>
   </div>
+  <label style="margin-top:8px">start from<select id="tpl"><option value="">blank — write your own idea</option></select></label>
   <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
     <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
   <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
@@ -10681,6 +10699,18 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
 if (location.hash === '#servers') { $('addsrv').click(); $('addsrv').scrollIntoView(); }
+// Starter ideas for a first project: each is concrete enough that the spec and
+// ./check.sh write themselves, and small enough to go green in one night.
+const TPL = [
+  ['habit tracker', 'a habit tracker web app: add habits, tick them off daily, streaks, a weekly chart, data in localStorage; check.sh runs the unit tests and a headless page load'],
+  ['landing page', 'a one-page product landing site: hero, features, pricing, FAQ, email signup form, responsive and dark-mode aware; check.sh validates the HTML and checks every link and image resolves'],
+  ['telegram bot', 'a Python Telegram bot (stdlib only) that saves notes and lists them with /notes; check.sh runs its tests against a fake Bot API'],
+  ['browser game', 'a small canvas browser game (snake or breakout) with score, levels and a high-score table in localStorage; check.sh runs the game logic tests headless'],
+  ['REST API', 'a JSON REST API for a todo list with SQLite, create/list/update/delete, input validation and an OpenAPI file; check.sh starts it and runs curl tests against every route'],
+];
+TPL.forEach(([t], i) => $('tpl').add(new Option(t, i)));
+$('tpl').onchange = e => { const t = TPL[e.target.value]; if (!t) return;
+  const f = $('newf'); if (!f.title.value) f.title.value = t[0]; f.idea.value = t[1]; };
 $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
@@ -14998,6 +15028,28 @@ def selfcheck():
     assert task_class("rename foo to bar in utils") == "light"
     assert task_class("why does the websocket drop under load?") == "heavy"
     assert task_class("add a dark mode toggle to settings") == "normal"
+    assert task_class("make a snake game") == "heavy"          # creative: not the cheap model
+    assert task_class("build a landing page for my app") == "heavy"
+    assert task_class("fix typo in the history page") == "light"  # "story" is a word, not a substring
+    # !wrapped is private: nothing leaves the machine until share is tapped.
+    class _Now:
+        def __init__(self, target, daemon=True):
+            self.go = target
+
+        def start(self):
+            self.go()
+    ups, outs = [], []
+    with stubbed(browser_bin=lambda c: "chromium", render_html=lambda *a: b"png",
+                 wrapped_page=lambda *a, **k: "",
+                 wrapped_data=lambda c, d: {"cells": [("3", "turns")], "insights": [], "split": []},
+                 send_file=lambda *a, **k: outs.append(k.get("buttons")),
+                 send=lambda *a, **k: outs.append(k.get("buttons")),
+                 upload_media=lambda *a: ups.append(a) or "https://uguu.se/x.png",
+                 threading=type("T", (), {"Thread": _Now})):
+        wrapped_cmd({}, 1, "7")
+        assert ups == [] and "!wrapped share 7" in outs[-1], outs
+        wrapped_cmd({}, 1, "share 7")
+        assert len(ups) == 1 and "Share on X" in outs[-1], outs
     rcfg_ = {"topics": {"4": "r"}, "started": {"4": "claude"}, "route": {"4": "auto"},
              "bench": {"4": {"claude": "r", "codex": "r-codex"}}}
     rst_ = {"r": {"mode": "idle", "changed": time.time() - 3600}}
