@@ -747,7 +747,20 @@ LIMIT_HIT = re.compile(
     r"You've (?:hit|reached) your|You're out of (?:usage credits|extra usage)"
     r"|usage limit reached|Your org is out of usage"
     r"|Your (?:seat type doesn't include|usage allocation has been disabled)")
-RESET_IN = re.compile(r"resets? in\s+((?:\d+\s*(?:d|hr?|min|m)\b\s*)+)", re.I)
+CAPACITY_HIT = re.compile(
+    r"servers? (?:are|is) experiencing high traffic"
+    r"|please try again in a minute"
+    r"|No capacity available for model"
+    r"|UNAVAILABLE\s*(?:\(code\s*503\)|:\s*503)"
+    r"|(?:model|server) is (?:currently )?overloaded"
+    r"|overloaded with other requests"
+    r"|Service Unavailable"
+    r"|rate_limit_error"
+    r"|Resource has been exhausted",
+    re.I
+)
+RESET_IN = re.compile(r"(?:resets?|try again|retry)\s+in\s+((?:\d+\s*(?:d|hr?|min|m|s|sec|seconds?)\b\s*)+)", re.I)
+RESET_WORD = re.compile(r"(?:try again|retry|resets?)\s+in\s+(?:a|an|one)\s+(min(?:ute)?|hour|sec(?:ond)?)\b", re.I)
 RESET_AT = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:[ap]m)?)", re.I)
 HOOK_DIR = os.path.expanduser("~/.nightmux-hooked")
 HOOK_FRESH = 900  # a Stop hook seen this recently owns delivery for that session
@@ -1099,11 +1112,29 @@ def parse_reset(text, now=None):
     now = now or time.time()
     m = RESET_IN.search(text)
     if m:
-        # "4 hr 56 min", "2h 14m", "2d 3h" — every shape the CLI prints.
+        # "4 hr 56 min", "2h 14m", "2d 3h", "30s" — every shape the CLI prints.
         secs = 0
-        for n, unit in re.findall(r"(\d+)\s*(d|hr?|min|m)\b", m.group(1), re.I):
-            secs += int(n) * {"d": 86400, "h": 3600, "hr": 3600}.get(unit.lower(), 60)
-        return now + secs
+        for n, unit in re.findall(r"(\d+)\s*(d|hr?|min|m|s|sec|seconds?)\b", m.group(1), re.I):
+            u = unit.lower()
+            if u.startswith("s"):
+                secs += int(n)
+            elif u in ("m", "min", "minute", "minutes"):
+                secs += int(n) * 60
+            elif u in ("h", "hr", "hour", "hours"):
+                secs += int(n) * 3600
+            elif u.startswith("d"):
+                secs += int(n) * 86400
+        if secs > 0:
+            return now + secs
+    m = RESET_WORD.search(text)
+    if m:
+        unit = m.group(1).lower()
+        if unit.startswith("s"):
+            return now + 10
+        if unit.startswith("m"):
+            return now + 60
+        if unit.startswith("h"):
+            return now + 3600
     m = RESET_AT.search(text)
     if m:
         t = m.group(1).strip().lower()
@@ -1117,6 +1148,8 @@ def parse_reset(text, now=None):
         lt = time.localtime(now)
         at = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
         return at + 86400 if at <= now else at   # a stated time already past is tomorrow
+    if CAPACITY_HIT.search(text):
+        return now + 60   # transient capacity / 503 backoff default
     return None   # no time on screen. Guessing five hours would swallow prompts
 
 
@@ -1215,8 +1248,8 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
         # on every pane the sidecar's windows do not cover. What separates them is
         # position: a quoted error puts its own words in front, an announcement
         # starts with the banner.
-        hit = next((l for l in scr[-12:] if LIMIT_HIT.search(l) and (
-            not DETAIL.match(l) or LIMIT_HIT.match(undetail(l)))), None)
+        hit = next((l for l in scr[-12:] if (LIMIT_HIT.search(l) or CAPACITY_HIT.search(l)) and (
+            not DETAIL.match(l) or LIMIT_HIT.match(undetail(l)) or CAPACITY_HIT.search(undetail(l)))), None)
         if not hit:
             return
         hit, at = hit.strip(), parse_reset("\n".join(scr[-12:]))
@@ -1229,7 +1262,9 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
         send(cfg, topic, f"⚠️ {sess} hit a usage limit\n{hit}\n"
              "no reset time on screen — prompts are NOT queued", mode="plain")
         return
-    st["limit_until"] = until = at + cfg.get("limit_slack", LIMIT_SLACK)
+    is_cap = bool(CAPACITY_HIT.search(hit))
+    slack = 10 if is_cap else cfg.get("limit_slack", LIMIT_SLACK)
+    st["limit_until"] = until = at + slack
     # A turn cut off mid-flight took its prompt with it: that prompt was already
     # consumed, so an empty queue at reset time means the work simply stops and
     # waits for a human to type "continue". Queue the continuation here and the
@@ -1245,9 +1280,9 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     # where nothing was running to notice.
     refused = bool(st.get("last") and not st.get("ran")
                    and time.time() - st.get("last_at", 0) < REFUSED_FAST)
-    cont = (busy or refused) and cfg.get("auto_continue", "continue")
+    cont = (busy or refused or is_cap) and cfg.get("auto_continue", "continue")
     if cont:
-        if refused:
+        if (refused or is_cap) and st.get("last"):
             cont = st["last"]
         st.setdefault("queue", []).insert(0, cont)
     # In the journal too: which branch this took is the whole behaviour, and the
@@ -1255,9 +1290,11 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     print(f"limit {sess}: {hit}, until {int(until)}, resume={cont!r}, "
           f"{st.get('why', 'mode=' + str(st.get('mode')))}", file=sys.stderr, flush=True)
     event(cfg, "limit", topic, sess, hit)
-    send(cfg, topic, f"⏸ {sess} hit the usage limit\n{hit}\n"
+    action_verb = "retrying" if is_cap else "resuming"
+    header = f"⏸ {sess} server capacity / high traffic error (503)" if is_cap else f"⏸ {sess} hit the usage limit"
+    send(cfg, topic, f"{header}\n{hit}\n"
          f"resumes {clock(cfg, until)} (in {left(until - time.time())}) — "
-         + (f"resuming itself with '{cont.splitlines()[0][:40]}'" if cont
+         + (f"{action_verb} itself with '{cont.splitlines()[0][:40]}'" if cont
             else "anything you send is queued"), mode="plain",
          buttons=failover_buttons(cfg, topic, sess))
 
@@ -4225,26 +4262,37 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return preview_cmd(cfg, topic, sess, cmd, arg)
     if cmd == "!server":
         peers = cfg.get("peers") or {}
+        me = host_name(cfg)
         if not arg:
             where = peer_of(cfg, topic)
-            return (f"🖥 this topic runs on {where or host_name(cfg) + ' (here)'}\n"
+            return (f"🖥 this topic runs on {where or me + ' (here)'}\n"
                     + ("peers: " + ", ".join(sorted(peers))
-                       + "\n!server <peer> moves it, !server local brings it back" if peers
+                       + f"\n!server <peer> moves it, !server local (or !server {me}) brings it back" if peers
                        else 'no peers yet — add "peers" to the config (README: two servers)'))
-        if arg != "local" and arg not in peers:
+        target = None
+        if arg.lower() in ("local", "here", me.lower()):
+            target = "local"
+        elif arg in peers:
+            target = arg
+        else:
+            for p in peers:
+                if arg.lower() == p.lower():
+                    target = p
+                    break
+        if not target:
             return f"no peer '{arg}' — known: {', '.join(sorted(peers)) or 'none'}"
-        if arg != "local" and cfg.get("topics", {}).get(topic):
+        if target != "local" and cfg.get("topics", {}).get(topic):
             return (f"this topic is bound here to '{cfg['topics'][topic]}' — !unbind it "
                     "first, or both machines would answer it")
         with lock:
             remote = cfg.setdefault("remote", {})
-            if arg == "local":
+            if target == "local":
                 remote.pop(topic, None)
             else:
-                remote[topic] = arg
+                remote[topic] = target
             save_cfg(cfg)
-        return ("🔀 this topic runs here again" if arg == "local" else
-                f"🔀 this topic now runs on {arg}: everything typed here goes there.\n"
+        return (f"🔀 this topic runs here again ({me})" if target == "local" else
+                f"🔀 this topic now runs on {target}: everything typed here goes there.\n"
                 "!new <name> <dir> starts a session on it")
     if cmd == "!office":
         url = cfg.get("office_url")
@@ -13429,6 +13477,9 @@ def selfcheck():
         time.mktime((2026, 8, 7, 15, 0, 0, 0, 0, -1))
     assert parse_reset("limit resets at 09:30", now) == \
         time.mktime((2026, 8, 8, 9, 30, 0, 0, 0, -1))   # already past: tomorrow
+    assert parse_reset("please try again in a minute", now) == now + 60
+    assert parse_reset("retry in 30s", now) == now + 30
+    assert parse_reset("UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent", now) == now + 60
     assert parse_reset("no time here", now) is None   # never guess a reset
     assert left(3 * 3600 + 61) == "3h 1m" and left(90) == "1m"
     assert brief({"command": "ls -la\nrm x", "file_path": "/a"}) == "ls -la"
@@ -14169,6 +14220,17 @@ def selfcheck():
     st["limit_until"] = time.time() + 60
     assert queue_blob({"s": st})["s"]["limit_until"] > time.time()
     st.pop("limit_until")
+
+    # Capacity / 503 error: automatic retry with refused prompt
+    st["last"], st["last_at"], st["ran"] = "task for gemini", time.time(), True
+    st.pop("limit_until", None), st.pop("limit_line", None)
+    screen[:] = ["● done",
+                 "⚠ Our servers are experiencing high traffic right now, please try again in a minute. (UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+    flush_new(cfg, state, "1", "s")
+    assert any("server capacity / high traffic error (503)" in m and "retrying" in m for m in sent[-2:])
+    assert st["queue"] == ["task for gemini"]
+    assert st["limit_until"] > time.time()
+    st.pop("limit_until"), st.pop("limit_line"), st.pop("queue", None)
 
     # A reset with a queue and a pane read as "unknown" must hold AND say so.
     # The silent version cleared the hold, told nobody, and typed nothing —
@@ -15503,6 +15565,11 @@ def selfcheck():
         assert peer_of(mv_, "78") == "box2"
         handle(mv_, {}, lk_, "78", "!server local")
         assert peer_of(mv_, "78") is None
+        prim_named_ = dict(mv_, name="vps1")
+        handle(prim_named_, {}, lk_, "78", "!server BOX2")
+        assert peer_of(prim_named_, "78") == "box2"
+        handle(prim_named_, {}, lk_, "78", "!server vps1")
+        assert peer_of(prim_named_, "78") is None
     base = 1700000000                             # fixed instant: no clock races
     assert at_epoch({}, "+2h", base) == base + 7200
     nxt = at_epoch({}, "03:00", base)
