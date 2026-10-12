@@ -8434,7 +8434,7 @@ MEM_READ = ("Before anything else, read .nightmux/memory.md — notes left by ea
             "on this project: how to run it, decisions, gotchas, what is in progress. "
             "Reply with one line: ready.")
 _mem = {}          # topic -> {"turns": n, "wait": session, "fp": repo state at last update}
-_mem_seen = {}     # session -> memory.md mtime its conversation already holds
+_mem_seen = {}     # session -> (memory.md mtime, HEAD) its conversation already holds
 
 
 def mem_on(cfg, topic):
@@ -8460,17 +8460,23 @@ def mem_greet(cfg, state, topic, sess, cwd, fresh=False):
     Switching back to a bench session that already read them cost a whole turn
     over its full context to answer "ready": on a 250k session that is ~25k
     tokens to learn nothing. fresh: a new conversation, which holds nothing.
+    A new commit since then re-sends it too: the reread is where the agent
+    notices the notes lag the code ("memory is stale: it misses b2c0754").
     """
     path = os.path.join(cwd or "", MEM_REL)
     if not (cwd and mem_on(cfg, topic) and os.path.exists(path)):
         return
     if fresh:
         _mem_seen.pop(sess, None)
-    mt = os.path.getmtime(path)
-    if _mem_seen.get(sess, 0) >= mt:
+    seen = mem_seen_key(path, cwd)
+    if _mem_seen.get(sess) == seen:
         return
-    _mem_seen[sess] = mt
+    _mem_seen[sess] = seen
     state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+
+
+def mem_seen_key(path, cwd):
+    return os.path.getmtime(path), tmux_git(cwd, "rev-parse", "-q", "--verify", "HEAD")
 
 
 def mem_print(cwd):
@@ -8499,7 +8505,7 @@ def mem_reply_capture(cfg, topic, sess, body):
     m.pop("wait")
     path = os.path.join((cfg.get("dirs") or {}).get(topic) or "", MEM_REL)
     if os.path.exists(path):        # it wrote them: no need to read them back
-        _mem_seen[sess] = os.path.getmtime(path)
+        _mem_seen[sess] = mem_seen_key(path, os.path.dirname(os.path.dirname(path)))
     send(cfg, topic, "🧠 project memory updated", mode="plain", quiet=True)
     return True
 
@@ -15767,6 +15773,11 @@ def selfcheck():
         assert st3_["m2"]["queue"] == [MEM_READ] * 2
         mem_greet(mcfg2_, st3_, "3", "m2", md_, fresh=True)  # new conversation, same name
         assert st3_["m2"]["queue"] == [MEM_READ] * 3
+        with stubbed(tmux_git=lambda c, *a: "c0ffee"):        # a commit since: the notes may lag it
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
         # No change to the project since the last rewrite: no rewrite.
         _mem["3"] = {"turns": MEM_TURNS, "fp": "same"}
         mst2_["m"]["queue"] = []
