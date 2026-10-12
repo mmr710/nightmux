@@ -483,11 +483,11 @@ def sess_cwd(sess):
     return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
 
 
-SNAP_KEEP = 5   # nightmux/pre-* branches kept per repo; older ones are pruned here
+SNAP_KEEP = 20  # nightmux/pre-* branches kept per repo; older ones are pruned here
 
 
 def snapshot_repo(sess):
-    """Branch off whatever the worktree holds, right before an unattended prompt.
+    """Branch off whatever the worktree holds, right before every prompt.
 
     `git stash create` builds a commit from the worktree without touching it —
     unlike `git stash`, nothing is popped off, so the session never sees its own
@@ -502,8 +502,11 @@ def snapshot_repo(sess):
         if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
             return
         sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
-        if not sha:
-            return
+        newest = tmux_git(cwd, "for-each-ref", "--sort=-creatordate", "--count=1",
+                          "--format=%(refname:short)", "refs/heads/nightmux/pre-*")
+        if not sha or (newest and tmux_git(cwd, "rev-parse", sha + "^{tree}")
+                       == tmux_git(cwd, "rev-parse", newest + "^{tree}")):
+            return          # nothing changed since the last one: keep the history deep
         name = "nightmux/pre-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         tmux_git(cwd, "branch", name, sha)
         prune_snapshots(cwd)
@@ -3998,7 +4001,7 @@ def status_report(cfg, state):
 # is the other half and is caught separately, being everything that is not a
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!all",
@@ -4147,7 +4150,7 @@ HELP = [
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
-        "!undo = snapshot branches + restore commands (never runs them)",
+        "!undo [n] = snapshots taken before every prompt; n restores one (undoable)",
         "!watch pr [n] | merge | off = feed CI failures and review comments "
         "to the agent; merge button when green",
         "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
@@ -4672,14 +4675,25 @@ def handle(cfg, state, lock, topic, text, mid=None):
             "--format=%(refname:short)  %(creatordate:iso-strict)",
             "refs/heads/nightmux/pre-*").split("\n") if l.strip()]
         if not rows:
-            return f"no snapshots in {cwd} · one is taken before every unattended prompt"
+            return f"no snapshots in {cwd} · one is taken before every prompt"
+        if arg.isdigit():
+            if not 0 < int(arg) <= len(rows):
+                return f"no snapshot {arg} — !undo lists them"
+            if pane_state(visible(sess)) == "busy":
+                return f"{sess} is working — !esc it first, then undo"
+            ref = rows[int(arg) - 1].split()[0]
+            snapshot_repo(sess)     # the state being thrown away: undo is undoable
+            tmux_git(cwd, "restore", "--source", ref, "--", ".")
+            return (f"↩️ {cwd} is back to {ref}\n"
+                    "untracked new files are left alone · !undo 1 returns to "
+                    "what was there before this undo · tell the agent what you changed")
         newest = rows[0].split()[0]
-        return ("snapshots in " + cwd + " (newest first):\n"
-                + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
-                + "\n\nnightmux never restores automatically — run this yourself:\n"
-                f"  git restore --source {newest} -- .   # overwrite the worktree\n"
-                f"  git diff {newest}                    # or just look first\n"
-                "(swap in an older branch name to go further back)")
+        return ("snapshots in " + cwd + " (newest first, change vs now):\n"
+                + "\n".join(f"{i + 1}. {r.split()[1][5:16].replace('T', ' ')}  "
+                             f"{tmux_git(cwd, 'diff', '--shortstat', r.split()[0]) or 'same as now'}"
+                             for i, r in enumerate(rows[:10]))
+                + "\n\n!undo N restores one (the current state is snapshotted first)\n"
+                f"look first: git diff {newest}")
     if cmd == "!ctl":
         send(cfg, topic, f"controls · {sess}", mode="plain", buttons=kb([
             [("esc", "!esc"), ("⇧⇥ mode", "!mode"), ("⏎", "!enter"), ("↑", "!up")],
@@ -8638,6 +8652,7 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         else:
             msg += "sends when idle again · !raw overrides"
         return msg
+    snapshot_repo(sess)     # typed from a phone is still unattended for what follows
     text = spill(sess, text)
     if not inject(sess, text):
         # No agent under the pane. Holding it is the whole point: typed into a
@@ -16656,7 +16671,7 @@ def selfcheck():
     assert len(pre) == 1, pre
     tmux_git(repo, "branch", "-D", pre[0])   # clean slate for the deterministic prune below
 
-    for i in range(7):                                    # deterministic creatordate
+    for i in range(SNAP_KEEP + 2):                                    # deterministic creatordate
         d = f"2020-01-01T00:00:{i:02d}"
         env = dict(os.environ, GIT_AUTHOR_DATE=d, GIT_COMMITTER_DATE=d)
         with open(os.path.join(repo, "f"), "w") as f:
@@ -16668,17 +16683,31 @@ def selfcheck():
     survivors = [n_ for n_ in tmux_git(
         repo, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
         "refs/heads/nightmux/pre-*").split("\n") if n_.strip()]
-    assert len(survivors) == SNAP_KEEP, survivors      # only the last 5 survive
-    assert survivors[0] == "nightmux/pre-fake6", survivors
+    assert len(survivors) == SNAP_KEEP, survivors      # only the newest SNAP_KEEP survive
+    assert survivors[0] == f"nightmux/pre-fake{SNAP_KEEP + 1}", survivors
     assert "nightmux/pre-fake0" not in survivors, survivors
 
     cfg4 = {"topics": {"1": "s4"}}
     with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True):
         undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo")
         wt_out = handle(cfg4, {}, threading.Lock(), "1", "!worktrees")
-    assert "nightmux/pre-fake6" in undo_out, undo_out
-    assert "git restore --source nightmux/pre-fake6" in undo_out
-    assert "git diff nightmux/pre-fake6" in undo_out, undo_out
+    assert f"nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+    assert "1. 01-01 00:00  same as now" in undo_out, undo_out
+    assert f"git diff nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+    with open(os.path.join(repo, "f"), "w") as f:      # the agent wrecks the file
+        f.write("wrecked")
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                 visible=lambda s: ["❯ "]):
+        undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo 2")
+        assert f"back to nightmux/pre-fake{SNAP_KEEP}" in undo_out, undo_out
+        with open(os.path.join(repo, "f")) as f:
+            assert f.read() == str(SNAP_KEEP)
+        handle(cfg4, {}, threading.Lock(), "1", "!undo 1")   # undo the undo
+        with open(os.path.join(repo, "f")) as f:
+            assert f.read() == "wrecked"
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                 visible=lambda s: ["esc to interrupt"]):
+        assert "is working" in handle(cfg4, {}, threading.Lock(), "1", "!undo 1")
     assert repo in wt_out and "feature-a" in wt_out, wt_out
 
     shutil.rmtree(repo, ignore_errors=True)
