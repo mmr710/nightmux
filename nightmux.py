@@ -2083,13 +2083,20 @@ def idle_hint(cfg, state, topic, sess):
         st.pop("parked", None)     # it moved: arm again for the next park
         return
     pct = (st.get("snap") or {}).get("ctx_pct")
+    tok = st.get("ctx_tok")
+    # Tokens first, as with autocompact: on a 1M window 50% is 500k, so the
+    # percentage never tripped for the 60k-200k band this exists to cover.
+    big = (tok is not None and tok >= FRESH_MIN) or (pct is not None and pct >= (at or 101))
     if (not at or st.get("parked") or st.get("mode") not in ("idle", "unknown")
-            or st.get("queue") or pct is None or pct < at):
+            or st.get("queue") or not big):
         return
     st["parked"] = True
-    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {pct:.0f}% context\n"
-         f"every turn after you resume pays that {pct:.0f}% again — /clear first "
-         f"if the thread is done\n!idlectx off to stop this", mode="plain")
+    size = f"{tok // 1000}k tokens" if tok is not None else f"{pct:.0f}% context"
+    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {size}\n"
+         f"its cache has expired: the next turn re-writes all {size}, and every turn "
+         "after carries it — start fresh if the thread is done\n!idlectx off to stop this",
+         mode="plain", buttons=kb([[("🧼 fresh start (notes kept)", "!fresh now"),
+                                    ("🗜 compact", "/compact")]]))
 
 
 _queued = [None]   # last blob written: an unchanged queue never touches disk
@@ -14380,6 +14387,14 @@ def selfcheck():
     st["snap"]["ctx_pct"] = 62
     idle_hint(cfg, state, "1", "s")
     assert sent[-1].startswith("💤 s idle 6h 0m at 62% context"), sent[-1]
+    st["changed"], st["ctx_tok"] = time.time(), 90000      # re-arm; a 1M window: 9%
+    idle_hint(cfg, state, "1", "s")
+    st["changed"], st["snap"]["ctx_pct"] = time.time() - IDLE_PARK - 1, 9
+    idle_hint(cfg, state, "1", "s")
+    assert sent[-1].startswith("💤 s idle 6h 0m at 90k tokens"), sent[-1]
+    st.pop("ctx_tok")
+    st["snap"]["ctx_pct"] = 62
+    n += 1                                        # the extra hint above
     idle_hint(cfg, state, "1", "s")
     assert len(sent) == n + 1                     # once per park, not per tick
     st["changed"] = time.time()
