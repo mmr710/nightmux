@@ -10300,6 +10300,11 @@ def setup_tail(cfg):
           "   !new myproj ~/code/myproj\n"
           "and type to it. !help lists the rest." if cfg.get("token") else
           f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
+    if not cfg.get("token"):
+        url = phone_url(cfg)
+        print(f"\nOn your phone, scan this to open it there:\n{qr_text(url + '/app')}\n{url}/app"
+              if url else "\nOn your phone too: install Tailscale on both devices, run "
+              f"`tailscale serve --bg {cfg['webhook_port']}`, then open /app here for a QR.")
 
 
 def restore_startup(cfg, state, lock):
@@ -12109,6 +12114,37 @@ def qr_svg(text):
             f"<path d='{d}' fill='#000'/></svg>")
 
 
+def phone_url(cfg, status=None):
+    """The https tailnet URL `tailscale serve` maps onto the dashboard, or None.
+
+    A dashboard opened on the laptop is at 127.0.0.1, and a QR of that sends
+    the phone to itself. This is the address the phone can actually reach.
+    Never sets serve up: putting the dashboard on the tailnet is the owner's call.
+    """
+    port = str(cfg.get("webhook_port") or 9090)
+    try:
+        web = json.loads(status if status is not None else
+                         run("tailscale", "serve", "status", "--json", timeout=5)).get("Web") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    for hostport, v in sorted(web.items()):
+        proxy = (((v or {}).get("Handlers") or {}).get("/") or {}).get("Proxy", "")
+        if re.fullmatch(r"https?://(?:127\.0\.0\.1|localhost):" + port + "/?", proxy):
+            host, _, p = hostport.rpartition(":")
+            return f"https://{host}" + ("" if p == "443" else f":{p}")
+    return None
+
+
+def qr_text(text):
+    """The QR as terminal half-blocks, two modules per character row."""
+    m = qr_matrix(text)
+    m = [[False] * (len(m) + 4)] * 2 + [[False] * 2 + r + [False] * 2 for r in m] \
+        + [[False] * (len(m) + 4)] * 3
+    # Dark modules print as spaces on a light block, so it scans on dark terminals.
+    return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
+                     for top, bot in zip(m[::2], m[1::2]))
+
+
 APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
 TERM_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -12200,9 +12236,16 @@ p{color:var(--mut)}code{color:var(--fg)}
 <a class="b s" href="__APK__">Download the app (.apk)</a>
 <p>Installed it already? <b>Open in app</b> connects it to <code id="here"></code>. No typing.</p>
 </div>
-<p>The app reaches this server the same way this page did, over your tailnet or LAN.</p>
+<p id="how">The app reaches this server the same way this page did, over your tailnet or LAN.</p>
 </main><script>
-const here = location.origin;
+// Opened on the laptop itself, location.origin is 127.0.0.1 — the phone's own
+// loopback. The server says which tailnet address reaches it instead.
+const PHONE = __PHONE__, local = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+const here = local && PHONE ? PHONE : location.origin;
+if (local && !PHONE) document.getElementById('desk').innerHTML =
+  '<p>Your phone cannot reach <code>127.0.0.1</code>. With Tailscale on both devices, run ' +
+  '<code>tailscale serve --bg ' + location.port + '</code> on this machine, then reload. ' +
+  'That opens the dashboard to your tailnet only, never the internet.</p>';
 document.getElementById('here').textContent = here;
 document.getElementById('qr').src = '/qr.svg?d=' + encodeURIComponent(here + '/app');
 document.getElementById('open').href = 'intent://connect?url=' + encodeURIComponent(here) +
@@ -12308,7 +12351,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/icon.svg":
             return self.reply(ICON_SVG, "image/svg+xml")
         if self.path == "/app":
-            return self.reply(inject_telemetry(self.server.cfg, APP_HTML), "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, APP_HTML.replace(
+                "__PHONE__", json.dumps(phone_url(self.server.cfg) or ""))),
+                "text/html; charset=utf-8")
         if self.path.startswith("/qr.svg?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -15358,6 +15403,19 @@ def selfcheck():
     assert "Open in app" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/app").read().decode()
     qsvg_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/qr.svg?d=https%3A%2F%2Fbox.ts.net%2Fapp").read()
     assert qsvg_.startswith(b"<svg") and b"M4,4h1" in qsvg_
+    # The terminal QR is the same matrix, module for module, inside a light border.
+    qt_ = [[{" ": (1, 1), "▄": (1, 0), "▀": (0, 1), "█": (0, 0)}[c] for c in l]
+           for l in qr_text("https://box.ts.net/app").split("\n")]
+    back_ = [[bool(c[k]) for c in row] for row in qt_ for k in (0, 1)]
+    assert [r[2:-2] for r in back_[2:2 + len(qr_matrix("https://box.ts.net/app"))]] \
+        == qr_matrix("https://box.ts.net/app")
+    serve_ = json.dumps({"Web": {"box.ts.net:443": {"Handlers": {
+        "/": {"Proxy": "http://127.0.0.1:9090"}, "/apk": {"Proxy": "http://127.0.0.1:9091"}}},
+        "box.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7000"}}}}})
+    assert phone_url({}, serve_) == "https://box.ts.net"
+    assert phone_url({"webhook_port": 7000}, serve_) == "https://box.ts.net:8443"
+    assert phone_url({"webhook_port": 9091}, serve_) is None     # only under /apk
+    assert phone_url({}, "") is None and phone_url({}, "{}") is None
     qm_ = qr_matrix("https://box.ts.net/app")
     assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
     assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
