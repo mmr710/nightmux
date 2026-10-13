@@ -622,6 +622,21 @@ def settle(sess, needle, timeout=2.0):
         time.sleep(0.05)
 
 
+# agy's conversation picker swallows whatever is typed into its search box: a
+# prompt and two /compact came out as "Continue/compact/compact", nothing sent.
+PICKER = "esc Go back / Clear search"
+
+
+def close_picker(sess):
+    """Leave agy's conversation picker: Esc clears its search, the next goes back.
+    Stops the moment it is gone -- one Esc too many interrupts a running turn."""
+    for _ in range(3):
+        if not any(PICKER in line for line in visible(sess)):
+            return
+        tmux("send-keys", "-t", tgt(sess), "Escape")
+        time.sleep(0.3)
+
+
 def inject(sess, text):
     """Type text into the Claude Code prompt and submit. False if nothing was.
 
@@ -637,6 +652,7 @@ def inject(sess, text):
         print(f"inject {sess}: pane is at a shell, refusing to type a prompt "
               "into it", file=sys.stderr, flush=True)
         return False
+    close_picker(sess)
     args, at = [], tgt(sess)
     for i, line in enumerate(text.split("\n")):
         if i:  # newline inside the prompt box, not a submit
@@ -18179,6 +18195,12 @@ def selfcheck():
         with open(tf_, "a") as f:
             f.write(json.dumps({"type": "CHECKPOINT"}) + "\n")
         assert agy_ctx("/w/app/", home=ah_) == 0
+    screens_ = [["Search: Continue", "  esc Go back / Clear search"], ["  esc Go back / Clear search"], [">"]]
+    keys_ = []
+    with stubbed(visible=lambda s_: screens_.pop(0) if len(screens_) > 1 else screens_[0],
+                 tmux=lambda *a: keys_.append(a)):
+        close_picker("x")
+    assert [a[-1] for a in keys_] == ["Escape", "Escape"], keys_   # two, never a third
     print("selfcheck ok")
 
 
