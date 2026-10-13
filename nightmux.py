@@ -1741,6 +1741,8 @@ def spend_cap(cfg):
 AUTOCOMPACT_DEFAULT = "200k"   # on unless set: a 300k turn costs ~6x a 50k one
 ROUTINE_COMPACT = 120000       # routine work compacts here, under a token autocompact...
 HEAVY_HOLD = 2 * 3600          # ...unless a heavy task was asked for this recently
+NATIVE_MIN = 100000            # the lowest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code takes
+PARK_COMPACT = 100000          # !autocompact park: an idle session above this is compacted
 CALLS_WARN = 80                # model calls on one prompt: the top 3% measured on this fleet
 
 
@@ -2111,6 +2113,12 @@ def autocompact(cfg, state, topic, sess):
     # heavy task in the last two hours keeps the configured, roomier limit.
     if tok_at and time.time() - st.get("heavy_at", 0) > HEAVY_HOLD:
         tok_at = min(tok_at, ROUTINE_COMPACT)
+    # Opt-in: idle this many minutes, compact at PARK_COMPACT while the context
+    # is still cached. Coming back after the cache expires rewrites all of it --
+    # 8% of this fleet's spend went on that -- and a compacted one is ~15k.
+    park = cfg.get("park_compact")
+    if tok_at and park and time.time() - st.get("changed", time.time()) >= park * 60:
+        tok_at = min(tok_at, PARK_COMPACT)
     pct = (st.get("snap") or {}).get("ctx_pct")
     tok = st.get("ctx_tok")
     if tok_at:
@@ -3339,9 +3347,19 @@ def default_agent(cfg):
     return cfg.get("agent") or "claude"
 
 
-def spawn(name, cwd, cmdline):
-    """Detached tmux session in cwd with cmdline typed at its shell."""
-    tmux("new-session", "-d", "-s", name, "-c", cwd)
+def spawn(name, cwd, cmdline, cfg=None):
+    """Detached tmux session in cwd with cmdline typed at its shell.
+
+    With a token autocompact, Claude Code is also told to compact itself there
+    mid-turn: nightmux only compacts idle sessions, so one long task used to run
+    on to 200k-315k (measured) re-reading all of it on every call. Other agents
+    ignore the variable.
+    """
+    env = []
+    tok_at = cfg and compact_at(cfg)[1]
+    if tok_at:
+        env = ["-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % max(NATIVE_MIN, tok_at)]
+    tmux("new-session", "-d", "-s", name, "-c", cwd, *env)
     tmux("send-keys", "-t", name, "-l", "--", cmdline)
     tmux("send-keys", "-t", name, "Enter")
 
@@ -3976,7 +3994,7 @@ def start_session(cfg, state, lock, topic, arg, key):
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
-    spawn(name, cwd, f"{prog} {flags}".strip())
+    spawn(name, cwd, f"{prog} {flags}".strip(), cfg)
     with lock:
         cfg["topics"][topic] = name
         cfg.setdefault("dirs", {})[topic] = cwd   # !resume needs it after a crash
@@ -4003,7 +4021,7 @@ def autostart(cfg):
         if not os.path.isdir(cwd):
             print(f"autostart {name}: no dir {cwd}", file=sys.stderr)
             continue
-        spawn(name, cwd, prog)
+        spawn(name, cwd, prog, cfg)
         print(f"autostart {name}: {prog} in {cwd}", flush=True)
 
 
@@ -4276,7 +4294,8 @@ HELP = [
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
-        "(default 200k) · !idlectx <pct|off>",
+        "(default 200k; Claude also compacts mid-turn there) · "
+        "!autocompact park <20m|off> = compact idle sessions over 100k · !idlectx <pct|off>",
         "!ladder on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when "
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
@@ -4729,6 +4748,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
             send_file(cfg, topic, os.path.basename(p), f.read(), p)
         return None
     if cmd == "!autocompact":
+        m = re.fullmatch(r"park(?:\s+(off|\d+)m?)?", arg or "")
+        if m:
+            if m.group(1):
+                with lock:
+                    cfg["park_compact"] = None if m.group(1) in ("off", "0") else int(m.group(1))
+                    save_cfg(cfg)
+            park = cfg.get("park_compact")
+            return (f"idle {park}m above {PARK_COMPACT:,} tokens → /compact while still cached"
+                    if park else "park compact off — !autocompact park 20m")
         if arg:
             if arg in ("off", "0"):
                 v = None
@@ -4744,7 +4772,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
         at, tok_at = compact_at(cfg)
         if tok_at:
             return (f"auto /compact when a turn carries {tok_at:,} tokens\n"
-                    "counted from the transcript, so Claude Code sessions only")
+                    "counted from the transcript, so Claude Code sessions only\n"
+                    "new Claude sessions also compact mid-turn there "
+                    "(!autocompact park 20m: compact idle ones too)")
         return (f"auto /compact at {at}% of the context window" if at else
                 "auto /compact off — !autocompact 70 (pct) or 150k (tokens)")
     if cmd == "!spendcap":
@@ -7437,7 +7467,7 @@ def pair_reviewer(cfg, topic, key):
     base = re.sub(r"-(%s)$" % "|".join(map(re.escape, agents(cfg))), "",
                   cfg["topics"][topic])
     sess = sess or f"{base}-{key}"
-    spawn(sess, cwd, agent(cfg, key)[0])
+    spawn(sess, cwd, agent(cfg, key)[0], cfg)
     cfg.setdefault("bench", {}).setdefault(str(topic), {})[key] = sess
     save_cfg(cfg)
     return sess, f"started {key} as '{sess}' on the bench"
@@ -7491,7 +7521,7 @@ def race_start(cfg, state, topic, arg):
             return f"🏁 could not make a worktree for {k}: {out[-300:]}"
         sess = f"{stem}-race-{k}"
         tmux("kill-session", "-t", sess)
-        spawn(sess, wt, agent(cfg, k)[0])
+        spawn(sess, wt, agent(cfg, k)[0], cfg)
         state[sess] = {"queue": [prompt + "\n\nWork only in this folder. When it is done, stop."]}
         racers[k] = {"sess": sess, "wt": wt, "branch": branch, "t0": time.time()}
     _race[topic] = {"base": base, "cwd": cwd, "prompt": prompt, "at": time.time(),
@@ -14592,6 +14622,15 @@ def selfcheck():
                        capture_output=True)
         _shell.clear()
 
+    # Native mid-turn cap: claude sessions get the token autocompact as their window.
+    made = []
+    with stubbed(tmux=lambda *a: made.append(a)):
+        spawn("s", "/", "claude", {"autocompact": "150k"})
+        spawn("s", "/", "claude", {"autocompact": 70})
+        spawn("s", "/", "claude", {"autocompact": "50k"})
+    assert made[0][-2:] == ("-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000"), made[0]
+    assert "-e" not in made[3]                                  # a percentage: no cap
+    assert made[6][-1] == "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % NATIVE_MIN
     spawned = []
     with stubbed(has_session=lambda s: False, sess_cwd=lambda s: FILE_DIR,
                  spawn=lambda *a: spawned.append(a)):
@@ -17380,7 +17419,7 @@ def selfcheck():
     assert default_agent({"agent": "codex"}) == "codex"
 
     spawned, lk = [], threading.Lock()
-    globals()["spawn"] = lambda n, cwd, line: spawned.append((n, cwd, line))
+    globals()["spawn"] = lambda n, cwd, line, cfg=None: spawned.append((n, cwd, line))
     globals()["has_session"] = lambda n: False
     assert "started codex" in start_session(cfg2, {}, lk, "9", "box ~ --sandbox",
                                             "codex")
@@ -18201,6 +18240,18 @@ def selfcheck():
                  tmux=lambda *a: keys_.append(a)):
         close_picker("x")
     assert [a[-1] for a in keys_] == ["Escape", "Escape"], keys_   # two, never a third
+    # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
+    typed = []
+    with stubbed(send=lambda *a, **k: None, inject=lambda s_, t: typed.append(t),
+                 remember=lambda *a: None, agent_key=lambda *a: "claude"):
+        pc = {"autocompact": "200k", "park_compact": 20}
+        autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                               "changed": time.time() - 30 * 60}}, "1", "s")
+        autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                               "changed": time.time() - 5 * 60}}, "1", "s")
+        autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                     "changed": time.time() - 30 * 60}}, "1", "s")
+    assert typed == ["/compact"], typed
     print("selfcheck ok")
 
 
