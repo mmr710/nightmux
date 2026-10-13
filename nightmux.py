@@ -17,6 +17,7 @@ Config: ~/.nightmux.json
 import calendar
 import concurrent.futures
 import contextlib
+import difflib
 import hmac
 import glob
 import hashlib
@@ -5044,6 +5045,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
         plugin = run_plugin(sess_cwd(sess), cmd[1:], arg)
         if plugin is not None:
             return plugin
+        # Anything else is typed in (Claude Code runs "!ls" as a shell command) --
+        # unless it is a near-miss of a nightmux command: "!savings" was meant for
+        # nightmux, and the agent ran it in its shell.
+        cmds = set(re.findall(r"!\w+", help_text(cfg, "all")[0]))
+        near = difflib.get_close_matches(cmd, cmds, 3, 0.75) or sorted(
+            c for c in cmds if len(os.path.commonprefix([c, cmd])) >= 4)[:3]
+        if near:
+            return (f"unknown command {cmd} — did you mean {', '.join(near)}? "
+                    f"· !raw {cmd} {arg} sends it to the agent as typed").rstrip()
 
     held = coach(cfg, state, lock, topic, sess, text)
     if held is not None:
@@ -8414,7 +8424,8 @@ NM_TOOLS = [
      "inputSchema": {"type": "object", "required": ["topic"], "properties": dict(
          _topic_arg, after={"type": "integer", "default": 0})}},
     {"name": "send_prompt", "description": "Give the topic's agent a prompt. Queued if "
-     "it is busy or out of usage, like a message from the phone.",
+     "it is busy or out of usage, like a message from the phone. A project with a folder "
+     "and no session gets its agent started first.",
      "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
          _topic_arg, text={"type": "string"}, role={
              "type": "string", "description": "a role file in the companion's roles/ "
@@ -8451,6 +8462,17 @@ def nm_call(name, a, base=None, companion=False):
                          + (f" · {r['dir']}" if r.get("dir") else "")
                          + (f" · budget {r['budget']}" if r.get("budget") else "")
                          for r in rows) or "no topics"
+        if companion:
+            c_ = load_cfg()
+            bound = {str(r["topic"]) for r in rows}
+            names = c_.get("topic_names") or {}
+            text += "".join(f"\n{t}: {names.get(t) or os.path.basename(d)} · no session · {d} "
+                            "· send_prompt starts one" for t, d in (c_.get("dirs") or {}).items()
+                            if t not in bound and os.path.isdir(d))
+            used, cap = companion_allowance(c_)
+            text += (f"\nyour allowance: {_k(used)} of {_k(cap)} this period — covers projects "
+                     "with no !budget of their own" if cap else
+                     "\nno allowance: you act only where a project has its own !budget")
     elif name == "read_terminal":
         n = max(1, min(int(a.get("lines") or (40 if companion else 120)), 2000))
         d = get(f"/api/term/{t}?lines={max(n, 50)}")
@@ -8474,6 +8496,14 @@ def nm_call(name, a, base=None, companion=False):
         if not txt or txt.startswith("!"):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
         row = next((r for r in get("/api/topics") if str(r.get("topic")) == str(a.get("topic"))), None)
+        if companion and row is None:
+            txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
+            companion_wake(base, load_cfg(), str(a.get("topic", "")))
+            companion_log(a, txt)
+            req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
+                                         headers={"X-Nightmux": "1"})
+            urllib.request.urlopen(req, timeout=10).close()
+            return [{"type": "text", "text": "started its agent and sent — read_chat for the answer"}]
         if row and row.get("mode") == "waiting":
             # nightmux refuses text into an open menu — saying "sent" would be a lie
             raise ValueError("a menu is open there: text would pick an option, so nightmux "
@@ -8556,8 +8586,10 @@ COMPANION_GUIDE = (
     "- Give each task a role (send_prompt role=builder|reviewer|tester|researcher; files in "
     "roles/, add one when none fits), so the right kind of agent does it in whichever "
     "project needs it. Build with one role, check with another.\n"
-    "- send_prompt works only in projects with a !budget: that is your limit when you act "
-    "alone. actions.log here records every prompt you sent — report from it, not from memory.\n"
+    "- send_prompt works in projects with their own !budget, and elsewhere within your "
+    "allowance (the !budget in your own topic; list_topics shows what is left). That is "
+    "your limit when you act alone. A project with no session is started by send_prompt. "
+    "actions.log here records every prompt you sent — report from it, not from memory.\n"
     "- Keep reads small: progress first, then read_chat only where something changed; "
     "read_terminal only when the chat does not explain a state.\n"
     "- MEMORY.md (under 150 lines) holds what lasts: the owner's preferences, which ideas "
@@ -8567,7 +8599,10 @@ COMPANION_GUIDE = (
     "- Your thread may be cleared before a scheduled round; everything you need is in "
     "these files and the report.\n"
     "- The owner talks to you in this topic in plain words. A 📌 target in the report is "
-    "what they set with !companion focus in that project's topic: work toward it first.\n")
+    "what they set with !companion focus in that project's topic: work toward it first. "
+    "A ⭐ priority is from PERSONA.md's ## Priorities: listed even when idle, so you move "
+    "it forward — its next: lines first, and a question for the owner when the next step "
+    "needs their answer.\n")
 # Read on every conversation start and kept through compaction: Claude Code
 # imports the files from CLAUDE.md, the others are told to read them.
 COMPANION_HOOKS = {
@@ -8576,14 +8611,14 @@ COMPANION_HOOKS = {
     "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
 }
 COMPANION_ROUND = (
-    "Night round. From the progress report below, for each project with a budget that "
-    "moved or is waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
+    "Night round. From the progress report below, for each project you can act in (its own "
+    "budget, or your allowance) that moved, is waiting, or is a 📌 target or ⭐ priority: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
     "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
     "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
     "wait for results, the next round reads them. Review what the last round's work "
-    "produced before handing out more in that project. A 📌 target is the owner's goal for "
-    "that project: when it is idle, hand out the next step toward it (its next: lines "
-    "first), or suggest it where there is no budget. Then stop.")
+    "produced before handing out more in that project. A 📌 target or ⭐ priority that is "
+    "idle gets the next step toward it (its next: lines first), or a suggest where you "
+    "cannot act. Then stop.")
 COMPANION_MORNING = (
     "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
     "out overnight and what came of it (actions.log is the record, the report below the "
@@ -8600,7 +8635,7 @@ COMPANION_WATCH = (
     "run — the owner taps to send it. Skip generic advice: an idea names the file, feature "
     "or command and quotes the line it builds on (a commit, an answer, a note); never a "
     "file you have not seen. Put the owner's priorities in PERSONA.md first; where a 📌 "
-    "target is set, every idea moves toward it, and an idle project gets its next step. Answer an agent's waiting question yourself with send_prompt only "
+    "target is set, every idea moves toward it; an idle 📌 target or ⭐ priority gets its next step (or a question for the owner). Answer an agent's waiting question yourself with send_prompt only "
     "when MEMORY.md or the project's notes already hold the answer and your risk level "
     "allows. If nothing below is worth a line, reply only \"quiet\".")
 SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
@@ -8655,11 +8690,13 @@ def progress_report(cfg, state, since):
     """
     own = str((cfg.get("companion") or {}).get("topic"))
     focus = (cfg.get("companion") or {}).get("focus") or {}
+    prio = [t for t in persona_priorities(cfg) if not focus or t in focus]
     names, now = cfg.get("topic_names") or {}, time.time()
     since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
-    moved, quiet = [], []
+    moved, quiet, seen = [], [], set()
     for r in topics_status(cfg, state):
         t, sess = str(r["topic"]), r["session"]
+        seen.add(t)
         if t == own or (focus and t not in focus):
             continue
         full = _chat.get(t) or []
@@ -8667,21 +8704,27 @@ def progress_report(cfg, state, since):
         replies = [m for m in log if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or "")]
         st = state.get(sess) or {}
         cwd = (cfg.get("dirs") or {}).get(t)
+        # Outside a repo git answers with its error and usage text, which read as a
+        # commit and a 40-line "uncommitted" block, every round.
+        repo = bool(cwd and os.path.isdir(cwd)
+                    and tmux_git(cwd, "rev-parse", "--is-inside-work-tree") == "true")
         commits = [c for c in tmux_git(cwd, "log", "--oneline", f"--since={since_s}").split("\n")
-                   if c.strip()] if cwd and os.path.isdir(cwd) else []
+                   if c.strip()] if repo else []
         if r["mode"] == "waiting" and st.get("asked"):
             asked = (st["asked"].strip().splitlines()[0], st.get("asked_at"))
         else:
             asked = open_question(full)
         errs = [e for e in _err_log if str(e[1]) == t and e[0] >= since]
         idle = not (log or commits or asked or errs)
-        if idle and t not in focus:
+        if idle and t not in focus and t not in prio:
             quiet.append(names.get(t) or sess)
             continue
         lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
                  f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
         if t in focus:
             lines.append("  📌 target: " + focus[t] + (" — idle, nothing moved" if idle else ""))
+        elif t in prio:
+            lines.append(f"  ⭐ priority {prio.index(t) + 1}" + (" — idle, nothing moved" if idle else ""))
         last = replies[-1]["text"].split("\n", 1)[1].strip() if replies else ""
         if last:
             lines.append("  last: " + last.splitlines()[0][:160])
@@ -8697,14 +8740,25 @@ def progress_report(cfg, state, since):
         if errs:
             lines.append(f"  🚨 {len(errs)} production error{'s' * (len(errs) != 1)}: "
                          + "; ".join(e[2][:50] for e in errs[-2:]))
-        if cwd and os.path.isdir(cwd):
+        if repo:
             diff = tmux_git(cwd, "diff", "--shortstat", "HEAD").strip()
             if diff:
                 lines.append("  uncommitted: " + diff)
+        if cwd and os.path.isdir(cwd):
             lines += [f"  next: {l}" for l in project_next(cwd)]
         if r.get("held_until"):
             lines.append(f"  💤 held until {clock(cfg, r['held_until'])}")
         moved.append("\n".join(lines))
+    for t in [t for t in list(focus) + prio if t not in seen and t != own]:
+        seen.add(t)
+        cwd = (cfg.get("dirs") or {}).get(t)
+        if not cwd or not os.path.isdir(cwd):
+            continue
+        moved.append("\n".join(
+            [f"▸ {names.get(t) or os.path.basename(cwd)} (topic {t}) [no session] · {cwd}",
+             "  📌 target: " + focus[t] if t in focus else f"  ⭐ priority {prio.index(t) + 1}",
+             "  no agent running — send_prompt starts one"]
+            + [f"  next: {l}" for l in project_next(cwd)]))
     out = moved or ["nothing moved"]
     if quiet:
         out.append("quiet: " + ", ".join(quiet))
@@ -8801,6 +8855,74 @@ def suggest_post(cfg, topic, prompt):
     return "posted — the owner taps ▶ to send it"
 
 
+def companion_allowance(cfg, now=None):
+    """(used, cap) of the !budget set in the companion's own topic: its allowance for
+    projects that have no budget of their own. Used is everything those projects spent
+    this period -- the owner's turns there too, so it stops early rather than late.
+    Read from disk: this runs in the MCP process, whose copy of the ledger never refreshes.
+    """
+    comp = cfg.get("companion") or {}
+    b = (cfg.get("budgets") or {}).get(str(comp.get("topic")))
+    if not b:
+        return 0, 0
+    start = budget_window(cfg, b["per"], now)[0]
+    acted = set()
+    try:
+        with open(os.path.join(COMPANION_DIR, "actions.log")) as f:
+            for line in f:
+                m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) topic=(\S+)", line)
+                if m and time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M")) >= start - 60:
+                    acted.add(m.group(2))
+    except OSError:
+        pass
+    try:
+        with open(sav_path()) as f:
+            led = json.load(f).get("spent") or {}
+    except (OSError, ValueError):
+        led = {}
+    sessions = {s for t in acted for s in set(bench_of(cfg, t).values()) | {cfg["topics"].get(t)}}
+    used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
+    return int(used), b["tokens"]
+
+
+def companion_wake(base, cfg, topic):
+    """Start the agent of a project that has a folder but no session, so work the
+    companion hands it is not dropped on an empty topic."""
+    folder = (cfg.get("dirs") or {}).get(topic)
+    if not folder or not os.path.isdir(folder):
+        raise ValueError(f"topic {topic} has no session and no folder — ask the owner to open it")
+    name = re.sub(r"[^\w.-]", "", (cfg.get("topic_names") or {}).get(topic) or
+                  os.path.basename(folder.rstrip("/"))) or f"topic{topic}"
+    body = json.dumps({"name": name, "folder": folder, "agent": default_agent(cfg)}).encode()
+    req = urllib.request.Request(f"{base}/api/topic/{topic}/start", data=body,
+                                 headers={"X-Nightmux": "1", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        out = json.loads(r.read())
+    if not out.get("ok"):
+        raise ValueError(f"could not start topic {topic}: {out.get('msg')}")
+
+
+def persona_priorities(cfg):
+    """Topics named in PERSONA.md's ## Priorities, in rank order. The report keeps
+    listing them while idle, so the companion pushes the owner's projects forward
+    instead of waiting for something to move. A line names one by its topic name,
+    session or folder: `1. nightmux (...) — goal`."""
+    try:
+        with open(os.path.join(COMPANION_DIR, "PERSONA.md")) as f:
+            sec = re.search(r"^## Priorities\n(.*?)(?=^## |\Z)", f.read(), re.S | re.M)
+    except OSError:
+        return []
+    names = {}
+    for t, d in (cfg.get("dirs") or {}).items():
+        names[os.path.basename(d.rstrip("/")).lower()] = t
+    for t, sess in (cfg.get("topics") or {}).items():
+        names[sess.lower()] = t
+    for t, n in (cfg.get("topic_names") or {}).items():
+        names[n.lower()] = t
+    heads = re.findall(r"^\s*\d+\.\s*([\w.-]+)", sec.group(1), re.M) if sec else []
+    return [names[h.lower()] for h in heads if h.lower() in names]
+
+
 def companion_prompt(cfg, topic, text, role=None, companion=True):
     """The text send_prompt delivers: the role's file first, if one is named.
 
@@ -8812,8 +8934,13 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
     if companion and topic == str((cfg.get("companion") or {}).get("topic")):
         raise ValueError("that is your own topic — send work to a project")
     if companion and topic not in (cfg.get("budgets") or {}):
-        raise ValueError(f"topic {topic} has no !budget — you act alone only within one; "
-                         "ask the owner to set it, or to send this themselves")
+        used, cap = companion_allowance(cfg)
+        if not cap:
+            raise ValueError(f"topic {topic} has no !budget and you have no allowance — "
+                             "suggest it instead, or ask the owner for a !budget in your topic")
+        if used >= cap:
+            raise ValueError(f"your allowance is spent ({_k(used)} of {_k(cap)}) — suggest "
+                             "it instead; it resets with the period")
     if not role:
         return text
     if not re.fullmatch(r"[\w-]{1,40}", str(role)):
@@ -8884,12 +9011,14 @@ def companion_watch(cfg, state, arg):
     secs = parse_every(when)
     if not secs or secs < 1800:
         return "usage: !companion watch [3h] | watch off   (30m at least)"
-    st["sched"] = keep + [{"at": time.time() + secs, "every": secs, "text": COMPANION_WATCH,
+    # First round in a minute, looking back one period: waiting a whole period
+    # for the first word made a just-started companion look dead.
+    st["sched"] = keep + [{"at": time.time() + 60, "every": secs, "text": COMPANION_WATCH,
                            "companion": True, "watch": True, "progress": True, "gate": True,
-                           "since": time.time()}]
+                           "since": time.time() - secs}]
     save_queue(state)
-    return (f"👀 every {when}: progress per project and ideas to tap — skipped while nothing "
-            "moves · !companion watch off to stop")
+    return (f"👀 first round in a minute, then every {when}: progress per project and ideas "
+            "to tap — skipped while nothing moves · !companion watch off to stop")
 
 
 def companion_focus(cfg, lock, topic, arg):
@@ -8913,7 +9042,7 @@ def companion_focus(cfg, lock, topic, arg):
         names = cfg.get("topic_names") or {}
         return "\n".join(f"📌 {names.get(t) or t}: {g}" for t, g in focus.items()) or \
             "no targets — say !companion focus <target> in a project's topic"
-    if topic not in (cfg.get("topics") or {}):
+    if topic not in (cfg.get("topics") or {}) and topic not in (cfg.get("dirs") or {}):
         return "say this in a project's topic"
     if not text:
         return f"📌 {focus[topic]}" if topic in focus else "usage: !companion focus <target> | focus off"
@@ -8943,6 +9072,13 @@ def companion_cmd(cfg, state, lock, topic, arg):
         return (f"this topic runs '{bound}' — start the companion in an empty topic of its "
                 "own, then say !companion focus <target> here")
     key, _, flags = arg.partition(" ")
+    comp = cfg.get("companion") or {}
+    if (key and key not in agents(cfg) and str(topic) == comp.get("topic")
+            and has_session(comp.get("session"))):
+        # "!companion work on pennywise" reads as talking to it: pass it on.
+        state.setdefault(comp["session"], {}).setdefault("queue", []).append(arg)
+        save_queue(state)
+        return "🧭 passed to your companion — next time just write it here"
     if key and key not in agents(cfg):
         return (f"usage: !companion [{'|'.join(agents(cfg))}] [flags] · !companion night "
                 "[01:00] [07:30] · !companion watch [3h]")
@@ -17723,6 +17859,8 @@ def selfcheck():
             # a name with no matching plugin still falls through to typing it in
             with stubbed(send_prompt=lambda c, st, t, se, tx, mid=None: "typed:" + tx):
                 assert handle(cfg2, {}, lk, "9", "!not-a-plugin hi") == "typed:!not-a-plugin hi"
+                assert "did you mean !budget" in handle(cfg2, {}, lk, "9", "!budjet 5M")
+                assert "!saved" in handle(cfg2, {}, lk, "9", "!savings")
     shutil.rmtree(plugdir, ignore_errors=True)
     with stubbed(PLUGIN_DIR="/no/such/dir"):
         assert "no plugins in" in handle(cfg2, {}, lk, "9", "!plugins")
@@ -18070,7 +18208,7 @@ def selfcheck():
                 chat_.pop("8")
             # commits made in the terminal show even with no chat (empty after a restart)
             with stubbed(topics_status=lambda c, s: rows_[2:3], _chat=chat_,
-                         tmux_git=lambda cwd, *a: "abc123 fix login\n"):
+                         tmux_git=lambda cwd, *a: "true" if a[0] == "rev-parse" else "abc123 fix login\n"):
                 rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
                 assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
             # !companion focus, said in the project's topic: reports carry only targeted
@@ -18159,7 +18297,7 @@ def selfcheck():
                 f.write("# x\n## Decisions\n- a\n## In progress / next\n- ship checkout\n- add coupons\n")
             with stubbed(topics_status=lambda c, s: rows_[0:1], _err_log=[(time.time(), "5", "KeyError: cart")],
                          _chat={"5": [{"id": 1, "t": time.time(), "who": "bot", "text": "🛑 goal stuck — x"}]},
-                         tmux_git=lambda cwd, *a: " 2 files changed, 10 insertions(+)" if a[0] == "diff" else ""):
+                         tmux_git=lambda cwd, *a: " 2 files changed, 10 insertions(+)" if a[0] == "diff" else "true" if a[0] == "rev-parse" else ""):
                 rep4 = progress_report({"dirs": {"5": cd_}}, {}, time.time() - 60)
                 for want in ("🎯 🛑 goal stuck", "🚨 1 production error: KeyError: cart",
                              "uncommitted: 2 files changed", "next: ship checkout", "next: add coupons",
@@ -18271,6 +18409,49 @@ def selfcheck():
         with stubbed(STATE_DIR=td_):
             assert snap_pane(os.path.join(td_, "paired_tokens.json")) is None
             prune(time.time(), 0.0, {"%1"})
+    # Companion revamp: priorities from PERSONA.md, an allowance for unbudgeted
+    # projects, projects with no session, and talking to it through !companion.
+    cdir_, pdir_ = tempfile.mkdtemp(), tempfile.mkdtemp()
+    os.makedirs(os.path.join(pdir_, ".nightmux"))
+    with open(os.path.join(pdir_, ".nightmux", "memory.md"), "w") as f:
+        f.write("# x\n## In progress / next\n- ask the owner for sample SMS\n")
+    with open(os.path.join(cdir_, "PERSONA.md"), "w") as f:
+        f.write("# P\n## Priorities\n1. nightmux (x) — a\n2. Pennywise — b\n3. (project)\n## Tone\n")
+    ccf_ = {"topics": {"0": "companion", "7": "work"}, "topic_names": {"9": "Pennywise"},
+            "dirs": {"7": "/srv/nightmux", "9": pdir_}, "companion": {"topic": "0", "session": "companion"}}
+    with stubbed(COMPANION_DIR=cdir_, sav_path=lambda: os.path.join(cdir_, "sav.json")):
+        assert persona_priorities(ccf_) == ["7", "9"], persona_priorities(ccf_)
+        try:
+            companion_prompt(ccf_, "9", "go")
+            raise AssertionError("no budget and no allowance must refuse")
+        except ValueError as e:
+            assert "no allowance" in str(e), e
+        ccf_["budgets"] = {"0": {"tokens": 1000, "per": "day"}}
+        assert companion_prompt(ccf_, "9", "go") == "go"          # the allowance covers it
+        companion_log({"topic": "7"}, "go")
+        hr_ = int(time.time() // 3600)
+        with open(os.path.join(cdir_, "sav.json"), "w") as f:
+            json.dump({"spent": {"work": {str(hr_): 1500}}}, f)
+        assert companion_allowance(ccf_) == (1500, 1000)
+        try:
+            companion_prompt(ccf_, "9", "go")
+            raise AssertionError("a spent allowance must refuse")
+        except ValueError as e:
+            assert "allowance is spent" in str(e), e
+        with stubbed(topics_status=lambda c, st: [], tmux_git=lambda *a: ""):
+            rep_ = progress_report(ccf_, {}, time.time() - 3600)
+        assert "Pennywise (topic 9) [no session]" in rep_ and "⭐ priority 2" in rep_, rep_
+        assert "next: ask the owner for sample SMS" in rep_, rep_
+        cst_ = {}
+        with stubbed(has_session=lambda n: True, save_queue=lambda st: None):
+            assert "passed" in companion_cmd(ccf_, cst_, threading.Lock(), "0", "work on pennywise")
+        assert cst_["companion"]["queue"] == ["work on pennywise"], cst_
+        with stubbed(save_queue=lambda st: None):
+            companion_watch(ccf_, cst_, "watch 3h")
+        job_ = cst_["companion"]["sched"][-1]
+        assert job_["at"] - time.time() < 120 and time.time() - job_["since"] > 3 * 3600 - 60, job_
+    shutil.rmtree(cdir_, ignore_errors=True)
+    shutil.rmtree(pdir_, ignore_errors=True)
     print("selfcheck ok")
 
 
