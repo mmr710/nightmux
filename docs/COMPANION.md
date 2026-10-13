@@ -76,6 +76,27 @@ project, keeps its own memory, and hands work to agents in role.
 
 `!companion night off` stops it.
 
+## By day: progress and ideas
+
+`!companion watch [3h]` runs a watch round every few hours. In each round it:
+
+- **Calls `progress` once.** nightmux builds the report from the chat log and
+  git, not from model reads. It lists each project that moved: replies,
+  commits, last answer, budget. It flags the two things someone scanning topics
+  misses: **✋ a question nobody answered**, and **⚠ many replies with no
+  commit** (an agent going in circles). Quiet projects share one line.
+- **Posts one line per project to you:** what got done and what is stuck.
+- **Shares at most 3 ideas with `suggest`.** Each idea lands in that project's
+  topic with **▶ send to agent** and **✕** buttons, so you decide with one tap
+  and no budget is needed. Ideas must name a file, feature or command; generic
+  advice is out. Capped at 6 per hour, 10 pending per topic.
+- **Answers an agent's waiting question itself** only when its memory or the
+  project's notes already hold the answer, and its risk level and budget allow.
+
+A round is **skipped without a model call** while no project's chat has moved,
+so a quiet day costs nothing. Its own scheduled rounds no longer post
+"⏰ queued" pings.
+
 ## Cost: what keeps it cheap
 
 The companion reads every project every round, so its context, not its
@@ -99,7 +120,9 @@ output, is the bill:
 1. **Done:**
    - `!companion`, budget-gated tools, roles, project dir and budget in `list_topics`;
    - night rounds and the morning summary, `actions.log`, read cursors,
-     persona via `CLAUDE.md`.
+     persona via `CLAUDE.md`;
+   - the day watch: `progress`, `suggest` with tap-to-send, stuck and
+     going-in-circles flags, quiet-skip.
 2. **Next:**
    - per-project persona overrides;
    - the morning summary as a voice note (reuse `!briefing voice`).
