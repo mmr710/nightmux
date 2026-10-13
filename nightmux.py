@@ -5766,7 +5766,11 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["claude-3-5-haiku-20241022", "haiku 5.5", "sonnet", "opus"], "agy": ["low", "medium", "high"]}
+# Aliases, never dated IDs: a pinned ID retires and every light turn then fails
+# (claude-3-5-haiku-20241022 did), and "haiku 5.5" is not an alias /model takes.
+# Tier index = LADDER_START: light → haiku, normal → sonnet, heavy → opus.
+# agy: gemini-3.1-pro offers only low and high effort; /effort medium is refused.
+LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
@@ -15303,18 +15307,18 @@ def selfcheck():
         assert "9" not in _lint_pass and "9" not in _lint_hold
         note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
         assert queued and "haiku" in note and cst_["k"]["queue"] == [
-            "/model claude-3-5-haiku-20241022", "rename foo to bar in utils"], cst_
+            "/model haiku", "rename foo to bar in utils"], cst_
         assert _route_last["9"] == ("light", "claude")
         cst_["k"]["queue"] = []
         assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
         assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
         _route_last["9"] = ("light", "claude")
         coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
-        assert cst_["k"]["queue"] == ["/model haiku 5.5"], cst_    # two corrections: step up
+        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
         assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model haiku 5.5"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
         cst_["k"]["queue"] = []
         ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
         assert cst_["k"]["queue"] == [], cst_
