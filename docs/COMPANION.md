@@ -21,6 +21,25 @@ so an idle project gets one push per change, not one per round. Use
 `!companion focus off` in that topic to clear it, or in the companion's topic to
 clear all targets; `!companion focus` there lists them.
 
+**Talking to it:** `!companion <anything>` in its topic is passed to it as a
+message, so "!companion work on pennywise" works the same as writing it there.
+
+**Priorities:** projects named in `PERSONA.md`'s `## Priorities` (`1. nightmux …`,
+matched by topic name, session or folder) stay in every report, idle or not and
+with or without a session, marked `⭐ priority N`, so the companion moves them
+forward instead of waiting for something to happen there.
+
+**Allowance:** a `!budget` in the companion's own topic is its allowance for
+projects without a budget of their own. It counts everything those projects spent
+this period, including the owner's turns, so it stops early rather than late.
+`list_topics` shows what is left.
+
+**Projects with no session:** `send_prompt` to a topic that has a folder and no
+running agent starts its default agent there first.
+
+**Watch:** `!companion watch 3h` runs the first round within a minute, looking back
+3h, then every 3h.
+
 ## What the owner decided (2026-10-13)
 
 | Question | Answer |
@@ -55,7 +74,8 @@ clear all targets; `!companion focus` there lists them.
   `list_topics` (now with dir and budget), `read_chat`, `read_terminal` and
   `send_prompt`.
 - **Autonomy is enforced in code, not in the prompt.** `send_prompt` from the
-  companion refuses any topic without a `!budget`.
+  companion refuses any topic without a `!budget`, unless its own allowance
+  (the `!budget` in its topic) still has room.
   - A budget caps spend per day, week or month and holds the queue once spent,
     so it bounds what the companion can do alone.
   - Without a budget it can only suggest, and the owner sends.
