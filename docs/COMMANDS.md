@@ -62,6 +62,8 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!all <sess1,sess2|--all> <prompt>` = one prompt to several sessions
 - `!center [off]` = this topic watches every session · `!board` = all at a glance
 - `!companion [agent]` = a persona over every project: keeps its own memory, hands work to role agents, acts alone only where a `!budget` is set
+- `!companion` night [01:00] [07:30] | night off = rounds every 2h through the night, a morning summary at the end
+- `!companion` watch [3h] | watch off = by day: progress per project and ideas you tap to send — skipped when nothing moved
 
 ## 🪙 Tokens and limits
 

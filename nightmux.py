@@ -1839,6 +1839,15 @@ def budget_tick(cfg, state, topic, sess):
              f"({_k(used)} of {_k(cap)})", mode="plain")
 
 
+def budget_line(cfg, topic):
+    """"1.2M of 5M today", or None without a budget — what the companion may still spend."""
+    b = (cfg.get("budgets") or {}).get(str(topic))
+    if not b:
+        return None
+    used = budget_used(cfg, topic, budget_window(cfg, b["per"])[0])
+    return f"{_k(used)} of {_k(b['tokens'])} this {b['per']}"
+
+
 def budget_cmd(cfg, state, topic, sess, arg):
     bs = cfg.setdefault("budgets", {})
     words = arg.lower().split()
@@ -2290,13 +2299,23 @@ def due(cfg, state, topic, sess):
             keep.append(job)
             continue
         changed = True
+        if job.get("watch"):
+            # A watch round over projects where nothing moved is a turn spent
+            # learning nothing: skip it until some project's chat does.
+            mark = activity_mark(cfg)
+            if mark == job.get("mark"):
+                job["at"] = now + job["every"]
+                keep.append(job)
+                continue
+            job["mark"] = mark
         if job.get("kind") == "digest":
             since = job.get("since", now - (job.get("every") or 86400))
             send(cfg, topic, digest_report(cfg, state, topic, sess, since), mode="plain")
             job["since"] = now
         else:
             st.setdefault("queue", []).append(job["text"])
-            fired.append(job)
+            if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
+                fired.append(job)
         if job.get("every"):
             # From now, not from when it was due: a daemon that was off overnight
             # must not wake up and fire six hours of backlog in one go.
@@ -4026,7 +4045,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -4156,6 +4175,10 @@ HELP = [
         "!center [off] = this topic watches every session · !board = all at a glance",
         "!companion [agent] = a persona over every project: keeps its own memory, hands "
         "work to role agents, acts alone only where a !budget is set",
+        "!companion night [01:00] [07:30] | night off = rounds every 2h through the night, "
+        "a morning summary at the end",
+        "!companion watch [3h] | watch off = by day: progress per project and ideas you tap "
+        "to send — skipped when nothing moved",
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
@@ -4543,6 +4566,16 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return resume_session(cfg, state, lock, topic, arg)
     if cmd == "!companion":
         return companion_cmd(cfg, state, lock, topic, arg)
+    if cmd == "!suggest":
+        verb, _, sid = arg.partition(" ")
+        prompt = (_ideas.get(str(topic)) or {}).pop(sid.strip(), None)
+        if not prompt:
+            return "that idea is gone (taken, dropped, or nightmux restarted)"
+        if verb != "run":
+            return "✕ dropped"
+        if not sess:
+            return "no session here to send it to"
+        return send_prompt(cfg, state, topic, sess, prompt)
     if cmd == "!center":
         with lock:
             prev = cfg.get("center_topic")
@@ -8255,7 +8288,21 @@ NM_TOOLS = [
          _topic_arg, text={"type": "string"}, role={
              "type": "string", "description": "a role file in the companion's roles/ "
              "(builder, reviewer, tester, researcher…) the agent takes on for this task"})}},
+    {"name": "progress", "description": "What moved in every project since your last call "
+     "(or the last `hours`): replies, commits, last answer, who is waiting on a question, "
+     "who is going in circles, budget spent. Quiet projects in one line. Start here.",
+     "inputSchema": {"type": "object", "properties": {"hours": {"type": "number"}}}},
+    {"name": "suggest", "description": "Share an idea with the owner in a project's topic, "
+     "with a button that sends it to that project's agent when they tap it. For ideas that "
+     "need the owner's yes; no budget needed.",
+     "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
+         _topic_arg, text={"type": "string", "description": "one concrete prompt the agent "
+                                                           "could run, first line = why"},
+         role={"type": "string"})}},
 ]
+
+
+_nm_seen = {}     # topic -> last chat id this MCP process returned
 
 
 def nm_call(name, a, base=None, companion=False):
@@ -8271,15 +8318,25 @@ def nm_call(name, a, base=None, companion=False):
                          f"{r.get('mode')}" + (f" · {r['queued']} queued" if r.get("queued") else "")
                          + (f" · {r.get('server')}" if r.get("server") else "")
                          + (f" · {r['dir']}" if r.get("dir") else "")
-                         + (" · budget" if r.get("budget") else "")
+                         + (f" · budget {r['budget']}" if r.get("budget") else "")
                          for r in rows) or "no topics"
     elif name == "read_terminal":
-        n = max(1, min(int(a.get("lines") or 120), 2000))
+        n = max(1, min(int(a.get("lines") or (40 if companion else 120)), 2000))
         d = get(f"/api/term/{t}?lines={max(n, 50)}")
         text = d.get("error") or "\n".join(d.get("lines", [])[-n:])
     elif name == "read_chat":
-        d = get(f"/api/chat/{t}?after={int(a.get('after') or 0)}")
-        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in d.get("items", [])) \
+        # The companion reads every project every round: by default it gets only
+        # what it has not seen, the last 15 messages at most, each cut at 1500
+        # characters — a night of full transcripts is what would fill its context.
+        key = str(a.get("topic", ""))
+        after = int(a.get("after") or (_nm_seen.get(key, 0) if companion else 0))
+        d = get(f"/api/chat/{t}?after={after}")
+        items = d.get("items", [])
+        if companion:
+            if items:
+                _nm_seen[key] = max(m["id"] for m in items)
+            items = [dict(m, text=str(m.get("text"))[:1500]) for m in items[-15:]]
+        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in items) \
             or d.get("error") or "nothing new"
     elif name == "send_prompt":
         txt = str(a.get("text") or "").strip()
@@ -8287,10 +8344,26 @@ def nm_call(name, a, base=None, companion=False):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
         if companion or a.get("role"):
             txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
+            companion_log(a, txt)
         req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
                                      headers={"X-Nightmux": "1"})
         urllib.request.urlopen(req, timeout=10).close()
         text = "sent — read_chat for the answer"
+    elif name == "progress":
+        now = time.time()
+        since = now - float(a["hours"]) * 3600 if a.get("hours") else \
+            _nm_seen.get("progress", now - 6 * 3600)
+        _nm_seen["progress"] = now
+        text = get(f"/api/progress?since={int(since)}").get("text") or "nothing"
+    elif name == "suggest":
+        txt = str(a.get("text") or "").strip()
+        if not txt or txt.startswith("!"):
+            raise ValueError("suggest a prompt for the agent, not a nightmux command")
+        txt = companion_prompt({}, "", txt, a.get("role"), companion=False)
+        req = urllib.request.Request(f"{base}/api/suggest/{t}", data=txt.encode(),
+                                     headers={"X-Nightmux": "1"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            text = json.loads(r.read()).get("msg", "posted")
     else:
         raise ValueError(f"no tool {name}")
     return [{"type": "text", "text": text}]
@@ -8330,18 +8403,132 @@ COMPANION_SEED = {
                             "asks from the code, docs or web; answer in under 15 lines with "
                             "sources.\n"),
 }
-COMPANION_BRIEF = (
-    "You are the owner's companion, above the project agents. Read PERSONA.md and MEMORY.md "
-    "in this folder now and keep to them: PERSONA.md is how you talk and how much you do "
-    "without asking. The nightmux MCP tools show every project (list_topics, read_chat, "
-    "read_terminal) and hand one work (send_prompt). Read a project's own notes, "
-    "<dir>/.nightmux/memory.md, before you direct it. Give each task a role (send_prompt "
-    "role=builder|reviewer|tester|researcher, files in roles/ — add one when none fits), so "
-    "the right kind of agent does it in whichever project needs it. send_prompt works only "
-    "in projects with a !budget: that is your limit when you act alone. After each piece of "
-    "work, rewrite MEMORY.md with what is worth knowing next time — the owner's preferences, "
-    "where each project stands, what worked — and never secrets, tokens or personal data. "
-    "Reply \"ready\" once you have read both files.")
+COMPANION_GUIDE = (
+    "# Companion\n\n"
+    "You are the owner's companion, above the project agents. PERSONA.md is how you talk "
+    "and how much you do without asking; MEMORY.md is what you have learned. Keep to both.\n\n"
+    "- The nightmux MCP tools: progress (what moved in every project since you last looked "
+    "— start here), list_topics (agent, state, folder, budget spent), read_chat (only what "
+    "you have not seen), read_terminal, send_prompt (hand work out) and suggest (post an "
+    "idea the owner sends with one tap).\n"
+    "- Your job is the owner's productivity: notice progress, unblock stuck agents, and "
+    "bring ideas that are specific — a file, a feature, a command — never generic advice.\n"
+    "- Read a project's own notes, <dir>/.nightmux/memory.md, before you direct it.\n"
+    "- Give each task a role (send_prompt role=builder|reviewer|tester|researcher; files in "
+    "roles/, add one when none fits), so the right kind of agent does it in whichever "
+    "project needs it. Build with one role, check with another.\n"
+    "- send_prompt works only in projects with a !budget: that is your limit when you act "
+    "alone. actions.log here records every prompt you sent — report from it, not from memory.\n"
+    "- Keep reads small: progress first, then read_chat only where something changed; "
+    "read_terminal only when the chat does not explain a state.\n"
+    "- After each piece of work, rewrite MEMORY.md (under 150 lines) with what is worth "
+    "knowing next time: the owner's preferences, where each project stands, what worked, "
+    "what failed. Never secrets, tokens or personal data.\n")
+# Read on every conversation start and kept through compaction: Claude Code
+# imports the files from CLAUDE.md, the others are told to read them.
+COMPANION_HOOKS = {
+    "CLAUDE.md": COMPANION_GUIDE + "\n@PERSONA.md\n@MEMORY.md\n",
+    "AGENTS.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+    "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+}
+COMPANION_ROUND = (
+    "Night round. Call progress, then for each project with a budget that moved or is "
+    "waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
+    "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
+    "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
+    "wait for results, the next round reads them. Review what the last round's work "
+    "produced before handing out more in that project. Then update MEMORY.md and stop.")
+COMPANION_MORNING = (
+    "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
+    "out overnight and what came of it (actions.log is the record), budget spent per "
+    "project, what needs the owner's decision, and what you would do next. Nothing else.")
+
+
+COMPANION_WATCH = (
+    "Watch round. Call progress: it lists only the projects that moved since your last "
+    "look. Tell the owner here, one line per project that moved: what got done, and what "
+    "is stuck (waiting on a question, going in circles, out of budget or usage). Then "
+    "share ideas: for at most 3 projects where you see a clearly better next step, a risk, "
+    "a missing test or a shortcut, call suggest with one concrete prompt the agent could "
+    "run — the owner taps to send it. Skip generic advice; an idea must name the file, "
+    "feature or command. Answer an agent's waiting question yourself with send_prompt only "
+    "when MEMORY.md or the project's notes already hold the answer and your risk level "
+    "allows. If progress shows nothing worth a line, reply only \"quiet\". Update "
+    "MEMORY.md if you learned something.")
+SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
+_ideas = {}           # topic -> {id: prompt}; in memory, a restart drops pending ideas
+_idea_times = []
+
+
+def activity_mark(cfg):
+    """The newest chat id in any project topic — it moves when anything there does."""
+    own = str((cfg.get("companion") or {}).get("topic"))
+    return max((log[-1]["id"] for t, log in list(_chat.items()) if t != own and log), default=0)
+
+
+def progress_report(cfg, state, since):
+    """What moved in each project since `since`, for the companion to read in one call.
+
+    Built here from the chat log and git rather than by the companion reading
+    every chat: one call of a few hundred tokens instead of one per project.
+    Flags the two things a person scanning topics misses: a question nobody
+    answered, and an agent busy for a long while without a commit.
+    # ponytail: this machine's topics only; add peers via peer_call if they matter.
+    """
+    own = str((cfg.get("companion") or {}).get("topic"))
+    names = cfg.get("topic_names") or {}
+    moved, quiet = [], []
+    for r in topics_status(cfg, state):
+        t, sess = str(r["topic"]), r["session"]
+        if t == own:
+            continue
+        log = [m for m in _chat.get(t) or [] if m.get("t", 0) >= since]
+        replies = [m for m in log if m.get("who") == "bot"]
+        st = state.get(sess) or {}
+        if not log and r["mode"] != "waiting":
+            quiet.append(names.get(t) or sess)
+            continue
+        cwd = (cfg.get("dirs") or {}).get(t)
+        since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+        commits = [c for c in tmux_git(cwd, "log", "--oneline", f"--since={since_s}").split("\n")
+                   if c.strip()] if cwd and os.path.isdir(cwd) else []
+        lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
+                 f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
+        last = replies[-1]["text"].strip() if replies else ""
+        if last:
+            lines.append("  last: " + last.splitlines()[0][:160])
+        lines += [f"  {c[:90]}" for c in commits[:3]]
+        if r["mode"] == "waiting" and st.get("asked"):
+            lines.append("  ✋ waiting on: " + st["asked"].strip().splitlines()[0][:140])
+        if len(replies) >= SPIN_REPLIES and not commits and r["mode"] != "waiting":
+            lines.append(f"  ⚠ {len(replies)} replies, no commit — may be going in circles")
+        if r.get("held_until"):
+            lines.append(f"  💤 held until {clock(cfg, r['held_until'])}")
+        moved.append("\n".join(lines))
+    out = moved or ["nothing moved"]
+    if quiet:
+        out.append("quiet: " + ", ".join(quiet))
+    return "\n".join(out)
+
+
+def suggest_post(cfg, topic, prompt):
+    """An idea in a project's topic with a button to send it: the owner decides."""
+    now = time.time()
+    _idea_times[:] = [x for x in _idea_times if x > now - 3600]
+    if len(_idea_times) >= 6:
+        return "6 ideas this hour already — keep the best for the next round"
+    if topic not in (cfg.get("topics") or {}) or not prompt.strip():
+        return f"no project topic {topic}"
+    _idea_times.append(now)
+    pend = _ideas.setdefault(topic, {})
+    sid = hashlib.sha1(prompt.encode()).hexdigest()[:8]
+    pend[sid] = prompt
+    for old in list(pend)[:-10]:                # the idea list is not a backlog
+        pend.pop(old)
+    send(cfg, topic, "💡 idea from your companion:\n" + prompt.rsplit("Task: ", 1)[-1][:900],
+         mode="plain", buttons=kb([[("▶ send to agent", f"!suggest run {sid}"),
+                                    ("✕", f"!suggest drop {sid}")]]))
+    return "posted — the owner taps ▶ to send it"
 
 
 def companion_prompt(cfg, topic, text, role=None, companion=True):
@@ -8349,8 +8536,11 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
 
     The companion may only send where a !budget caps the spend — that cap is
     what "acts on its own within budget" means, enforced here and not in its
-    prompt. A role name is a file name, so nothing outside roles/ is read.
+    prompt. Never to its own topic: that is a loop that bills itself. A role
+    name is a file name, so nothing outside roles/ is read.
     """
+    if companion and topic == str((cfg.get("companion") or {}).get("topic")):
+        raise ValueError("that is your own topic — send work to a project")
     if companion and topic not in (cfg.get("budgets") or {}):
         raise ValueError(f"topic {topic} has no !budget — you act alone only within one; "
                          "ask the owner to set it, or to send this themselves")
@@ -8366,10 +8556,81 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
     return f"[role: {role}] {brief}\n\nTask: {text}"
 
 
+def companion_log(a, text):
+    """One line per prompt sent: the morning summary's record, and the owner's audit."""
+    line = (f"{time.strftime('%Y-%m-%d %H:%M')} topic={a.get('topic')} role={a.get('role') or '-'} "
+            f"{text.rsplit('Task: ', 1)[-1].splitlines()[0][:160] if text.strip() else ''}\n")
+    try:
+        with open(os.path.join(COMPANION_DIR, "actions.log"), "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def companion_night(cfg, state, arg):
+    """Rounds every 2h from the night time until the morning, then a summary —
+    plain scheduled prompts on the companion's own queue, so they wait out
+    usage limits and survive restarts like any !every.
+
+    # ponytail: fixed 2h spacing; make it a setting if one round is too few or too many.
+    """
+    sess = (cfg.get("companion") or {}).get("session")
+    if not sess:
+        return "start the companion first: !companion"
+    st = state.setdefault(sess, {})
+    keep = [j for j in st.get("sched") or [] if not j.get("companion")]
+    words = arg.split()[1:]
+    if words == ["off"]:
+        st["sched"] = keep
+        save_queue(state)
+        return "🌙 night rounds and morning summary off"
+    start, end = (words + ["01:00", "07:30"][len(words):])[:2]
+    a, b = at_epoch(cfg, start), at_epoch(cfg, end)
+    if a is None or b is None or start.startswith("+") or end.startswith("+"):
+        return "usage: !companion night [01:00] [07:30] | night off"
+    while b <= a:
+        b += 86400
+    rounds = list(range(int(a), int(b) - 1800, 2 * 3600))
+    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True}
+                          for t in rounds] + [
+        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True}]
+    save_queue(state)
+    return (f"🌙 rounds at {', '.join(clock(cfg, t) for t in rounds)} · ☀️ summary at "
+            f"{clock(cfg, b)}, each night · !companion night off to stop")
+
+
+def companion_watch(cfg, state, arg):
+    """A watch round every few hours — skipped while no project moves."""
+    sess = (cfg.get("companion") or {}).get("session")
+    if not sess:
+        return "start the companion first: !companion"
+    st = state.setdefault(sess, {})
+    keep = [j for j in st.get("sched") or [] if not j.get("watch")]
+    when = (arg.split()[1:] or ["3h"])[0]
+    if when == "off":
+        st["sched"] = keep
+        save_queue(state)
+        return "👀 watch off"
+    secs = parse_every(when)
+    if not secs or secs < 1800:
+        return "usage: !companion watch [3h] | watch off   (30m at least)"
+    st["sched"] = keep + [{"at": time.time() + secs, "every": secs, "text": COMPANION_WATCH,
+                           "companion": True, "watch": True, "mark": activity_mark(cfg)}]
+    save_queue(state)
+    return (f"👀 every {when}: progress per project and ideas to tap — skipped while nothing "
+            "moves · !companion watch off to stop")
+
+
 def companion_cmd(cfg, state, lock, topic, arg):
-    key = (arg.split() or [default_agent(cfg)])[0]
-    if key not in agents(cfg):
-        return f"usage: !companion [{'|'.join(agents(cfg))}]"
+    if arg.split()[:1] == ["night"]:
+        return companion_night(cfg, state, arg)
+    if arg.split()[:1] == ["watch"]:
+        return companion_watch(cfg, state, arg)
+    key, _, flags = arg.partition(" ")
+    if key and key not in agents(cfg):
+        return (f"usage: !companion [{'|'.join(agents(cfg))}] [flags] · !companion night "
+                "[01:00] [07:30] · !companion watch [3h]")
+    key = key or default_agent(cfg)
     os.makedirs(os.path.join(COMPANION_DIR, "roles"), exist_ok=True)
     os.chmod(COMPANION_DIR, 0o700)              # its memory is about the owner
     for rel, text in COMPANION_SEED.items():
@@ -8377,6 +8638,9 @@ def companion_cmd(cfg, state, lock, topic, arg):
         if not os.path.exists(path):            # the owner's edits are theirs
             with open(path, "w") as f:
                 f.write(text)
+    for rel, text in COMPANION_HOOKS.items():   # nightmux's own: refreshed every start
+        with open(os.path.join(COMPANION_DIR, rel), "w") as f:
+            f.write(text)
     server = [sys.executable, os.path.abspath(__file__), "--mcp", "--companion"]
     argv = mcp_argv(key, "add", "nightmux", server)
     if not argv:
@@ -8392,13 +8656,16 @@ def companion_cmd(cfg, state, lock, topic, arg):
         return f"could not give {key} the nightmux tools: {e}"
     if p.returncode:
         return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
-    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR}", key)
+    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR} {flags}".strip(), key)
     if not out.startswith("started"):
         return out
-    state.setdefault("companion", {}).setdefault("queue", []).append(COMPANION_BRIEF)
+    with lock:
+        cfg["companion"] = {"topic": str(topic), "session": "companion"}
+        save_cfg(cfg)
     return (out + f"\n🧭 your companion lives here. Edit {COMPANION_DIR}/PERSONA.md for its "
             "tone and risk, roles/ for the kinds of agent it hands work to. It acts alone only "
-            "in topics with a !budget.")
+            "in topics with a !budget · !companion watch 3h to hear progress and ideas by day · "
+            "!companion night 01:00 07:30 for night rounds and a morning summary.")
 
 
 # ---------- !errors: production errors become fix prompts ----------
@@ -8930,7 +9197,7 @@ def topics_status(cfg, state):
             "held_until": held if held > now else None,
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
             "dir": (cfg.get("dirs") or {}).get(topic),
-            "budget": str(topic) in (cfg.get("budgets") or {}),
+            "budget": budget_line(cfg, topic),
         })
     return out
 
@@ -12611,6 +12878,12 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "application/json")
         if self.path == "/api/office/replay":
             return self.reply(json.dumps({"frames": replay_frames()}), "application/json")
+        if self.path.startswith("/api/progress"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            since = (q.get("since") or [""])[0]
+            since = int(since) if since.isdigit() else int(time.time()) - 6 * 3600
+            return self.reply(json.dumps({"text": progress_report(
+                self.server.cfg, self.server.state, since)}), "application/json")
         if self.path in ("/api/topics", "/api/office"):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
@@ -12712,6 +12985,13 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             else:
                 out = {"ok": False, "msg": "unknown action"}
             return self.reply(json.dumps(out), "application/json")
+        if self.path.startswith("/api/suggest/") and not self.peer:
+            if self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            msg = suggest_post(cfg, self.path[len("/api/suggest/"):].strip("/"), body)
+            return self.reply(json.dumps({"msg": msg}), "application/json")
         if self.path.startswith("/api/topic"):
             return self.manage(cfg, body)
         parts = self.path.strip('/').split('/')
@@ -17090,7 +17370,8 @@ def selfcheck():
             out = companion_cmd({"agents": {}}, st_, threading.Lock(), "7", "claude")
             assert out.startswith("started claude 'companion'"), out
             assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
-            assert st_["companion"]["queue"] == [COMPANION_BRIEF]
+            with open(os.path.join(cd_, "CLAUDE.md")) as f:
+                assert "@PERSONA.md" in f.read()       # persona survives compaction
             assert oct(os.stat(cd_).st_mode & 0o777) == "0o700"
             with open(os.path.join(cd_, "PERSONA.md"), "w") as f:
                 f.write("mine")
@@ -17098,6 +17379,19 @@ def selfcheck():
             with open(os.path.join(cd_, "PERSONA.md")) as f:
                 assert f.read() == "mine"            # never overwrites the owner's edits
             assert "usage" in companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "nope")
+            # night: 2h rounds from the night time to the morning, then the summary;
+            # off drops only the companion's jobs.
+            cfgn = {"companion": {"topic": "7", "session": "companion"}, "tz_offset": 0}
+            stn = {"companion": {"sched": [{"at": 1, "every": 60, "text": "mine"}]}}
+            with stubbed(save_queue=lambda s: None):
+                out = companion_night(cfgn, stn, "night 01:00 07:30")
+                jobs = stn["companion"]["sched"]
+                assert [time.strftime("%H:%M", time.gmtime(j["at"])) for j in jobs[1:]] == \
+                    ["01:00", "03:00", "05:00", "07:30"], out
+                assert jobs[-1]["text"] == COMPANION_MORNING and jobs[0]["text"] == "mine"
+                companion_night(cfgn, stn, "night off")
+                assert stn["companion"]["sched"] == [{"at": 1, "every": 60, "text": "mine"}]
+                assert "start the companion" in companion_night({}, {}, "night")
             cfg_ = {"budgets": {"5": {"tokens": 1000, "per": "day"}}}
             for t_ in ("6", ""):
                 try:
@@ -17106,6 +17400,79 @@ def selfcheck():
                 except ValueError as e:
                     assert "!budget" in str(e)
             assert companion_prompt(cfg_, "6", "x", companion=False) == "x"
+            cfg_["companion"] = {"topic": "5"}
+            try:
+                companion_prompt(cfg_, "5", "x")
+                assert False, "sent to itself"
+            except ValueError as e:
+                assert "own topic" in str(e)
+            cfg_.pop("companion")
+            # read_chat in companion mode: only unseen messages, at most 15, clipped.
+            got = []
+            msgs = [{"id": i, "who": "agent", "text": "y" * 3000} for i in range(1, 21)]
+
+            def fake_open(url, timeout=10):
+                got.append(url)
+                after = int(url.rsplit("after=", 1)[1])
+                return io.BytesIO(json.dumps({"items": [m for m in msgs if m["id"] > after]}).encode())
+            fake_ul = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open), "Request": urllib.request.Request})})
+            with stubbed(urllib=fake_ul):
+                _nm_seen.clear()
+                text = nm_call("read_chat", {"topic": "5"}, base="http://x", companion=True)[0]["text"]
+                assert text.count("agent:") == 15 and "#20 " in text and len(text) < 15 * 1600
+                assert nm_call("read_chat", {"topic": "5"}, "http://x", True)[0]["text"] == "nothing new"
+                assert got[-1].endswith("after=20")
+                assert nm_call("read_chat", {"topic": "5"}, "http://x")[0]["text"].count("agent:") == 20
+            with stubbed(budget_used=lambda c, t, s: 1_200_000):
+                assert budget_line({"budgets": {"5": {"tokens": 5_000_000, "per": "day"}}}, "5") \
+                    == f"{_k(1_200_000)} of {_k(5_000_000)} this day"
+                assert budget_line({}, "5") is None
+            # progress: moved projects with flags, quiet ones on one line, never itself.
+            now_ = time.time()
+            rows_ = [{"topic": "5", "session": "shop", "mode": "idle", "budget": "1M of 5M this day"},
+                     {"topic": "6", "session": "blog", "mode": "waiting"},
+                     {"topic": "8", "session": "old", "mode": "idle"},
+                     {"topic": "9", "session": "comp", "mode": "idle"}]
+            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"step {i}\nmore"} for i in range(1, 8)],
+                     "9": [{"id": 50, "t": now_, "who": "bot", "text": "me"}]}
+            stp = {"blog": {"asked": "Use postgres or sqlite?"}}
+            with stubbed(topics_status=lambda c, s: rows_, _chat=chat_, tmux_git=lambda *a: ""):
+                cfgp = {"companion": {"topic": "9"}, "dirs": {"5": cd_}}
+                rep_ = progress_report(cfgp, stp, now_ - 60)
+                assert "▸ shop (topic 5) [idle] · 7 replies · 0 commits · budget 1M of 5M" in rep_, rep_
+                assert "last: step 7" in rep_ and "going in circles" in rep_
+                assert "✋ waiting on: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
+                assert "comp" not in rep_ and activity_mark(cfgp) == 7
+                # watch rounds: skipped while the mark has not moved, queued once it does.
+                stw = {"comp": {"sched": [{"at": 0, "every": 3600, "text": "w", "watch": True,
+                                           "companion": True, "mark": 7}]}}
+                sent_ = []
+                with stubbed(send=lambda *a, **k: sent_.append(a)):
+                    due(cfgp, stw, "9", "comp")
+                    assert not stw["comp"].get("queue") and stw["comp"]["sched"][0]["at"] > now_
+                    chat_["5"].append({"id": 8, "t": now_, "who": "user", "text": "go"})
+                    stw["comp"]["sched"][0]["at"] = 0
+                    due(cfgp, stw, "9", "comp")
+                    assert stw["comp"]["queue"] == ["w"] and not sent_   # no ⏰ ping
+            # suggest: posted with a button, capped per hour, unknown topics refused.
+            sent_ = []
+            with stubbed(send=lambda c, t, x, **k: sent_.append((t, x, k.get("buttons")))):
+                _ideas.clear()
+                del _idea_times[:]
+                cfgs = {"topics": {"5": "shop"}}
+                assert "posted" in suggest_post(cfgs, "5", "[role: tester] b\n\nTask: add a test for cart totals")
+                t_, x_, btn = sent_[-1]
+                assert t_ == "5" and x_.endswith("add a test for cart totals") and "!suggest run" in btn
+                sid_ = next(iter(_ideas["5"]))
+                assert sid_ in btn and "no project" in suggest_post(cfgs, "7", "x")
+                for i in range(5):
+                    suggest_post(cfgs, "5", f"idea {i}")
+                assert "6 ideas" in suggest_post(cfgs, "5", "one more")
+            assert {"progress", "suggest"} <= {t["name"] for t in NM_TOOLS}
+            companion_log({"topic": "5", "role": "tester"}, "[role: tester] brief\n\nTask: add tests\nmore")
+            with open(os.path.join(cd_, "actions.log")) as f:
+                assert f.read().endswith("topic=5 role=tester add tests\n")
             out = companion_prompt(cfg_, "5", "fix it", "reviewer")
             assert out.startswith("[role: reviewer] You are the reviewer") and out.endswith("Task: fix it")
             for bad in ("../PERSONA", "nope"):
