@@ -61,6 +61,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!route` auto|off|stats = send each task to the agent that fits it, learned from results
 - `!all <sess1,sess2|--all> <prompt>` = one prompt to several sessions
 - `!center [off]` = this topic watches every session · `!board` = all at a glance
+- `!companion [agent]` = a persona over every project: keeps its own memory, hands work to role agents, acts alone only where a `!budget` is set
 
 ## 🪙 Tokens and limits
 

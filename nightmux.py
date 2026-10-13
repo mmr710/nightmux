@@ -4026,7 +4026,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -4154,6 +4154,8 @@ HELP = [
         "learned from results",
         "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
         "!center [off] = this topic watches every session · !board = all at a glance",
+        "!companion [agent] = a persona over every project: keeps its own memory, hands "
+        "work to role agents, acts alone only where a !budget is set",
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
@@ -4539,6 +4541,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                              default_agent(cfg) if cmd == "!new" else cmd[1:])
     if cmd in ("!resume", "!restore"):    # !restore: same relaunch, easier to guess
         return resume_session(cfg, state, lock, topic, arg)
+    if cmd == "!companion":
+        return companion_cmd(cfg, state, lock, topic, arg)
     if cmd == "!center":
         with lock:
             prev = cfg.get("center_topic")
@@ -8248,11 +8252,13 @@ NM_TOOLS = [
     {"name": "send_prompt", "description": "Give the topic's agent a prompt. Queued if "
      "it is busy or out of usage, like a message from the phone.",
      "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
-         _topic_arg, text={"type": "string"})}},
+         _topic_arg, text={"type": "string"}, role={
+             "type": "string", "description": "a role file in the companion's roles/ "
+             "(builder, reviewer, tester, researcher…) the agent takes on for this task"})}},
 ]
 
 
-def nm_call(name, a, base=None):
+def nm_call(name, a, base=None, companion=False):
     base = base or f"http://127.0.0.1:{load_cfg().get('webhook_port') or 9090}"
     t = urllib.parse.quote(str(a.get("topic", "")), safe="")
 
@@ -8264,6 +8270,8 @@ def nm_call(name, a, base=None):
         text = "\n".join(f"{r['topic']}: {r.get('session')} · {r.get('agent') or '?'} · "
                          f"{r.get('mode')}" + (f" · {r['queued']} queued" if r.get("queued") else "")
                          + (f" · {r.get('server')}" if r.get("server") else "")
+                         + (f" · {r['dir']}" if r.get("dir") else "")
+                         + (" · budget" if r.get("budget") else "")
                          for r in rows) or "no topics"
     elif name == "read_terminal":
         n = max(1, min(int(a.get("lines") or 120), 2000))
@@ -8277,6 +8285,8 @@ def nm_call(name, a, base=None):
         txt = str(a.get("text") or "").strip()
         if not txt or txt.startswith("!"):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
+        if companion or a.get("role"):
+            txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
         req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
                                      headers={"X-Nightmux": "1"})
         urllib.request.urlopen(req, timeout=10).close()
@@ -8284,6 +8294,111 @@ def nm_call(name, a, base=None):
     else:
         raise ValueError(f"no tool {name}")
     return [{"type": "text", "text": text}]
+
+
+# ---------- !companion: one persona over every project ----------
+# An ordinary agent session in a private folder — never a repo, never shared —
+# whose PERSONA.md sets its tone and how much risk it takes, whose MEMORY.md it
+# keeps itself, and whose roles/ it hands to project agents with each task, so
+# one project can be built by one role and checked by another. It drives the
+# other topics through `--mcp --companion`, which sends only where the owner
+# set a !budget: alone, it acts within budget and nowhere else.
+COMPANION_DIR = os.path.expanduser("~/.nightmux-companion")
+COMPANION_SEED = {
+    "PERSONA.md": (
+        "# Persona\n\nname: Nox\nrisk: balanced   # cautious | balanced | bold\n\n"
+        "## Tone and style\n"
+        "Short and direct, plain words, no cheerleading. Say what you did, what it cost "
+        "and what needs the owner. One question at a time.\n\n"
+        "## Risk\n"
+        "- cautious: suggest; send work to a project only when the owner asked for it.\n"
+        "- balanced: act alone on clear, reversible work (fixes, tests, docs, reviews); "
+        "ask before anything that deploys, deletes, pays or posts.\n"
+        "- bold: also start features and refactors alone; still ask before deploys, "
+        "deletions, payments and anything public.\n"),
+    "MEMORY.md": ("# Memory\n\nWhat you learned about the owner, each project and what "
+                  "works. Under 150 lines; rewrite, don't append. No secrets.\n"),
+    "roles/builder.md": ("You are the builder. Implement the task in small, tested steps on a "
+                         "branch, run the project's tests, and report what changed and how you "
+                         "checked it.\n"),
+    "roles/reviewer.md": ("You are the reviewer. Do not edit. Read the latest changes against "
+                          "the main branch and list real defects, most severe first, each with "
+                          "file:line and how it fails. Say plainly if there are none.\n"),
+    "roles/tester.md": ("You are the tester. Write or extend tests for the task, run them, "
+                        "and report failures with the exact output. Change tests, not code.\n"),
+    "roles/researcher.md": ("You are the researcher. Do not edit code. Find out what the task "
+                            "asks from the code, docs or web; answer in under 15 lines with "
+                            "sources.\n"),
+}
+COMPANION_BRIEF = (
+    "You are the owner's companion, above the project agents. Read PERSONA.md and MEMORY.md "
+    "in this folder now and keep to them: PERSONA.md is how you talk and how much you do "
+    "without asking. The nightmux MCP tools show every project (list_topics, read_chat, "
+    "read_terminal) and hand one work (send_prompt). Read a project's own notes, "
+    "<dir>/.nightmux/memory.md, before you direct it. Give each task a role (send_prompt "
+    "role=builder|reviewer|tester|researcher, files in roles/ — add one when none fits), so "
+    "the right kind of agent does it in whichever project needs it. send_prompt works only "
+    "in projects with a !budget: that is your limit when you act alone. After each piece of "
+    "work, rewrite MEMORY.md with what is worth knowing next time — the owner's preferences, "
+    "where each project stands, what worked — and never secrets, tokens or personal data. "
+    "Reply \"ready\" once you have read both files.")
+
+
+def companion_prompt(cfg, topic, text, role=None, companion=True):
+    """The text send_prompt delivers: the role's file first, if one is named.
+
+    The companion may only send where a !budget caps the spend — that cap is
+    what "acts on its own within budget" means, enforced here and not in its
+    prompt. A role name is a file name, so nothing outside roles/ is read.
+    """
+    if companion and topic not in (cfg.get("budgets") or {}):
+        raise ValueError(f"topic {topic} has no !budget — you act alone only within one; "
+                         "ask the owner to set it, or to send this themselves")
+    if not role:
+        return text
+    if not re.fullmatch(r"[\w-]{1,40}", str(role)):
+        raise ValueError("a role is a name like builder or reviewer")
+    try:
+        with open(os.path.join(COMPANION_DIR, "roles", role + ".md")) as f:
+            brief = f.read().strip()
+    except OSError:
+        raise ValueError(f"no role {role} — add roles/{role}.md in {COMPANION_DIR}")
+    return f"[role: {role}] {brief}\n\nTask: {text}"
+
+
+def companion_cmd(cfg, state, lock, topic, arg):
+    key = (arg.split() or [default_agent(cfg)])[0]
+    if key not in agents(cfg):
+        return f"usage: !companion [{'|'.join(agents(cfg))}]"
+    os.makedirs(os.path.join(COMPANION_DIR, "roles"), exist_ok=True)
+    os.chmod(COMPANION_DIR, 0o700)              # its memory is about the owner
+    for rel, text in COMPANION_SEED.items():
+        path = os.path.join(COMPANION_DIR, rel)
+        if not os.path.exists(path):            # the owner's edits are theirs
+            with open(path, "w") as f:
+                f.write(text)
+    server = [sys.executable, os.path.abspath(__file__), "--mcp", "--companion"]
+    argv = mcp_argv(key, "add", "nightmux", server)
+    if not argv:
+        return f"{key} takes no MCP server nightmux knows how to add — try !companion claude"
+    try:
+        old = mcp_argv(key, "remove", "nightmux")
+        if old:                                 # `mcp add` refuses a name it already has
+            subprocess.run(old, cwd=COMPANION_DIR, capture_output=True, timeout=90,
+                           stdin=subprocess.DEVNULL)
+        p = subprocess.run(argv, cwd=COMPANION_DIR, capture_output=True, text=True,
+                           timeout=90, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not give {key} the nightmux tools: {e}"
+    if p.returncode:
+        return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
+    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR}", key)
+    if not out.startswith("started"):
+        return out
+    state.setdefault("companion", {}).setdefault("queue", []).append(COMPANION_BRIEF)
+    return (out + f"\n🧭 your companion lives here. Edit {COMPANION_DIR}/PERSONA.md for its "
+            "tone and risk, roles/ for the kinds of agent it hands work to. It acts alone only "
+            "in topics with a !budget.")
 
 
 # ---------- !errors: production errors become fix prompts ----------
@@ -8814,6 +8929,8 @@ def topics_status(cfg, state):
             "queued": len(st.get("queue") or []),
             "held_until": held if held > now else None,
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
+            "dir": (cfg.get("dirs") or {}).get(topic),
+            "budget": str(topic) in (cfg.get("budgets") or {}),
         })
     return out
 
@@ -16960,6 +17077,43 @@ def selfcheck():
         with open(os.path.join(sd_, "s1.json"), "w") as f:
             json.dump({"pane": "%9", "ts": time.time()}, f)
         assert list(snapped()) == ["%9"] and list(snapped()) == ["%9"]
+    # !companion: seeds a private folder once, gives the agent the nightmux tools,
+    # and the tools send only where a !budget caps the spend.
+    with tempfile.TemporaryDirectory() as cd_:
+        ran, cd_ = [], os.path.join(cd_, "comp")
+        fake_sp = type("SP", (), {"TimeoutExpired": subprocess.TimeoutExpired, "DEVNULL": None,
+                                  "run": staticmethod(lambda a, **k: ran.append(a) or
+                                                      type("P", (), {"returncode": 0})())})
+        st_ = {}
+        with stubbed(COMPANION_DIR=cd_, subprocess=fake_sp,
+                     start_session=lambda c, s, l, t, a, k: f"started {k} '{a.split()[0]}'"):
+            out = companion_cmd({"agents": {}}, st_, threading.Lock(), "7", "claude")
+            assert out.startswith("started claude 'companion'"), out
+            assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
+            assert st_["companion"]["queue"] == [COMPANION_BRIEF]
+            assert oct(os.stat(cd_).st_mode & 0o777) == "0o700"
+            with open(os.path.join(cd_, "PERSONA.md"), "w") as f:
+                f.write("mine")
+            companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "")
+            with open(os.path.join(cd_, "PERSONA.md")) as f:
+                assert f.read() == "mine"            # never overwrites the owner's edits
+            assert "usage" in companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "nope")
+            cfg_ = {"budgets": {"5": {"tokens": 1000, "per": "day"}}}
+            for t_ in ("6", ""):
+                try:
+                    companion_prompt(cfg_, t_, "x")
+                    assert False, "sent without a budget"
+                except ValueError as e:
+                    assert "!budget" in str(e)
+            assert companion_prompt(cfg_, "6", "x", companion=False) == "x"
+            out = companion_prompt(cfg_, "5", "fix it", "reviewer")
+            assert out.startswith("[role: reviewer] You are the reviewer") and out.endswith("Task: fix it")
+            for bad in ("../PERSONA", "nope"):
+                try:
+                    companion_prompt(cfg_, "5", "x", bad)
+                    assert False, bad
+                except ValueError:
+                    pass
     print("selfcheck ok")
 
 
@@ -17199,7 +17353,7 @@ def cli():
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
     elif "--mcp" in sys.argv:
-        mcp_loop("nightmux", NM_TOOLS, nm_call)
+        mcp_loop("nightmux", NM_TOOLS, lambda n, a: nm_call(n, a, companion="--companion" in sys.argv))
     elif "--demo" in sys.argv:
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
