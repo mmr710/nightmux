@@ -11287,7 +11287,9 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 #setup li { margin-bottom: 6px; } #setup li span { color: var(--mut); font-size: 12px; display: block; } .sname { font-size: 12px; color: var(--mut); margin-bottom: 6px; }
 .sname:empty { display: none; }
 /* live floor: one pixel desk per agent, animated by what it is doing */
-.floor { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 46%), 1fr)); }
+.floor { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 30%), 1fr)); }
+h2.fold { cursor: pointer; user-select: none; }
+h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: "\25B8"; }
 .desk { display: block; text-decoration: none; color: inherit; background: linear-gradient(180deg, var(--card2), var(--card));
         border: 1px solid var(--line); border-radius: 14px; padding: 8px 8px 9px; min-width: 0; position: relative;
         transition: border-color .3s, transform .15s; -webkit-tap-highlight-color: transparent; }
@@ -11309,7 +11311,7 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 <nav class="top"><a href="/office">🏢 office</a><a href="/app">📱 app</a></nav>
 <div id="pulse"></div></div></header>
 <main>
-<div id="setup"></div>
+<div id="setup"></div><div id="toast"></div>
 <h2>live agents</h2>
 <div class="floor" id="floor"><p class="empty">loading…</p></div>
 <h2>context per model call <span class="sub" id="ctxnote"></span></h2>
@@ -11348,7 +11350,6 @@ sudo tailscale up</pre></li>
 </div>
 <div class="grid" id="srvlist"></div>
 <div id="server" style="margin-top:12px"></div>
-<div id="toast"></div>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
   <button id="run">analyze</button></h2>
@@ -11741,6 +11742,27 @@ $('run').onclick = analyze;
 document.addEventListener('visibilitychange', tick);
 tick();
 setInterval(tick, 4000);
+// Tap a section heading to fold it; the choice is kept per browser. On a phone
+// everything below the live floor starts folded, so the page opens short.
+(function () {
+  let shut = null;
+  try { shut = JSON.parse(localStorage.getItem('nm-fold') || 'null'); } catch (e) {}
+  if (!shut) shut = matchMedia('(max-width: 700px)').matches
+    ? {'topics': 1, 'limits per agent': 1, 'servers': 1, 'chat analysis': 1} : {};
+  document.querySelectorAll('main > h2').forEach(h => {
+    const key = h.firstChild.textContent.trim(), box = document.createElement('div');
+    for (let n = h.nextElementSibling; n && n.tagName !== 'H2'; n = h.nextElementSibling) box.appendChild(n);
+    h.after(box); h.classList.add('fold');
+    const set = s => { box.hidden = s; h.classList.toggle('shut', s); };
+    set(!!shut[key]);
+    h.addEventListener('click', e => {
+      if (e.target.closest('button, select, input')) return;
+      set(!box.hidden);
+      if (box.hidden) shut[key] = 1; else delete shut[key];
+      try { localStorage.setItem('nm-fold', JSON.stringify(shut)); } catch (e) {}
+    });
+  });
+})();
 </script>
 </body></html>"""
 
@@ -15944,7 +15966,7 @@ def selfcheck():
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
     # the live floor draws from /api/topics on every tick; the chart from the daily series
-    assert "floor(t)" in dash_ and "drawDesk(" in dash_ and "a.daily" in dash_ and "prefers-reduced-motion" in dash_
+    assert "floor(t)" in dash_ and "drawDesk(" in dash_ and "a.daily" in dash_ and "prefers-reduced-motion" in dash_ and "nm-fold" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
     # !goal: a red check goes back to the agent as its next prompt, the same
