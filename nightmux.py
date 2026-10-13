@@ -4777,7 +4777,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if tok_at:
             return (f"auto /compact when a turn carries {tok_at:,} tokens\n"
                     "counted from the transcript, so Claude Code sessions only\n"
-                    "new Claude sessions also compact mid-turn there "
+                    "new Claude sessions also compact mid-turn there\n" +
                     (f"idle {cfg.get('park_compact', PARK_DEFAULT)}m: compacted too (!autocompact park)"
                      if cfg.get("park_compact", PARK_DEFAULT) else "idle: !autocompact park 45m"))
         return (f"auto /compact at {at}% of the context window" if at else
@@ -18261,6 +18261,9 @@ def selfcheck():
         autocompact({"autocompact": "200k", "park_compact": None}, {"s": {"mode": "idle",
                      "ctx_tok": 110000, "changed": time.time() - 50 * 60}}, "1", "s")  # off
     assert typed == ["/compact", "/compact"], typed
+    with stubbed(save_cfg=lambda c: None, has_session=lambda n: True):
+        ac_ = handle({"topics": {"1": "s"}, "autocompact": "200k"}, {}, threading.Lock(), "1", "!autocompact")
+    assert "200,000 tokens" in ac_ and "idle 45m" in ac_, ac_
     # A non-snapshot json in the state dir must not stop prune (and the watcher).
     with tempfile.TemporaryDirectory() as td_:
         with open(os.path.join(td_, "paired_tokens.json"), "w") as f_:
