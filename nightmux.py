@@ -1839,6 +1839,15 @@ def budget_tick(cfg, state, topic, sess):
              f"({_k(used)} of {_k(cap)})", mode="plain")
 
 
+def budget_line(cfg, topic):
+    """"1.2M of 5M today", or None without a budget — what the companion may still spend."""
+    b = (cfg.get("budgets") or {}).get(str(topic))
+    if not b:
+        return None
+    used = budget_used(cfg, topic, budget_window(cfg, b["per"])[0])
+    return f"{_k(used)} of {_k(b['tokens'])} this {b['per']}"
+
+
 def budget_cmd(cfg, state, topic, sess, arg):
     bs = cfg.setdefault("budgets", {})
     words = arg.lower().split()
@@ -4156,6 +4165,8 @@ HELP = [
         "!center [off] = this topic watches every session · !board = all at a glance",
         "!companion [agent] = a persona over every project: keeps its own memory, hands "
         "work to role agents, acts alone only where a !budget is set",
+        "!companion night [01:00] [07:30] | night off = rounds every 2h through the night, "
+        "a morning summary at the end",
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
@@ -8258,6 +8269,9 @@ NM_TOOLS = [
 ]
 
 
+_nm_seen = {}     # topic -> last chat id this MCP process returned
+
+
 def nm_call(name, a, base=None, companion=False):
     base = base or f"http://127.0.0.1:{load_cfg().get('webhook_port') or 9090}"
     t = urllib.parse.quote(str(a.get("topic", "")), safe="")
@@ -8271,15 +8285,25 @@ def nm_call(name, a, base=None, companion=False):
                          f"{r.get('mode')}" + (f" · {r['queued']} queued" if r.get("queued") else "")
                          + (f" · {r.get('server')}" if r.get("server") else "")
                          + (f" · {r['dir']}" if r.get("dir") else "")
-                         + (" · budget" if r.get("budget") else "")
+                         + (f" · budget {r['budget']}" if r.get("budget") else "")
                          for r in rows) or "no topics"
     elif name == "read_terminal":
-        n = max(1, min(int(a.get("lines") or 120), 2000))
+        n = max(1, min(int(a.get("lines") or (40 if companion else 120)), 2000))
         d = get(f"/api/term/{t}?lines={max(n, 50)}")
         text = d.get("error") or "\n".join(d.get("lines", [])[-n:])
     elif name == "read_chat":
-        d = get(f"/api/chat/{t}?after={int(a.get('after') or 0)}")
-        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in d.get("items", [])) \
+        # The companion reads every project every round: by default it gets only
+        # what it has not seen, the last 15 messages at most, each cut at 1500
+        # characters — a night of full transcripts is what would fill its context.
+        key = str(a.get("topic", ""))
+        after = int(a.get("after") or (_nm_seen.get(key, 0) if companion else 0))
+        d = get(f"/api/chat/{t}?after={after}")
+        items = d.get("items", [])
+        if companion:
+            if items:
+                _nm_seen[key] = max(m["id"] for m in items)
+            items = [dict(m, text=str(m.get("text"))[:1500]) for m in items[-15:]]
+        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in items) \
             or d.get("error") or "nothing new"
     elif name == "send_prompt":
         txt = str(a.get("text") or "").strip()
@@ -8287,6 +8311,7 @@ def nm_call(name, a, base=None, companion=False):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
         if companion or a.get("role"):
             txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
+            companion_log(a, txt)
         req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
                                      headers={"X-Nightmux": "1"})
         urllib.request.urlopen(req, timeout=10).close()
@@ -8330,18 +8355,41 @@ COMPANION_SEED = {
                             "asks from the code, docs or web; answer in under 15 lines with "
                             "sources.\n"),
 }
-COMPANION_BRIEF = (
-    "You are the owner's companion, above the project agents. Read PERSONA.md and MEMORY.md "
-    "in this folder now and keep to them: PERSONA.md is how you talk and how much you do "
-    "without asking. The nightmux MCP tools show every project (list_topics, read_chat, "
-    "read_terminal) and hand one work (send_prompt). Read a project's own notes, "
-    "<dir>/.nightmux/memory.md, before you direct it. Give each task a role (send_prompt "
-    "role=builder|reviewer|tester|researcher, files in roles/ — add one when none fits), so "
-    "the right kind of agent does it in whichever project needs it. send_prompt works only "
-    "in projects with a !budget: that is your limit when you act alone. After each piece of "
-    "work, rewrite MEMORY.md with what is worth knowing next time — the owner's preferences, "
-    "where each project stands, what worked — and never secrets, tokens or personal data. "
-    "Reply \"ready\" once you have read both files.")
+COMPANION_GUIDE = (
+    "# Companion\n\n"
+    "You are the owner's companion, above the project agents. PERSONA.md is how you talk "
+    "and how much you do without asking; MEMORY.md is what you have learned. Keep to both.\n\n"
+    "- The nightmux MCP tools show every project (list_topics: agent, state, folder, budget "
+    "spent) and hand one work (send_prompt). read_chat returns only what you have not seen.\n"
+    "- Read a project's own notes, <dir>/.nightmux/memory.md, before you direct it.\n"
+    "- Give each task a role (send_prompt role=builder|reviewer|tester|researcher; files in "
+    "roles/, add one when none fits), so the right kind of agent does it in whichever "
+    "project needs it. Build with one role, check with another.\n"
+    "- send_prompt works only in projects with a !budget: that is your limit when you act "
+    "alone. actions.log here records every prompt you sent — report from it, not from memory.\n"
+    "- Keep reads small: list_topics first, then read_chat only where something changed; "
+    "read_terminal only when the chat does not explain a state.\n"
+    "- After each piece of work, rewrite MEMORY.md (under 150 lines) with what is worth "
+    "knowing next time: the owner's preferences, where each project stands, what worked, "
+    "what failed. Never secrets, tokens or personal data.\n")
+# Read on every conversation start and kept through compaction: Claude Code
+# imports the files from CLAUDE.md, the others are told to read them.
+COMPANION_HOOKS = {
+    "CLAUDE.md": COMPANION_GUIDE + "\n@PERSONA.md\n@MEMORY.md\n",
+    "AGENTS.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+    "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+}
+COMPANION_ROUND = (
+    "Night round. list_topics, then for each project with a budget: read_chat for what is "
+    "new and decide, by your risk level, whether there is clear work — a question an agent "
+    "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
+    "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
+    "wait for results, the next round reads them. Review what the last round's work "
+    "produced before handing out more in that project. Then update MEMORY.md and stop.")
+COMPANION_MORNING = (
+    "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
+    "out overnight and what came of it (actions.log is the record), budget spent per "
+    "project, what needs the owner's decision, and what you would do next. Nothing else.")
 
 
 def companion_prompt(cfg, topic, text, role=None, companion=True):
@@ -8349,8 +8397,11 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
 
     The companion may only send where a !budget caps the spend — that cap is
     what "acts on its own within budget" means, enforced here and not in its
-    prompt. A role name is a file name, so nothing outside roles/ is read.
+    prompt. Never to its own topic: that is a loop that bills itself. A role
+    name is a file name, so nothing outside roles/ is read.
     """
+    if companion and topic == str((cfg.get("companion") or {}).get("topic")):
+        raise ValueError("that is your own topic — send work to a project")
     if companion and topic not in (cfg.get("budgets") or {}):
         raise ValueError(f"topic {topic} has no !budget — you act alone only within one; "
                          "ask the owner to set it, or to send this themselves")
@@ -8366,10 +8417,56 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
     return f"[role: {role}] {brief}\n\nTask: {text}"
 
 
+def companion_log(a, text):
+    """One line per prompt sent: the morning summary's record, and the owner's audit."""
+    line = (f"{time.strftime('%Y-%m-%d %H:%M')} topic={a.get('topic')} role={a.get('role') or '-'} "
+            f"{text.rsplit('Task: ', 1)[-1].splitlines()[0][:160] if text.strip() else ''}\n")
+    try:
+        with open(os.path.join(COMPANION_DIR, "actions.log"), "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def companion_night(cfg, state, arg):
+    """Rounds every 2h from the night time until the morning, then a summary —
+    plain scheduled prompts on the companion's own queue, so they wait out
+    usage limits and survive restarts like any !every.
+
+    # ponytail: fixed 2h spacing; make it a setting if one round is too few or too many.
+    """
+    sess = (cfg.get("companion") or {}).get("session")
+    if not sess:
+        return "start the companion first: !companion"
+    st = state.setdefault(sess, {})
+    keep = [j for j in st.get("sched") or [] if not j.get("companion")]
+    words = arg.split()[1:]
+    if words == ["off"]:
+        st["sched"] = keep
+        save_queue(state)
+        return "🌙 night rounds and morning summary off"
+    start, end = (words + ["01:00", "07:30"][len(words):])[:2]
+    a, b = at_epoch(cfg, start), at_epoch(cfg, end)
+    if a is None or b is None or start.startswith("+") or end.startswith("+"):
+        return "usage: !companion night [01:00] [07:30] | night off"
+    while b <= a:
+        b += 86400
+    rounds = list(range(int(a), int(b) - 1800, 2 * 3600))
+    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True}
+                          for t in rounds] + [
+        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True}]
+    save_queue(state)
+    return (f"🌙 rounds at {', '.join(clock(cfg, t) for t in rounds)} · ☀️ summary at "
+            f"{clock(cfg, b)}, each night · !companion night off to stop")
+
+
 def companion_cmd(cfg, state, lock, topic, arg):
-    key = (arg.split() or [default_agent(cfg)])[0]
-    if key not in agents(cfg):
-        return f"usage: !companion [{'|'.join(agents(cfg))}]"
+    if arg.split()[:1] == ["night"]:
+        return companion_night(cfg, state, arg)
+    key, _, flags = arg.partition(" ")
+    if key and key not in agents(cfg):
+        return f"usage: !companion [{'|'.join(agents(cfg))}] [flags] · !companion night [01:00] [07:30]"
+    key = key or default_agent(cfg)
     os.makedirs(os.path.join(COMPANION_DIR, "roles"), exist_ok=True)
     os.chmod(COMPANION_DIR, 0o700)              # its memory is about the owner
     for rel, text in COMPANION_SEED.items():
@@ -8377,6 +8474,9 @@ def companion_cmd(cfg, state, lock, topic, arg):
         if not os.path.exists(path):            # the owner's edits are theirs
             with open(path, "w") as f:
                 f.write(text)
+    for rel, text in COMPANION_HOOKS.items():   # nightmux's own: refreshed every start
+        with open(os.path.join(COMPANION_DIR, rel), "w") as f:
+            f.write(text)
     server = [sys.executable, os.path.abspath(__file__), "--mcp", "--companion"]
     argv = mcp_argv(key, "add", "nightmux", server)
     if not argv:
@@ -8392,13 +8492,16 @@ def companion_cmd(cfg, state, lock, topic, arg):
         return f"could not give {key} the nightmux tools: {e}"
     if p.returncode:
         return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
-    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR}", key)
+    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR} {flags}".strip(), key)
     if not out.startswith("started"):
         return out
-    state.setdefault("companion", {}).setdefault("queue", []).append(COMPANION_BRIEF)
+    with lock:
+        cfg["companion"] = {"topic": str(topic), "session": "companion"}
+        save_cfg(cfg)
     return (out + f"\n🧭 your companion lives here. Edit {COMPANION_DIR}/PERSONA.md for its "
             "tone and risk, roles/ for the kinds of agent it hands work to. It acts alone only "
-            "in topics with a !budget.")
+            "in topics with a !budget · !companion night [01:00] [07:30] for night rounds and "
+            "a morning summary.")
 
 
 # ---------- !errors: production errors become fix prompts ----------
@@ -8930,7 +9033,7 @@ def topics_status(cfg, state):
             "held_until": held if held > now else None,
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
             "dir": (cfg.get("dirs") or {}).get(topic),
-            "budget": str(topic) in (cfg.get("budgets") or {}),
+            "budget": budget_line(cfg, topic),
         })
     return out
 
@@ -17090,7 +17193,8 @@ def selfcheck():
             out = companion_cmd({"agents": {}}, st_, threading.Lock(), "7", "claude")
             assert out.startswith("started claude 'companion'"), out
             assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
-            assert st_["companion"]["queue"] == [COMPANION_BRIEF]
+            with open(os.path.join(cd_, "CLAUDE.md")) as f:
+                assert "@PERSONA.md" in f.read()       # persona survives compaction
             assert oct(os.stat(cd_).st_mode & 0o777) == "0o700"
             with open(os.path.join(cd_, "PERSONA.md"), "w") as f:
                 f.write("mine")
@@ -17098,6 +17202,19 @@ def selfcheck():
             with open(os.path.join(cd_, "PERSONA.md")) as f:
                 assert f.read() == "mine"            # never overwrites the owner's edits
             assert "usage" in companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "nope")
+            # night: 2h rounds from the night time to the morning, then the summary;
+            # off drops only the companion's jobs.
+            cfgn = {"companion": {"topic": "7", "session": "companion"}, "tz_offset": 0}
+            stn = {"companion": {"sched": [{"at": 1, "every": 60, "text": "mine"}]}}
+            with stubbed(save_queue=lambda s: None):
+                out = companion_night(cfgn, stn, "night 01:00 07:30")
+                jobs = stn["companion"]["sched"]
+                assert [time.strftime("%H:%M", time.gmtime(j["at"])) for j in jobs[1:]] == \
+                    ["01:00", "03:00", "05:00", "07:30"], out
+                assert jobs[-1]["text"] == COMPANION_MORNING and jobs[0]["text"] == "mine"
+                companion_night(cfgn, stn, "night off")
+                assert stn["companion"]["sched"] == [{"at": 1, "every": 60, "text": "mine"}]
+                assert "start the companion" in companion_night({}, {}, "night")
             cfg_ = {"budgets": {"5": {"tokens": 1000, "per": "day"}}}
             for t_ in ("6", ""):
                 try:
@@ -17106,6 +17223,37 @@ def selfcheck():
                 except ValueError as e:
                     assert "!budget" in str(e)
             assert companion_prompt(cfg_, "6", "x", companion=False) == "x"
+            cfg_["companion"] = {"topic": "5"}
+            try:
+                companion_prompt(cfg_, "5", "x")
+                assert False, "sent to itself"
+            except ValueError as e:
+                assert "own topic" in str(e)
+            cfg_.pop("companion")
+            # read_chat in companion mode: only unseen messages, at most 15, clipped.
+            got = []
+            msgs = [{"id": i, "who": "agent", "text": "y" * 3000} for i in range(1, 21)]
+
+            def fake_open(url, timeout=10):
+                got.append(url)
+                after = int(url.rsplit("after=", 1)[1])
+                return io.BytesIO(json.dumps({"items": [m for m in msgs if m["id"] > after]}).encode())
+            fake_ul = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open), "Request": urllib.request.Request})})
+            with stubbed(urllib=fake_ul):
+                _nm_seen.clear()
+                text = nm_call("read_chat", {"topic": "5"}, base="http://x", companion=True)[0]["text"]
+                assert text.count("agent:") == 15 and "#20 " in text and len(text) < 15 * 1600
+                assert nm_call("read_chat", {"topic": "5"}, "http://x", True)[0]["text"] == "nothing new"
+                assert got[-1].endswith("after=20")
+                assert nm_call("read_chat", {"topic": "5"}, "http://x")[0]["text"].count("agent:") == 20
+            with stubbed(budget_used=lambda c, t, s: 1_200_000):
+                assert budget_line({"budgets": {"5": {"tokens": 5_000_000, "per": "day"}}}, "5") \
+                    == f"{_k(1_200_000)} of {_k(5_000_000)} this day"
+                assert budget_line({}, "5") is None
+            companion_log({"topic": "5", "role": "tester"}, "[role: tester] brief\n\nTask: add tests\nmore")
+            with open(os.path.join(cd_, "actions.log")) as f:
+                assert f.read().endswith("topic=5 role=tester add tests\n")
             out = companion_prompt(cfg_, "5", "fix it", "reviewer")
             assert out.startswith("[role: reviewer] You are the reviewer") and out.endswith("Task: fix it")
             for bad in ("../PERSONA", "nope"):

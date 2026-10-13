@@ -61,18 +61,49 @@ project, keeps its own memory, and hands work to agents in role.
   instructions. Separate sessions per role cost a full context each. This
   approach adds none until it is shown to be needed.
 
+## Night rounds and the morning summary
+
+`!companion night [01:00] [07:30]` schedules work on the companion's own queue
+(`!sched` lists it), so it waits out usage limits and survives restarts:
+
+- **Rounds every 2h from 01:00.** It runs `list_topics`, reads only what changed,
+  and hands clear work to budgeted projects with a role. It doesn't wait for
+  results: the next round reads them and reviews before handing out more.
+- **The 07:30 summary** covers what it handed out and what came of it, budget
+  spent per project, decisions waiting on you, and what it would do next. It is
+  built from `actions.log`, the log of every prompt it sent, not from its own
+  recollection.
+
+`!companion night off` stops it.
+
+## Cost: what keeps it cheap
+
+The companion reads every project every round, so its context, not its
+output, is the bill:
+
+- **Persona and memory load through `CLAUDE.md` imports** (`AGENTS.md`/`GEMINI.md`
+  for other CLIs). They load at every conversation start and after every
+  compaction, with no read turn and no persona drift after `/compact`.
+- **`read_chat` keeps a cursor per project.** It returns only messages not yet
+  seen: at most the last 15, each cut at 1500 characters. `read_terminal`
+  defaults to 40 lines.
+- **`list_topics` shows the budget spent** (`1.2M of 5M this day`), so one call
+  answers "where can I still act" without reading anything else.
+- **It can't prompt its own topic**, which would be a loop that bills itself.
+- **A cheaper model is one flag away:** `!companion claude --model sonnet`.
+  Routing and summaries rarely need the top tier, and the project agents still
+  do the heavy work on their own models.
+
 ## Phases
 
-1. **Done in this PR:**
-   - `!companion`, seeded persona, memory and roles;
-   - the budget-gated `--mcp --companion`;
-   - `role=` on `send_prompt`;
-   - dir and budget shown in `list_topics`.
+1. **Done:**
+   - `!companion`, budget-gated tools, roles, project dir and budget in `list_topics`;
+   - night rounds and the morning summary, `actions.log`, read cursors,
+     persona via `CLAUDE.md`.
 2. **Next:**
-   - **Night loop:** a scheduled `!every` nudge to the companion ("check every
-     project, act within budget, report"), plus a morning summary.
-   - **Per-project personas:** an optional `PERSONA.md` override per project.
-3. **Later, once phase 2 shows a need:**
-   - dedicated role sessions (a standing reviewer on a branch worktree);
-   - per-role models (reviewer on opus, tester on haiku) via the model ladder;
-   - companion memory search once MEMORY.md outgrows 150 lines.
+   - per-project persona overrides;
+   - the morning summary as a voice note (reuse `!briefing voice`).
+3. **Later, once a need shows:**
+   - dedicated role sessions;
+   - per-role models via the model ladder;
+   - memory search once MEMORY.md outgrows 150 lines.
