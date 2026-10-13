@@ -987,6 +987,8 @@ def tail_transcript(st, path, ladder=False):
                 cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
                 if ladder and turn and cheap > 0:
                     sav_add("model_tokens", round(turn * cheap))
+                if u and rec.get("requestId") != st.get("call_rid"):   # one record per block
+                    st["call_rid"], st["calls"] = rec.get("requestId"), st.get("calls", 0) + 1
                 if u:
                     sav_ctx(st, u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                             + u.get("cache_read_input_tokens", 0))
@@ -1565,6 +1567,13 @@ def warn_ctx(cfg, st, topic, sess):
     """
     if agentless(sess):
         return
+    calls = st.get("calls") or 0
+    if calls >= CALLS_WARN and not st.get("calls_warned"):
+        # Every call re-reads the whole context; the 97th percentile here is ~70.
+        st["calls_warned"] = True
+        send(cfg, topic, f"🔁 {sess}: {calls} model calls on one prompt, each re-reading "
+             f"~{_k(st.get('ctx_tok') or 0)} tokens. If it is going in circles, esc stops it.",
+             mode="plain", buttons=kb([[("esc", "!esc")]]))
     if agent_key(cfg, topic, sess) != "claude":
         return
         
@@ -1714,6 +1723,9 @@ def spend_cap(cfg):
 
 
 AUTOCOMPACT_DEFAULT = "200k"   # on unless set: a 300k turn costs ~6x a 50k one
+ROUTINE_COMPACT = 120000       # routine work compacts here, under a token autocompact...
+HEAVY_HOLD = 2 * 3600          # ...unless a heavy task was asked for this recently
+CALLS_WARN = 80                # model calls on one prompt: the top 3% measured on this fleet
 
 
 def compact_at(cfg):
@@ -2019,6 +2031,49 @@ def grep_transcripts(needle, days=7, limit=25):
     return head + "\n" + "\n".join(hits)
 
 
+def agy_ctx(cwd, home=None):
+    """Tokens agy's current conversation in `cwd` carries per call: input plus cache
+    read of its last planner call; 0 right after its own CHECKPOINT (agy's
+    compaction), so a /compact that took re-arms autocompact. None when unknown."""
+    import sqlite3
+    root = os.path.join(home or os.path.expanduser("~"), ".gemini", "antigravity-cli")
+    db = os.path.join(root, "conversation_summaries.db")
+    if not cwd or not os.path.exists(db):
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT conversation_id FROM conversation_summaries WHERE "
+                              "workspace_uris LIKE ? AND nesting_depth = 0 ORDER BY "
+                              "last_modified_time DESC LIMIT 1",
+                              ('%"file://' + urllib.parse.quote(cwd.rstrip("/")) + '"%',)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    tf = os.path.join(root, "brain", row[0], ".system_generated", "logs", "transcript.jsonl")
+    try:
+        with open(tf, "rb") as f:
+            f.seek(max(0, os.path.getsize(tf) - 262144))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if '"CHECKPOINT"' in line:
+            return 0
+        if '"PLANNER_RESPONSE"' in line:
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            n = (j.get("input_tokens") or 0) + (j.get("cache_read_tokens") or 0)
+            if n:
+                return n
+    return None
+
+
 def autocompact(cfg, state, topic, sess):
     """Compact a session before carrying its context gets expensive.
 
@@ -2031,6 +2086,15 @@ def autocompact(cfg, state, topic, sess):
     """
     at, tok_at = compact_at(cfg)
     st = state.get(sess) or {}
+    if agent_key(cfg, topic, sess) == "agy" and time.time() - st.get("agy_ctx_at", 0) > 30:
+        st["agy_ctx_at"] = time.time()          # agy has no status line: read its log
+        got = agy_ctx(sess_cwd(sess))
+        if got is not None:
+            st["ctx_tok"] = got
+    # Tiered: a session on routine work compacts at ROUTINE_COMPACT; one given a
+    # heavy task in the last two hours keeps the configured, roomier limit.
+    if tok_at and time.time() - st.get("heavy_at", 0) > HEAVY_HOLD:
+        tok_at = min(tok_at, ROUTINE_COMPACT)
     pct = (st.get("snap") or {}).get("ctx_pct")
     tok = st.get("ctx_tok")
     if tok_at:
@@ -3074,6 +3138,9 @@ def remember(state, sess, text):
     st["last"], st["last_at"] = text, time.time()
     st["ran"] = False    # no turn has started for it yet; flush_new sets this
     st["changed"] = time.time()
+    st["calls"], st["calls_warned"] = 0, False     # model calls on this prompt
+    if task_class(text) == "heavy":                # keeps the roomier autocompact
+        st["heavy_at"] = time.time()
 
 
 # Any CLI that runs in a terminal works here: nightmux types into tmux and reads the
@@ -5828,7 +5895,7 @@ LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
-FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new"}
+FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new", "agy": "/clear"}
 FRESH_MIN = 60000           # a thread this small is cheap to keep
 _lint_hold = {}   # topic -> {"text", "better"?}
 _lint_pass = set()
@@ -10108,7 +10175,7 @@ def _chat_bucket(stats, agent):
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
         "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
-        "projects": {}, "at": {}})
+        "projects": {}, "at": {}, "days": {}})
 
 
 def _chat_when(b, ts, cwd):
@@ -10139,8 +10206,11 @@ def _chat_prompt(b, text, ts=None, cwd=None):
         b["nudge_text"][t] = b["nudge_text"].get(t, 0) + 1
 
 
-def _chat_call(b, model, inp, cread, cwrite, out, think=0):
+def _chat_call(b, model, inp, cread, cwrite, out, think=0, day=None):
     ctx = inp + cread + cwrite
+    if day:      # [context carried, calls] per UTC day: is the average falling?
+        d = b["days"].setdefault(day, [0, 0])
+        d[0], d[1] = d[0] + ctx, d[1] + 1
     b["requests"] += 1
     b["input"] += inp
     b["cache_read"] += cread
@@ -10189,7 +10259,8 @@ def _scan_claude(stats, home, since):
                                    u.get("cache_read_input_tokens") or 0,
                                    u.get("cache_creation_input_tokens") or 0,
                                    u.get("output_tokens") or 0,
-                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)
+                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
+                                   d.get("timestamp", "")[:10])
                     if not counted:
                         counted, b["sessions"] = True, b["sessions"] + 1
 
@@ -10297,7 +10368,8 @@ def _scan_agy(stats, home, since):
                                         i = js.get("input_tokens") or 0
                                         cr = js.get("cache_read_tokens") or 0
                                         o = js.get("output_tokens") or 0
-                                        _chat_call(b, "agy", i, cr, 0, o, 0)
+                                        _chat_call(b, "agy", i, cr, 0, o, 0,
+                                                   (js.get("created_at") or "")[:10])
                                 except: pass
                             elif "USER_INPUT" in line:
                                 try:
@@ -10438,6 +10510,7 @@ def analyze_chats(days=30, home=None):
             "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
             "errors": s["errors"],
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+            "daily": dict(sorted(s["days"].items())),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
            "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips],
@@ -10489,7 +10562,7 @@ def merge_analysis(parts):
         for a, s in (r.get("agents") or {}).items():
             m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
                                    "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
-                                   "nudges": {}, "chars": 0, "nud": 0})
+                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}})
             n = s.get("prompts") or 0
             for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
                 m[k] += s.get(k) or 0
@@ -10498,6 +10571,9 @@ def merge_analysis(parts):
                              ("nudges", dict(s.get("nudges") or []))):
                 for k, v in (src or {}).items():
                     m[key][k] = m[key].get(k, 0) + (v or 0)
+            for k, (c, q) in (s.get("daily") or {}).items():
+                d = m["daily"].setdefault(k, [0, 0])
+                d[0], d[1] = d[0] + c, d[1] + q
             m["chars"] += (s.get("avg_prompt") or 0) * n
             m["nud"] += (s.get("nudge_pct") or 0) * n
     for a, m in acc.items():
@@ -10505,6 +10581,7 @@ def merge_analysis(parts):
         ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
         out["agents"][a] = dict(
             {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
+            daily=dict(sorted(m["daily"].items())),
             cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
             avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
             avg_prompt=round(m["chars"] / n) if n else None,
@@ -15073,7 +15150,7 @@ def selfcheck():
     st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 22})
     for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
         st.pop(k, None)
-    st["ctx_tok"] = 90000
+    st["ctx_tok"], st["heavy_at"] = 90000, time.time()   # a heavy task: the configured cap
     autocompact(tokc, state, "1", "s")
     assert typed == ["/compact"], "fired under the token cap"   # 90k < 150k
     st["ctx_tok"] = 160000                       # over, though only 22% of window
@@ -15083,6 +15160,17 @@ def selfcheck():
     st["ctx_tok"] = 10000                        # compacted: re-arm
     autocompact(tokc, state, "1", "s")
     assert "compacted" not in st and typed == ["/compact"] * 2
+    # Routine work (no heavy task for two hours) compacts sooner: 130k ≥ 120k.
+    st["heavy_at"] = time.time() - HEAVY_HOLD - 1
+    st["ctx_tok"] = 130000
+    autocompact(tokc, state, "1", "s")
+    assert typed == ["/compact"] * 3 and "≥ 120,000" in sent[-1], sent[-1]
+    for k in ("compacted", "compact_at", "compact_tries", "heavy_at"):
+        st.pop(k, None)
+    remember(state, "s", "refactor the whole auth module and migrate every caller")
+    assert time.time() - st["heavy_at"] < 5 and st["calls"] == 0
+    st["last"] = ""
+    st.pop("heavy_at")
     st.pop("ctx_tok"), typed.clear()
     typed[:] = ["/compact"]
     st.pop("snap"), typed.clear()
@@ -17893,7 +17981,7 @@ def selfcheck():
                                  "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
                                                            "output": 5, "thinking": 0},
                                  "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
-                                 "models": {"opus": 4}}}}
+                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]}}}}
     a2_ = json.loads(json.dumps(a1_))
     a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
                                    tokens={"input": 90, "cache_read": 10, "cache_write": 0,
@@ -17909,6 +17997,7 @@ def selfcheck():
         m_ = fleet_analysis(fcfg_, 30)
         c_ = m_["agents"]["claude"]
         assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
+        assert c_["daily"] == {"2026-10-12": [800, 8]}, c_["daily"]
         assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
         assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
         assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
@@ -17919,6 +18008,33 @@ def selfcheck():
         # !coach once crashed on an undefined name before drawing anything
         with stubbed(threading=type("T", (), {"Thread": lambda *a, **k: type("X", (), {"start": lambda s: None})()})):
             assert coach_cmd(fcfg_, "1").startswith("🎯 drawing")
+    # A prompt that keeps calling the model: said once, with an esc button.
+    sent_c = []
+    with stubbed(send=lambda c, t, x, **k: sent_c.append(x), agent_key=lambda c, t, s: "agy"):
+        stc = {"calls": CALLS_WARN, "ctx_tok": 150000}
+        warn_ctx({}, stc, "1", "s")
+        warn_ctx({}, stc, "1", "s")
+        assert len(sent_c) == 1 and f"{CALLS_WARN} model calls" in sent_c[0] and "150k" in sent_c[0], sent_c
+    # agy: the context of its newest conversation in this folder, 0 after its CHECKPOINT
+    import sqlite3
+    with tempfile.TemporaryDirectory() as ah_:
+        root_ = os.path.join(ah_, ".gemini", "antigravity-cli")
+        os.makedirs(os.path.join(root_, "brain", "c2", ".system_generated", "logs"))
+        con_ = sqlite3.connect(os.path.join(root_, "conversation_summaries.db"))
+        con_.execute("CREATE TABLE conversation_summaries (conversation_id text, workspace_uris text, "
+                     "nesting_depth integer, last_modified_time datetime)")
+        con_.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?)",
+                         [("c1", '["file:///w/app"]', 0, "2026-10-01"), ("c2", '["file:///w/app"]', 0, "2026-10-02"),
+                          ("c3", '["file:///w/app2"]', 0, "2026-10-03"), ("c4", '["file:///w/app"]', 1, "2026-10-04")])
+        con_.commit()
+        con_.close()
+        tf_ = os.path.join(root_, "brain", "c2", ".system_generated", "logs", "transcript.jsonl")
+        with open(tf_, "w") as f:
+            f.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 3000, "cache_read_tokens": 140000}) + "\n")
+        assert agy_ctx("/w/app", home=ah_) == 143000 and agy_ctx("/w/none", home=ah_) is None
+        with open(tf_, "a") as f:
+            f.write(json.dumps({"type": "CHECKPOINT"}) + "\n")
+        assert agy_ctx("/w/app/", home=ah_) == 0
     print("selfcheck ok")
 
 
