@@ -9466,6 +9466,8 @@ def topics_status(cfg, state):
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
             "dir": (cfg.get("dirs") or {}).get(topic),
             "budget": budget_line(cfg, topic),
+            "name": (cfg.get("topic_names") or {}).get(topic),
+            "ctx": st.get("ctx_tok"), "calls": st.get("calls") or 0,
         })
     return out
 
@@ -11284,6 +11286,23 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 #setup .ok { color: var(--ok); font-size: 13px; margin: 14px 0 0; height: auto; }
 #setup li { margin-bottom: 6px; } #setup li span { color: var(--mut); font-size: 12px; display: block; } .sname { font-size: 12px; color: var(--mut); margin-bottom: 6px; }
 .sname:empty { display: none; }
+/* live floor: one pixel desk per agent, animated by what it is doing */
+.floor { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 46%), 1fr)); }
+.desk { display: block; text-decoration: none; color: inherit; background: linear-gradient(180deg, var(--card2), var(--card));
+        border: 1px solid var(--line); border-radius: 14px; padding: 8px 8px 9px; min-width: 0; position: relative;
+        transition: border-color .3s, transform .15s; -webkit-tap-highlight-color: transparent; }
+.desk:active { transform: scale(.97); }
+.desk canvas { width: 100%; aspect-ratio: 48 / 36; image-rendering: pixelated; image-rendering: crisp-edges;
+               border-radius: 9px; display: block; background: #141a2b; }
+.desk.waiting { border-color: var(--ask); box-shadow: 0 0 0 3px #f0883e2e; }
+.desk.busy { border-color: #e3b34155; }
+.desk .nm { font-weight: 650; font-size: 13px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk .st { font-size: 11px; color: var(--mut); }
+.desk .st b { font-weight: 600; display: block; } .desk .srvtag { color: var(--dim); display: block; min-height: 15px; }
+.cells { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin-top: 6px; height: 6px; }
+.cells i { background: #1d2333; } .cells i.g { background: var(--ok); } .cells i.y { background: var(--busy); }
+.cells i.r { background: var(--bad); }
+.pixchart { width: 100%; height: 120px; image-rendering: pixelated; display: block; }
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
@@ -11291,6 +11310,11 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div>
+<h2>live agents</h2>
+<div class="floor" id="floor"><p class="empty">loading…</p></div>
+<h2>context per model call <span class="sub" id="ctxnote"></span></h2>
+<div class="card"><canvas class="pixchart" id="ctxchart" width="140" height="40"></canvas>
+<div class="meta" id="ctxlegend">lower is cheaper: every call re-reads the whole context</div></div>
 <h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
 <div id="newp" class="card"><form id="newf">
   <div class="f">
@@ -11328,7 +11352,7 @@ sudo tailscale up</pre></li>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
   <button id="run">analyze</button></h2>
-<div id="analysis"><p class="empty">reads every agent's transcripts on this machine — press analyze</p></div>
+<div id="analysis"><p class="empty">reads every agent's transcripts on every server — press analyze</p></div>
 </main>
 <script>
 // Cards are built once and updated in place: the old page re-rendered every
@@ -11582,11 +11606,107 @@ async function send(ev, topic, card) {
   tick();
 }
 
+
+// ---- live floor ----------------------------------------------------------
+// Each agent sits at a pixel desk drawn on a 48x36 canvas and scaled up crisp:
+// typing when busy, a bouncing "!" when it needs you, asleep when idle, dark
+// when stopped. Paper on the desk is its queue; the cells under it its context.
+const AGC = {claude: '#d97757', codex: '#7aa2f7', opencode: '#9ece6a', agy: '#bb9af7', gemini: '#7dcfff'};
+const MODES = {busy: ['working', 'var(--busy)', 1], waiting: ['needs you', 'var(--ask)', 0],
+               limit: ['at limit', 'var(--blue)', 2], idle: ['idle', 'var(--ok)', 3]};
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let desks = [], frame = 0;
+function px(g, x, y, w, h, c) { g.fillStyle = c; g.fillRect(x, y, w, h); }
+function drawDesk(g, r, f) {
+  const m = r.mode, on = r.alive !== false && !['offline', 'gone', 'shell', '?'].includes(m) || m === 'busy';
+  const col = AGC[r.agent] || '#7dcfff', sleep = m === 'idle' || !on;
+  px(g, 0, 0, 48, 25, '#141a2b'); px(g, 0, 25, 48, 11, '#0f1320'); px(g, 0, 25, 48, 1, '#1d2440');
+  px(g, 3, 3, 13, 10, '#0b1022'); px(g, 3, 8, 13, 1, '#1d2440'); px(g, 9, 3, 1, 10, '#1d2440');
+  px(g, 12, 4, 2, 2, '#e0af68'); if ((f >> 3) % 2) px(g, 5, 5, 1, 1, '#dbe1ee'); else px(g, 7, 10, 1, 1, '#dbe1ee');
+  px(g, 9, 23, 33, 2, '#7a5a40'); px(g, 11, 25, 2, 9, '#4a3628'); px(g, 38, 25, 2, 9, '#4a3628');
+  px(g, 24, 12, 15, 10, '#2b3452'); px(g, 25, 13, 13, 8, on ? '#0a0f1c' : '#05070c'); px(g, 30, 22, 3, 1, '#2b3452');
+  if (m === 'busy') for (let i = 0; i < 4; i++) px(g, 26, 14 + i * 2, 2 + (f + i * 5) % 9, 1, i % 2 ? col : '#9aa5ce');
+  if (m === 'idle' && (f >> 2) % 2) px(g, 26, 14, 2, 1, '#3fb950');
+  if (m === 'limit') { px(g, 29, 14, 5, 1, '#7aa2f7'); px(g, 30, 15, 3, 1, '#7aa2f7'); px(g, 31, 16, 1, 2, '#7aa2f7');
+    px(g, 30, 18, 3, 1, '#7aa2f7'); px(g, 29, 19, 5, 1, '#7aa2f7'); }
+  const bob = m === 'busy' ? f % 2 : 0, hx = 13, hy = sleep ? 13 : 10 - bob;
+  px(g, hx - 3, hy + 9, 3, 13, '#2b3452');
+  px(g, hx - 1, hy + 6, 9, 9, on ? col : '#3a4158');
+  px(g, hx, hy, 7, 6, on ? '#f1c27d' : '#6d6457'); px(g, hx, hy, 7, 2, '#2b2b38'); px(g, hx, hy + 2, 1, 1, '#2b2b38');
+  if (sleep) px(g, hx + 4, hy + 3, 2, 1, '#3a2a20'); else px(g, hx + 5, hy + 3, 1, 1, '#111');
+  if (m === 'busy') { px(g, hx + 8, 21 + f % 2, 3, 1, '#f1c27d'); px(g, hx + 11, 22 - f % 2, 3, 1, '#f1c27d'); }
+  if (m === 'waiting') { const y = (f >> 1) % 2; px(g, hx + 8, y, 7, 8, '#f0883e'); px(g, hx + 9, y + 8, 2, 1, '#f0883e');
+    px(g, hx + 11, y + 1, 2, 4, '#fff'); px(g, hx + 11, y + 6, 2, 1, '#fff'); }
+  if (sleep && on) { const t = (f >> 1) % 8, zx = hx + 8 + (t >> 1), zy = 9 - t;
+    px(g, zx, zy, 3, 1, '#8b93a7'); px(g, zx + 1, zy + 1, 1, 1, '#8b93a7'); px(g, zx, zy + 2, 3, 1, '#8b93a7'); }
+  for (let i = 0; i < Math.min(r.queued || 0, 5); i++) px(g, 40, 21 - i * 2, 6, 1, i % 2 ? '#c8b98a' : '#e0d6b0');
+}
+function cells(ctx) {
+  // 10 cells over 200k: green to 60k, amber to 120k (routine autocompact), red past it
+  let out = '';
+  for (let i = 0; i < 10; i++) { const at = (i + 1) * 20000;
+    out += '<i class="' + (ctx && ctx >= at - 19999 ? (at <= 60000 ? 'g' : at <= 120000 ? 'y' : 'r') : '') + '"></i>'; }
+  return out;
+}
+function floor(rows) {
+  const box = $('floor'), order = r => (MODES[r.mode] || [0, 0, 4])[2];
+  rows = rows.slice().sort((a, b) => order(a) - order(b) || String(a.name || a.session).localeCompare(b.name || b.session));
+  if (!rows.length) { box.innerHTML = '<p class="empty">no agents yet — + new project below</p>'; desks = []; return; }
+  const key = rows.map(r => r.server + '/' + r.topic).join();
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.innerHTML = rows.map(() => '<a class="desk"><canvas width="48" height="36"></canvas><div class="nm"></div>' +
+      '<div class="st"><b></b><span class="srvtag"></span></div><div class="cells"></div></a>').join('');
+  }
+  desks = rows.map((r, i) => {
+    const el = box.children[i], md = MODES[r.mode] || [r.mode || '?', 'var(--dim)'];
+    el.className = 'desk ' + esc(r.mode); el.href = '/chat?t=' + encodeURIComponent(r.topic);
+    el.title = (r.agent || '') + (r.usage ? ' · ' + r.usage : '');
+    el.querySelector('.nm').textContent = r.name || r.session;
+    const st = el.querySelector('.st b'); st.textContent = md[0] + (r.queued ? ' · ' + r.queued + ' queued' : '');
+    st.style.color = md[1];
+    el.querySelector('.srvtag').textContent = (r.ctx ? k(r.ctx) + ' ctx' : '') + (r.server ? ' · ' + r.server : '');
+    el.querySelector('.cells').innerHTML = cells(r.ctx);
+    return {g: el.querySelector('canvas').getContext('2d'), r};
+  });
+  desks.forEach(d => drawDesk(d.g, d.r, frame));
+}
+function animate() {
+  if (!document.hidden) { frame++; desks.forEach(d => drawDesk(d.g, d.r, frame)); }
+  setTimeout(() => requestAnimationFrame(animate), 160);
+}
+if (!still) animate();
+
+async function ctxChart() {
+  // Average context per model call per day, every agent on every server: the
+  // number autocompact and fresh threads exist to push down.
+  try {
+    const r = await (await fetch('/api/analysis?days=14')).json(), by = {};
+    Object.values(r.agents || {}).forEach(a => Object.entries(a.daily || {}).forEach(([d, v]) => {
+      by[d] = by[d] || [0, 0]; by[d][0] += v[0]; by[d][1] += v[1]; }));
+    const days = Object.keys(by).sort().slice(-14), avg = days.map(d => by[d][1] ? by[d][0] / by[d][1] : 0);
+    const c = $('ctxchart'), g = c.getContext('2d'), W = c.width, H = c.height, top = Math.max(...avg, 1);
+    g.clearRect(0, 0, W, H);
+    for (let y = 8; y < H; y += 8) px(g, 0, y, W, 1, '#1a2033');
+    const bw = Math.floor(W / 14);
+    avg.forEach((v, i) => { const h = Math.max(1, Math.round(v / top * (H - 4))), x = i * bw + 1;
+      const col = v <= 60000 ? '#3fb950' : v <= 120000 ? '#e3b341' : '#f85149';
+      px(g, x, H - h, bw - 2, h, col); px(g, x, H - h, bw - 2, 1, '#ffffff66');
+      if (i === avg.length - 1) px(g, x, H - h - 3, bw - 2, 1, '#dbe1ee'); });
+    if (avg.length) {
+      const first = avg[0], last = avg[avg.length - 1], d = first ? Math.round((last - first) / first * 100) : 0;
+      $('ctxnote').textContent = k(Math.round(last)) + ' today' + (avg.length > 1 ? ' · ' + (d <= 0 ? '▼ ' : '▲ ') +
+        Math.abs(d) + '% vs ' + days[0].slice(5) : '');
+    } else $('ctxnote').textContent = 'no calls yet';
+  } catch (e) { $('ctxnote').textContent = 'not measured yet'; }
+}
+ctxChart(); setInterval(ctxChart, 600000);
+
 async function tick() {
   if (document.hidden) return;
   try {
     const [t, m] = await Promise.all([fetch('/api/topics').then(r => r.json()), fetch('/api/metrics').then(r => r.json())]);
-    topics(t); servers(m);
+    topics(t); floor(t); servers(m);
   } catch (e) { /* daemon restarting: keep what is on screen */ }
 }
 
@@ -15823,6 +15943,8 @@ def selfcheck():
     assert "terminal" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/term/5").read().decode()
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
+    # the live floor draws from /api/topics on every tick; the chart from the daily series
+    assert "floor(t)" in dash_ and "drawDesk(" in dash_ and "a.daily" in dash_ and "prefers-reduced-motion" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
     # !goal: a red check goes back to the agent as its next prompt, the same
