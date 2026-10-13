@@ -78,24 +78,42 @@ project, keeps its own memory, and hands work to agents in role.
 
 ## By day: progress and ideas
 
-`!companion watch [3h]` runs a watch round every few hours. In each round it:
+`!companion watch [3h]` runs a watch round every few hours. nightmux builds
+the progress report itself, from the chat log and git, with no model reads,
+and puts it in the round's prompt. The report covers, per project that moved:
 
-- **Calls `progress` once.** nightmux builds the report from the chat log and
-  git, not from model reads. It lists each project that moved: replies,
-  commits, last answer, budget. It flags the two things someone scanning topics
-  misses: **✋ a question nobody answered**, and **⚠ many replies with no
-  commit** (an agent going in circles). Quiet projects share one line.
-- **Posts one line per project to you:** what got done and what is stuck.
-- **Shares at most 3 ideas with `suggest`.** Each idea lands in that project's
+- **What happened:** agent answers (only real ones, not nightmux's status
+  lines), commits, the last answer, and budget spent.
+- **✋ waiting on you, and for how long:** an open menu, or a question at the
+  end of an answer nobody replied to.
+- **⚠ going in circles:** many answers and no commit.
+- **Health:** 🎯 the last `!goal` check (green, stuck, round N), 🚨 production
+  errors, and uncommitted changes (`git diff --shortstat`).
+- **The plan:** the project's own "In progress / next" lines from
+  `.nightmux/memory.md`, so ideas build on work the project already chose.
+- **How ideas landed:** sent, dropped, ignored and waiting over the last week,
+  plus what was dropped. This is its feedback on your taste.
+
+Projects with no activity are listed together on one line.
+
+**In each round it:**
+
+- **Posts one line per project that moved** to you: what got done and what is
+  stuck.
+- **Shares at most 3 ideas with `suggest`.** Each one lands in that project's
   topic with **▶ send to agent** and **✕** buttons, so you decide with one tap
-  and no budget is needed. Ideas must name a file, feature or command; generic
-  advice is out. Capped at 6 per hour, 10 pending per topic.
+  and no budget is needed.
+  - An idea names a file, feature or command and quotes the line it builds on.
+  - Limits: 6 per hour, and 3 waiting per topic.
+  - Ideas and taps are kept in `ideas.jsonl`, so the buttons survive restarts.
+  - An idea you dropped is never posted again.
 - **Answers an agent's waiting question itself** only when its memory or the
   project's notes already hold the answer, and its risk level and budget allow.
+  It can't type into an open menu: the tool says so instead of claiming "sent".
 
-A round is **skipped without a model call** while no project's chat has moved,
-so a quiet day costs nothing. Its own scheduled rounds no longer post
-"⏰ queued" pings.
+**When rounds are skipped:** a watch or night round makes no model call when
+the report shows nothing moved, or says the same as last round. The cursor is
+stored in the saved schedule, so it survives restarts.
 
 ## Cost: what keeps it cheap
 
@@ -105,6 +123,14 @@ output, is the bill:
 - **Persona and memory load through `CLAUDE.md` imports** (`AGENTS.md`/`GEMINI.md`
   for other CLIs). They load at every conversation start and after every
   compaction, with no read turn and no persona drift after `/compact`.
+- **Fresh thread per round.** Before a scheduled round, a big thread is
+  cleared (`/clear`), unless you wrote to the companion within the hour. Every
+  round otherwise re-reads all earlier ones. The persona, memory, report and
+  `actions.log` hold everything it needs.
+- **MEMORY.md holds lasting things only:** your preferences, idea outcomes,
+  and standing decisions. It is edited when something new is learned, and is
+  not rewritten every round. Project status lives in the report.
+- **No project-memory turns for the companion's own topic.**
 - **`read_chat` keeps a cursor per project.** It returns only messages not yet
   seen: at most the last 15, each cut at 1500 characters. `read_terminal`
   defaults to 40 lines.
@@ -122,7 +148,13 @@ output, is the bill:
    - night rounds and the morning summary, `actions.log`, read cursors,
      persona via `CLAUDE.md`;
    - the day watch: `progress`, `suggest` with tap-to-send, stuck and
-     going-in-circles flags, quiet-skip.
+     going-in-circles flags, quiet-skip;
+   - after the expert review:
+     - only real agent answers count;
+     - the report is built by nightmux and gated;
+     - fresh threads before rounds;
+     - the idea ledger and taste feedback;
+     - goal, error, diff and plan signals.
 2. **Next:**
    - per-project persona overrides;
    - the morning summary as a voice note (reuse `!briefing voice`).

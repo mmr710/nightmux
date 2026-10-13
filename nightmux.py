@@ -2299,21 +2299,29 @@ def due(cfg, state, topic, sess):
             keep.append(job)
             continue
         changed = True
-        if job.get("watch"):
-            # A watch round over projects where nothing moved is a turn spent
-            # learning nothing: skip it until some project's chat does.
-            mark = activity_mark(cfg)
-            if mark == job.get("mark"):
+        text = job.get("text")
+        if job.get("progress"):
+            # The companion's rounds carry the progress report in the prompt, built
+            # here: no tool round-trip, a cursor that survives restarts, and — for a
+            # gated round — no model call at all while the report says what it
+            # said last time (the wait times aside).
+            since = job.get("since") or now - (job.get("every") or 86400)
+            report = progress_report(cfg, state, since)
+            core = "\n".join(l for l in report.splitlines() if not l.startswith(("ideas, ", "  dropped: ")))
+            sig = hashlib.sha1(re.sub(r" \([^)]*\)$", "", core, flags=re.M).encode()).hexdigest()
+            if job.get("gate") and (not report.startswith("▸") or sig == job.get("sig")):
                 job["at"] = now + job["every"]
                 keep.append(job)
                 continue
-            job["mark"] = mark
+            job["since"], job["sig"] = now, sig
+            text = f"{text}\n\nProgress since {clock(cfg, since)}:\n{report}"
+            companion_fresh(cfg, state, topic, sess)
         if job.get("kind") == "digest":
             since = job.get("since", now - (job.get("every") or 86400))
             send(cfg, topic, digest_report(cfg, state, topic, sess, since), mode="plain")
             job["since"] = now
         else:
-            st.setdefault("queue", []).append(job["text"])
+            st.setdefault("queue", []).append(text)
             if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
                 fired.append(job)
         if job.get("every"):
@@ -2533,7 +2541,7 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     key = key or body
     if not body or key == st.get("asked") or notified(sess):
         return False
-    st["asked"] = key
+    st["asked"], st["asked_at"] = key, time.time()
     buttons = menu_buttons(lines, sess)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
@@ -4568,14 +4576,16 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return companion_cmd(cfg, state, lock, topic, arg)
     if cmd == "!suggest":
         verb, _, sid = arg.partition(" ")
-        prompt = (_ideas.get(str(topic)) or {}).pop(sid.strip(), None)
-        if not prompt:
-            return "that idea is gone (taken, dropped, or nightmux restarted)"
+        rec = idea_ledger().get(sid.strip()) or {}
+        if rec.get("status") != "posted" or str(rec.get("topic")) != str(topic):
+            return "that idea is already taken or dropped"
         if verb != "run":
-            return "✕ dropped"
+            idea_note(id=rec["id"], status="dropped")
+            return "✕ dropped — the companion will not suggest it again"
         if not sess:
             return "no session here to send it to"
-        return send_prompt(cfg, state, topic, sess, prompt)
+        idea_note(id=rec["id"], status="sent")
+        return send_prompt(cfg, state, topic, sess, rec["prompt"])
     if cmd == "!center":
         with lock:
             prev = cfg.get("center_topic")
@@ -8342,6 +8352,11 @@ def nm_call(name, a, base=None, companion=False):
         txt = str(a.get("text") or "").strip()
         if not txt or txt.startswith("!"):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
+        row = next((r for r in get("/api/topics") if str(r.get("topic")) == str(a.get("topic"))), None)
+        if row and row.get("mode") == "waiting":
+            # nightmux refuses text into an open menu — saying "sent" would be a lie
+            raise ValueError("a menu is open there: text would pick an option, so nightmux "
+                             "holds it. Ask the owner with suggest, or read_terminal to see it")
         if companion or a.get("role"):
             txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
             companion_log(a, txt)
@@ -8380,6 +8395,9 @@ COMPANION_DIR = os.path.expanduser("~/.nightmux-companion")
 COMPANION_SEED = {
     "PERSONA.md": (
         "# Persona\n\nname: Nox\nrisk: balanced   # cautious | balanced | bold\n\n"
+        "## Priorities\n"
+        "Rank your projects, each with this week's goal. Effort and ideas go here first.\n"
+        "1. (project) — (goal)\n\n"
         "## Tone and style\n"
         "Short and direct, plain words, no cheerleading. Say what you did, what it cost "
         "and what needs the owner. One question at a time.\n\n"
@@ -8407,8 +8425,8 @@ COMPANION_GUIDE = (
     "# Companion\n\n"
     "You are the owner's companion, above the project agents. PERSONA.md is how you talk "
     "and how much you do without asking; MEMORY.md is what you have learned. Keep to both.\n\n"
-    "- The nightmux MCP tools: progress (what moved in every project since you last looked "
-    "— start here), list_topics (agent, state, folder, budget spent), read_chat (only what "
+    "- Scheduled rounds arrive with a progress report in the prompt. The nightmux MCP "
+    "tools: progress (the same report, for when the owner asks), list_topics (agent, state, folder, budget spent), read_chat (only what "
     "you have not seen), read_terminal, send_prompt (hand work out) and suggest (post an "
     "idea the owner sends with one tap).\n"
     "- Your job is the owner's productivity: notice progress, unblock stuck agents, and "
@@ -8421,9 +8439,12 @@ COMPANION_GUIDE = (
     "alone. actions.log here records every prompt you sent — report from it, not from memory.\n"
     "- Keep reads small: progress first, then read_chat only where something changed; "
     "read_terminal only when the chat does not explain a state.\n"
-    "- After each piece of work, rewrite MEMORY.md (under 150 lines) with what is worth "
-    "knowing next time: the owner's preferences, where each project stands, what worked, "
-    "what failed. Never secrets, tokens or personal data.\n")
+    "- MEMORY.md (under 150 lines) holds what lasts: the owner's preferences, which ideas "
+    "they sent or dropped and why, standing decisions. Not project status — the report has "
+    "that, fresher. Edit it only when you learned something lasting; never rewrite it "
+    "whole. Never secrets, tokens or personal data.\n"
+    "- Your thread may be cleared before a scheduled round; everything you need is in "
+    "these files and the report.\n")
 # Read on every conversation start and kept through compaction: Claude Code
 # imports the files from CLAUDE.md, the others are told to read them.
 COMPANION_HOOKS = {
@@ -8432,38 +8453,64 @@ COMPANION_HOOKS = {
     "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
 }
 COMPANION_ROUND = (
-    "Night round. Call progress, then for each project with a budget that moved or is "
-    "waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
+    "Night round. From the progress report below, for each project with a budget that "
+    "moved or is waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
     "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
     "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
     "wait for results, the next round reads them. Review what the last round's work "
-    "produced before handing out more in that project. Then update MEMORY.md and stop.")
+    "produced before handing out more in that project. Then stop.")
 COMPANION_MORNING = (
     "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
-    "out overnight and what came of it (actions.log is the record), budget spent per "
+    "out overnight and what came of it (actions.log is the record, the report below the "
+    "result), budget spent per "
     "project, what needs the owner's decision, and what you would do next. Nothing else.")
 
 
 COMPANION_WATCH = (
-    "Watch round. Call progress: it lists only the projects that moved since your last "
-    "look. Tell the owner here, one line per project that moved: what got done, and what "
+    "Watch round. The progress report below lists the projects that moved since your "
+    "last round. Tell the owner here, one line per project that moved: what got done, and what "
     "is stuck (waiting on a question, going in circles, out of budget or usage). Then "
     "share ideas: for at most 3 projects where you see a clearly better next step, a risk, "
     "a missing test or a shortcut, call suggest with one concrete prompt the agent could "
-    "run — the owner taps to send it. Skip generic advice; an idea must name the file, "
-    "feature or command. Answer an agent's waiting question yourself with send_prompt only "
+    "run — the owner taps to send it. Skip generic advice: an idea names the file, feature "
+    "or command and quotes the line it builds on (a commit, an answer, a note); never a "
+    "file you have not seen. Put the owner's priorities in PERSONA.md first. Answer an agent's waiting question yourself with send_prompt only "
     "when MEMORY.md or the project's notes already hold the answer and your risk level "
-    "allows. If progress shows nothing worth a line, reply only \"quiet\". Update "
-    "MEMORY.md if you learned something.")
+    "allows. If nothing below is worth a line, reply only \"quiet\".")
 SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
-_ideas = {}           # topic -> {id: prompt}; in memory, a restart drops pending ideas
+IDEA_STALE = 86400    # an idea nobody tapped in a day counts as ignored
 _idea_times = []
 
 
-def activity_mark(cfg):
-    """The newest chat id in any project topic — it moves when anything there does."""
-    own = str((cfg.get("companion") or {}).get("topic"))
-    return max((log[-1]["id"] for t, log in list(_chat.items()) if t != own and log), default=0)
+def companion_fresh(cfg, state, topic, sess):
+    """Start a scheduled round from an empty thread when the old one is big.
+
+    Each round is another turn on the same conversation and re-reads all of it
+    — the bill grows every round. Nothing in it is needed: persona and memory
+    reload from CLAUDE.md/AGENTS.md, the report is in the prompt, actions.log
+    holds what was sent. Not while the owner is talking to it (an hour).
+    """
+    clear = FRESH.get(agent_key(cfg, topic, sess))
+    st = state.setdefault(sess, {})
+    owner = max((m.get("t", 0) for m in _chat.get(str(topic)) or [] if m.get("who") == "you"), default=0)
+    if clear and (st.get("ctx_tok") or 0) > FRESH_MIN and time.time() - owner > 3600 \
+            and clear not in (st.get("queue") or []):
+        st.setdefault("queue", []).append(clear)
+
+
+AGENT_REPLY = re.compile(r"✅ \S+\n")   # an agent's answer; everything else is nightmux talking
+
+
+def open_question(log):
+    """(question, asked at) when the last agent answer ends in a question nobody has
+    answered since — the stall a menu detector misses, because the pane is idle."""
+    for m in reversed(log):
+        if m.get("who") == "you":
+            return None
+        if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or ""):
+            tail = [l.strip() for l in m["text"].splitlines() if l.strip()][-1:]
+            return (tail[0], m.get("t", 0)) if tail and tail[0].endswith("?") else None
+    return None
 
 
 def progress_report(cfg, state, since):
@@ -8471,44 +8518,133 @@ def progress_report(cfg, state, since):
 
     Built here from the chat log and git rather than by the companion reading
     every chat: one call of a few hundred tokens instead of one per project.
-    Flags the two things a person scanning topics misses: a question nobody
-    answered, and an agent busy for a long while without a commit.
+    Only agent answers count as replies — nightmux's own status lines (🧠, 📥,
+    ⚙️, the companion's 💡) would otherwise read as an agent busy going nowhere.
+    Git is asked even with no chat: the log is in memory and empty after a
+    restart, and work done straight in the terminal never passes through it.
+    Flags what a person scanning topics misses: a question nobody answered —
+    a menu or a reply ending in "?" — and how long it has waited, and an agent
+    answering again and again without a commit.
     # ponytail: this machine's topics only; add peers via peer_call if they matter.
     """
     own = str((cfg.get("companion") or {}).get("topic"))
-    names = cfg.get("topic_names") or {}
+    names, now = cfg.get("topic_names") or {}, time.time()
+    since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
     moved, quiet = [], []
     for r in topics_status(cfg, state):
         t, sess = str(r["topic"]), r["session"]
         if t == own:
             continue
-        log = [m for m in _chat.get(t) or [] if m.get("t", 0) >= since]
-        replies = [m for m in log if m.get("who") == "bot"]
+        full = _chat.get(t) or []
+        log = [m for m in full if m.get("t", 0) >= since]
+        replies = [m for m in log if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or "")]
         st = state.get(sess) or {}
-        if not log and r["mode"] != "waiting":
-            quiet.append(names.get(t) or sess)
-            continue
         cwd = (cfg.get("dirs") or {}).get(t)
-        since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
         commits = [c for c in tmux_git(cwd, "log", "--oneline", f"--since={since_s}").split("\n")
                    if c.strip()] if cwd and os.path.isdir(cwd) else []
+        if r["mode"] == "waiting" and st.get("asked"):
+            asked = (st["asked"].strip().splitlines()[0], st.get("asked_at"))
+        else:
+            asked = open_question(full)
+        errs = [e for e in _err_log if str(e[1]) == t and e[0] >= since]
+        if not (log or commits or asked or errs):
+            quiet.append(names.get(t) or sess)
+            continue
         lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
                  f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
-        last = replies[-1]["text"].strip() if replies else ""
+        last = replies[-1]["text"].split("\n", 1)[1].strip() if replies else ""
         if last:
             lines.append("  last: " + last.splitlines()[0][:160])
         lines += [f"  {c[:90]}" for c in commits[:3]]
-        if r["mode"] == "waiting" and st.get("asked"):
-            lines.append("  ✋ waiting on: " + st["asked"].strip().splitlines()[0][:140])
-        if len(replies) >= SPIN_REPLIES and not commits and r["mode"] != "waiting":
+        if asked:
+            lines.append(f"  ✋ waiting on you: {asked[0][:140]}"
+                         + (f" ({left(now - asked[1])})" if asked[1] else ""))
+        if len(replies) >= SPIN_REPLIES and not commits and not asked:
             lines.append(f"  ⚠ {len(replies)} replies, no commit — may be going in circles")
+        goal = [m for m in log if re.match(r"(✅ goal green|🛑 goal stuck|🔁 goal round)", m.get("text") or "")]
+        if goal:
+            lines.append("  🎯 " + goal[-1]["text"].splitlines()[0][:110])
+        if errs:
+            lines.append(f"  🚨 {len(errs)} production error{'s' * (len(errs) != 1)}: "
+                         + "; ".join(e[2][:50] for e in errs[-2:]))
+        if cwd and os.path.isdir(cwd):
+            diff = tmux_git(cwd, "diff", "--shortstat", "HEAD").strip()
+            if diff:
+                lines.append("  uncommitted: " + diff)
+            lines += [f"  next: {l}" for l in project_next(cwd)]
         if r.get("held_until"):
             lines.append(f"  💤 held until {clock(cfg, r['held_until'])}")
         moved.append("\n".join(lines))
     out = moved or ["nothing moved"]
     if quiet:
         out.append("quiet: " + ", ".join(quiet))
+    if moved:
+        ideas = idea_stats(now)
+        out += [ideas] if ideas else []
     return "\n".join(out)
+
+
+def project_next(cwd, n=4):
+    """The project's own plan: up to n lines under "In progress / next" in its notes —
+    what grounds an idea in work the project already chose."""
+    try:
+        with open(os.path.join(cwd, MEM_REL)) as f:
+            text = f.read()
+    except OSError:
+        return []
+    m = re.search(r"^#+ *in progress[^\n]*\n(.*?)(?=^#|\Z)", text, re.I | re.M | re.S)
+    lines = [l.strip(" -*\t")[:120] for l in (m.group(1).splitlines() if m else []) if l.strip()]
+    return lines[:n]
+
+
+def idea_ledger():
+    """{id: record} from ideas.jsonl — each line a post or a later tap, merged.
+
+    On disk, so the ▶ button survives a restart and the companion learns
+    what the owner sends and drops.
+    # ponytail: append-only and never trimmed; a busy year is a few MB.
+    """
+    out = {}
+    try:
+        with open(os.path.join(COMPANION_DIR, "ideas.jsonl")) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                    out.setdefault(rec["id"], {}).update(rec)
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def idea_note(**rec):
+    try:
+        with open(os.path.join(COMPANION_DIR, "ideas.jsonl"), "a") as f:
+            f.write(json.dumps(dict(rec, t=int(time.time()))) + "\n")
+    except OSError:
+        pass
+
+
+def idea_stats(now=None):
+    """One line on how the last week's ideas landed — the companion's taste feedback."""
+    now, sent, dropped, ignored, pending = now or time.time(), 0, [], 0, 0
+    for rec in idea_ledger().values():
+        if rec.get("posted", 0) < now - 7 * 86400:
+            continue
+        st = rec.get("status")
+        if st == "sent":
+            sent += 1
+        elif st == "dropped":
+            dropped.append(rec.get("prompt", "").rsplit("Task: ", 1)[-1].splitlines()[0][:60])
+        elif now - rec.get("posted", now) > IDEA_STALE:
+            ignored += 1
+        else:
+            pending += 1
+    if not (sent or dropped or ignored or pending):
+        return ""
+    return (f"ideas, 7 days: ▶ {sent} sent · ✕ {len(dropped)} dropped · {ignored} ignored · "
+            f"{pending} waiting" + ("\n  dropped: " + " | ".join(dropped[-3:]) if dropped else ""))
 
 
 def suggest_post(cfg, topic, prompt):
@@ -8519,12 +8655,16 @@ def suggest_post(cfg, topic, prompt):
         return "6 ideas this hour already — keep the best for the next round"
     if topic not in (cfg.get("topics") or {}) or not prompt.strip():
         return f"no project topic {topic}"
-    _idea_times.append(now)
-    pend = _ideas.setdefault(topic, {})
     sid = hashlib.sha1(prompt.encode()).hexdigest()[:8]
-    pend[sid] = prompt
-    for old in list(pend)[:-10]:                # the idea list is not a backlog
-        pend.pop(old)
+    ledger = idea_ledger()
+    if (ledger.get(sid) or {}).get("status") == "dropped":
+        return "the owner dropped this exact idea before — do not repeat it"
+    waiting = [r for r in ledger.values() if r.get("status") == "posted" and r.get("topic") == topic
+               and now - r.get("posted", 0) < IDEA_STALE]
+    if len(waiting) >= 3:
+        return "3 ideas already wait in that topic — let the owner answer those first"
+    _idea_times.append(now)
+    idea_note(id=sid, topic=topic, status="posted", posted=int(now), prompt=prompt)
     send(cfg, topic, "💡 idea from your companion:\n" + prompt.rsplit("Task: ", 1)[-1][:900],
          mode="plain", buttons=kb([[("▶ send to agent", f"!suggest run {sid}"),
                                     ("✕", f"!suggest drop {sid}")]]))
@@ -8591,9 +8731,9 @@ def companion_night(cfg, state, arg):
     while b <= a:
         b += 86400
     rounds = list(range(int(a), int(b) - 1800, 2 * 3600))
-    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True}
-                          for t in rounds] + [
-        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True}]
+    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True,
+                           "progress": True, "gate": True} for t in rounds] + [
+        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True, "progress": True}]
     save_queue(state)
     return (f"🌙 rounds at {', '.join(clock(cfg, t) for t in rounds)} · ☀️ summary at "
             f"{clock(cfg, b)}, each night · !companion night off to stop")
@@ -8615,7 +8755,8 @@ def companion_watch(cfg, state, arg):
     if not secs or secs < 1800:
         return "usage: !companion watch [3h] | watch off   (30m at least)"
     st["sched"] = keep + [{"at": time.time() + secs, "every": secs, "text": COMPANION_WATCH,
-                           "companion": True, "watch": True, "mark": activity_mark(cfg)}]
+                           "companion": True, "watch": True, "progress": True, "gate": True,
+                           "since": time.time()}]
     save_queue(state)
     return (f"👀 every {when}: progress per project and ideas to tap — skipped while nothing "
             "moves · !companion watch off to stop")
@@ -8656,6 +8797,9 @@ def companion_cmd(cfg, state, lock, topic, arg):
         return f"could not give {key} the nightmux tools: {e}"
     if p.returncode:
         return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
+    with lock:   # MEMORY.md is its memory; the project-notes turns would bill its whole context
+        cfg.setdefault("memory", {})[str(topic)] = "off"
+        save_cfg(cfg)
     out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR} {flags}".strip(), key)
     if not out.startswith("started"):
         return out
@@ -17367,7 +17511,9 @@ def selfcheck():
         st_ = {}
         with stubbed(COMPANION_DIR=cd_, subprocess=fake_sp,
                      start_session=lambda c, s, l, t, a, k: f"started {k} '{a.split()[0]}'"):
-            out = companion_cmd({"agents": {}}, st_, threading.Lock(), "7", "claude")
+            cfgc_ = {"agents": {}}
+            out = companion_cmd(cfgc_, st_, threading.Lock(), "7", "claude")
+            assert cfgc_["memory"]["7"] == "off"         # no project-notes turns for it
             assert out.startswith("started claude 'companion'"), out
             assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
             with open(os.path.join(cd_, "CLAUDE.md")) as f:
@@ -17417,6 +17563,17 @@ def selfcheck():
                 return io.BytesIO(json.dumps({"items": [m for m in msgs if m["id"] > after]}).encode())
             fake_ul = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
                 "urlopen": staticmethod(fake_open), "Request": urllib.request.Request})})
+            def fake_open2(url, timeout=10):
+                got.append(getattr(url, "full_url", url))
+                return io.BytesIO(json.dumps([{"topic": "5", "mode": "waiting"}]).encode())
+            fake_ul2 = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open2), "Request": urllib.request.Request})})
+            with stubbed(urllib=fake_ul2):
+                try:
+                    nm_call("send_prompt", {"topic": "5", "text": "yes"}, "http://x")
+                    assert False, "typed into an open menu"
+                except ValueError as e:
+                    assert "menu is open" in str(e) and not any("/topic/" in u for u in got)
             with stubbed(urllib=fake_ul):
                 _nm_seen.clear()
                 text = nm_call("read_chat", {"topic": "5"}, base="http://x", companion=True)[0]["text"]
@@ -17434,41 +17591,100 @@ def selfcheck():
                      {"topic": "6", "session": "blog", "mode": "waiting"},
                      {"topic": "8", "session": "old", "mode": "idle"},
                      {"topic": "9", "session": "comp", "mode": "idle"}]
-            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"step {i}\nmore"} for i in range(1, 8)],
+            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"} for i in range(1, 8)]
+                     + [{"id": 20 + i, "t": now_, "who": "bot", "text": f"🧠 memory {i}"} for i in range(9)],
                      "9": [{"id": 50, "t": now_, "who": "bot", "text": "me"}]}
             stp = {"blog": {"asked": "Use postgres or sqlite?"}}
             with stubbed(topics_status=lambda c, s: rows_, _chat=chat_, tmux_git=lambda *a: ""):
                 cfgp = {"companion": {"topic": "9"}, "dirs": {"5": cd_}}
                 rep_ = progress_report(cfgp, stp, now_ - 60)
                 assert "▸ shop (topic 5) [idle] · 7 replies · 0 commits · budget 1M of 5M" in rep_, rep_
+                # status lines are not replies: nine 🧠 lines alone are no circle
+                chat_["5"] = chat_["5"][7:]
+                rep2 = progress_report(cfgp, stp, now_ - 60)
+                assert "0 replies" in rep2 and "circles" not in rep2 and "last:" not in rep2, rep2
+                chat_["5"] = [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"}
+                              for i in range(1, 8)]
                 assert "last: step 7" in rep_ and "going in circles" in rep_
-                assert "✋ waiting on: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
-                assert "comp" not in rep_ and activity_mark(cfgp) == 7
-                # watch rounds: skipped while the mark has not moved, queued once it does.
-                stw = {"comp": {"sched": [{"at": 0, "every": 3600, "text": "w", "watch": True,
-                                           "companion": True, "mark": 7}]}}
+                assert "✋ waiting on you: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
+                assert "comp" not in rep_
+                # a question at the end of an answer, unanswered: flagged with its wait
+                chat_["8"] = [{"id": 30, "t": now_ - 7200, "who": "bot",
+                               "text": "✅ old\nDone.\nShould I also add dark mode?"}]
+                assert "✋ waiting on you: Should I also add dark mode? (2h" in \
+                    progress_report(cfgp, stp, now_ - 60)
+                chat_["8"].append({"id": 31, "t": now_ - 3600, "who": "you", "text": "no"})
+                assert "quiet: old" in progress_report(cfgp, stp, now_ - 60)
+                chat_.pop("8")
+            # commits made in the terminal show even with no chat (empty after a restart)
+            with stubbed(topics_status=lambda c, s: rows_[2:3], _chat=chat_,
+                         tmux_git=lambda cwd, *a: "abc123 fix login\n"):
+                rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
+                assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
+            # Gated rounds: the report rides in the prompt; nothing new, no model call;
+            # a big thread is cleared first unless the owner spoke within the hour.
+            with stubbed(topics_status=lambda c, s: rows_[0:1], _chat=chat_, tmux_git=lambda *a: "",
+                         agent_key=lambda c, t, s: "claude"):
+                stw = {"comp": {"ctx_tok": 200000, "sched": [
+                    {"at": 0, "every": 3600, "text": "w", "watch": True, "companion": True,
+                     "progress": True, "gate": True, "since": now_ - 60}]}}
                 sent_ = []
                 with stubbed(send=lambda *a, **k: sent_.append(a)):
                     due(cfgp, stw, "9", "comp")
-                    assert not stw["comp"].get("queue") and stw["comp"]["sched"][0]["at"] > now_
-                    chat_["5"].append({"id": 8, "t": now_, "who": "user", "text": "go"})
+                    q_ = stw["comp"]["queue"]
+                    assert q_[0] == "/clear" and q_[1].startswith("w\n\nProgress since "), q_
+                    assert "▸ shop (topic 5)" in q_[1] and not sent_        # no ⏰ ping
+                    stw["comp"]["queue"], stw["comp"]["sched"][0]["at"] = [], 0
+                    due(cfgp, stw, "9", "comp")                 # nothing new since
+                    assert not stw["comp"]["queue"] and stw["comp"]["sched"][0]["at"] > now_
+                    chat_["5"].append({"id": 9, "t": time.time() + 1, "who": "bot", "text": "✅ shop\nadded tests"})
+                    chat_["9"] = [{"id": 10, "t": time.time(), "who": "you", "text": "hi"}]
                     stw["comp"]["sched"][0]["at"] = 0
                     due(cfgp, stw, "9", "comp")
-                    assert stw["comp"]["queue"] == ["w"] and not sent_   # no ⏰ ping
-            # suggest: posted with a button, capped per hour, unknown topics refused.
+                    q_ = stw["comp"]["queue"]
+                    assert len(q_) == 1 and "added tests" in q_[0], q_   # owner just spoke: no /clear
+            # suggest: a ledger on disk, so ▶ works after a restart and taps teach it;
+            # 3 waiting per topic, 6 an hour, a dropped idea never comes back.
             sent_ = []
             with stubbed(send=lambda c, t, x, **k: sent_.append((t, x, k.get("buttons")))):
-                _ideas.clear()
                 del _idea_times[:]
-                cfgs = {"topics": {"5": "shop"}}
-                assert "posted" in suggest_post(cfgs, "5", "[role: tester] b\n\nTask: add a test for cart totals")
+                cfgs = {"topics": {"5": "shop", "6": "blog"}}
+                p1 = "[role: tester] b\n\nTask: add a test for cart totals"
+                assert "posted" in suggest_post(cfgs, "5", p1)
                 t_, x_, btn = sent_[-1]
                 assert t_ == "5" and x_.endswith("add a test for cart totals") and "!suggest run" in btn
-                sid_ = next(iter(_ideas["5"]))
-                assert sid_ in btn and "no project" in suggest_post(cfgs, "7", "x")
-                for i in range(5):
-                    suggest_post(cfgs, "5", f"idea {i}")
-                assert "6 ideas" in suggest_post(cfgs, "5", "one more")
+                sid1 = re.search(r"!suggest run (\w+)", btn).group(1)
+                assert "no project" in suggest_post(cfgs, "7", "x")
+                suggest_post(cfgs, "5", "idea 0")
+                sid2 = re.search(r"!suggest drop (\w+)", sent_[-1][2]).group(1)
+                suggest_post(cfgs, "5", "idea 1")
+                assert "3 ideas already wait" in suggest_post(cfgs, "5", "idea 2")
+                got_p = []
+                with stubbed(send_prompt=lambda c, s, t, se, p, mid=None: got_p.append((t, p)) or "sent"):
+                    handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest run {sid1}")
+                    assert got_p == [("5", p1)]
+                    assert "already taken" in handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest run {sid1}")
+                    assert "dropped" in handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest drop {sid2}")
+                    assert "already taken" in handle(dict(cfgs), {}, threading.Lock(), "6", f"!suggest run {sid2}")
+                assert "dropped this exact idea" in suggest_post(cfgs, "5", "idea 0")
+                stats_ = idea_stats()
+                assert "▶ 1 sent · ✕ 1 dropped · 0 ignored · 1 waiting" in stats_ and "idea 0" in stats_, stats_
+                assert "1 ignored" in idea_stats(time.time() + IDEA_STALE + 60)
+                for i in range(3):
+                    suggest_post(cfgs, "6", f"blog idea {i}")
+                assert "6 ideas" in suggest_post(cfgs, "6", "one more")
+            # the signals an expert scans for: goal state, errors, uncommitted work, the plan
+            os.makedirs(os.path.join(cd_, ".nightmux"), exist_ok=True)
+            with open(os.path.join(cd_, ".nightmux", "memory.md"), "w") as f:
+                f.write("# x\n## Decisions\n- a\n## In progress / next\n- ship checkout\n- add coupons\n")
+            with stubbed(topics_status=lambda c, s: rows_[0:1], _err_log=[(time.time(), "5", "KeyError: cart")],
+                         _chat={"5": [{"id": 1, "t": time.time(), "who": "bot", "text": "🛑 goal stuck — x"}]},
+                         tmux_git=lambda cwd, *a: " 2 files changed, 10 insertions(+)" if a[0] == "diff" else ""):
+                rep4 = progress_report({"dirs": {"5": cd_}}, {}, time.time() - 60)
+                for want in ("🎯 🛑 goal stuck", "🚨 1 production error: KeyError: cart",
+                             "uncommitted: 2 files changed", "next: ship checkout", "next: add coupons",
+                             "ideas, 7 days:"):
+                    assert want in rep4, (want, rep4)
             assert {"progress", "suggest"} <= {t["name"] for t in NM_TOOLS}
             companion_log({"topic": "5", "role": "tester"}, "[role: tester] brief\n\nTask: add tests\nmore")
             with open(os.path.join(cd_, "actions.log")) as f:
