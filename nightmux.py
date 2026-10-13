@@ -987,6 +987,8 @@ def tail_transcript(st, path, ladder=False):
                 cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
                 if ladder and turn and cheap > 0:
                     sav_add("model_tokens", round(turn * cheap))
+                if u and rec.get("requestId") != st.get("call_rid"):   # one record per block
+                    st["call_rid"], st["calls"] = rec.get("requestId"), st.get("calls", 0) + 1
                 if u:
                     sav_ctx(st, u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                             + u.get("cache_read_input_tokens", 0))
@@ -1565,6 +1567,13 @@ def warn_ctx(cfg, st, topic, sess):
     """
     if agentless(sess):
         return
+    calls = st.get("calls") or 0
+    if calls >= CALLS_WARN and not st.get("calls_warned"):
+        # Every call re-reads the whole context; the 97th percentile here is ~70.
+        st["calls_warned"] = True
+        send(cfg, topic, f"🔁 {sess}: {calls} model calls on one prompt, each re-reading "
+             f"~{_k(st.get('ctx_tok') or 0)} tokens. If it is going in circles, esc stops it.",
+             mode="plain", buttons=kb([[("esc", "!esc")]]))
     if agent_key(cfg, topic, sess) != "claude":
         return
         
@@ -1714,6 +1723,9 @@ def spend_cap(cfg):
 
 
 AUTOCOMPACT_DEFAULT = "200k"   # on unless set: a 300k turn costs ~6x a 50k one
+ROUTINE_COMPACT = 120000       # routine work compacts here, under a token autocompact...
+HEAVY_HOLD = 2 * 3600          # ...unless a heavy task was asked for this recently
+CALLS_WARN = 80                # model calls on one prompt: the top 3% measured on this fleet
 
 
 def compact_at(cfg):
@@ -2019,6 +2031,49 @@ def grep_transcripts(needle, days=7, limit=25):
     return head + "\n" + "\n".join(hits)
 
 
+def agy_ctx(cwd, home=None):
+    """Tokens agy's current conversation in `cwd` carries per call: input plus cache
+    read of its last planner call; 0 right after its own CHECKPOINT (agy's
+    compaction), so a /compact that took re-arms autocompact. None when unknown."""
+    import sqlite3
+    root = os.path.join(home or os.path.expanduser("~"), ".gemini", "antigravity-cli")
+    db = os.path.join(root, "conversation_summaries.db")
+    if not cwd or not os.path.exists(db):
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT conversation_id FROM conversation_summaries WHERE "
+                              "workspace_uris LIKE ? AND nesting_depth = 0 ORDER BY "
+                              "last_modified_time DESC LIMIT 1",
+                              ('%"file://' + urllib.parse.quote(cwd.rstrip("/")) + '"%',)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    tf = os.path.join(root, "brain", row[0], ".system_generated", "logs", "transcript.jsonl")
+    try:
+        with open(tf, "rb") as f:
+            f.seek(max(0, os.path.getsize(tf) - 262144))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if '"CHECKPOINT"' in line:
+            return 0
+        if '"PLANNER_RESPONSE"' in line:
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            n = (j.get("input_tokens") or 0) + (j.get("cache_read_tokens") or 0)
+            if n:
+                return n
+    return None
+
+
 def autocompact(cfg, state, topic, sess):
     """Compact a session before carrying its context gets expensive.
 
@@ -2031,6 +2086,15 @@ def autocompact(cfg, state, topic, sess):
     """
     at, tok_at = compact_at(cfg)
     st = state.get(sess) or {}
+    if agent_key(cfg, topic, sess) == "agy" and time.time() - st.get("agy_ctx_at", 0) > 30:
+        st["agy_ctx_at"] = time.time()          # agy has no status line: read its log
+        got = agy_ctx(sess_cwd(sess))
+        if got is not None:
+            st["ctx_tok"] = got
+    # Tiered: a session on routine work compacts at ROUTINE_COMPACT; one given a
+    # heavy task in the last two hours keeps the configured, roomier limit.
+    if tok_at and time.time() - st.get("heavy_at", 0) > HEAVY_HOLD:
+        tok_at = min(tok_at, ROUTINE_COMPACT)
     pct = (st.get("snap") or {}).get("ctx_pct")
     tok = st.get("ctx_tok")
     if tok_at:
@@ -3074,6 +3138,9 @@ def remember(state, sess, text):
     st["last"], st["last_at"] = text, time.time()
     st["ran"] = False    # no turn has started for it yet; flush_new sets this
     st["changed"] = time.time()
+    st["calls"], st["calls_warned"] = 0, False     # model calls on this prompt
+    if task_class(text) == "heavy":                # keeps the roomier autocompact
+        st["heavy_at"] = time.time()
 
 
 # Any CLI that runs in a terminal works here: nightmux types into tmux and reads the
@@ -5828,7 +5895,7 @@ LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
-FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new"}
+FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new", "agy": "/clear"}
 FRESH_MIN = 60000           # a thread this small is cheap to keep
 _lint_hold = {}   # topic -> {"text", "better"?}
 _lint_pass = set()
@@ -9399,6 +9466,8 @@ def topics_status(cfg, state):
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
             "dir": (cfg.get("dirs") or {}).get(topic),
             "budget": budget_line(cfg, topic),
+            "name": (cfg.get("topic_names") or {}).get(topic),
+            "ctx": st.get("ctx_tok"), "calls": st.get("calls") or 0,
         })
     return out
 
@@ -10108,7 +10177,7 @@ def _chat_bucket(stats, agent):
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
         "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
-        "projects": {}, "at": {}})
+        "projects": {}, "at": {}, "days": {}})
 
 
 def _chat_when(b, ts, cwd):
@@ -10139,8 +10208,11 @@ def _chat_prompt(b, text, ts=None, cwd=None):
         b["nudge_text"][t] = b["nudge_text"].get(t, 0) + 1
 
 
-def _chat_call(b, model, inp, cread, cwrite, out, think=0):
+def _chat_call(b, model, inp, cread, cwrite, out, think=0, day=None):
     ctx = inp + cread + cwrite
+    if day:      # [context carried, calls] per UTC day: is the average falling?
+        d = b["days"].setdefault(day, [0, 0])
+        d[0], d[1] = d[0] + ctx, d[1] + 1
     b["requests"] += 1
     b["input"] += inp
     b["cache_read"] += cread
@@ -10189,7 +10261,8 @@ def _scan_claude(stats, home, since):
                                    u.get("cache_read_input_tokens") or 0,
                                    u.get("cache_creation_input_tokens") or 0,
                                    u.get("output_tokens") or 0,
-                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)
+                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
+                                   d.get("timestamp", "")[:10])
                     if not counted:
                         counted, b["sessions"] = True, b["sessions"] + 1
 
@@ -10297,7 +10370,8 @@ def _scan_agy(stats, home, since):
                                         i = js.get("input_tokens") or 0
                                         cr = js.get("cache_read_tokens") or 0
                                         o = js.get("output_tokens") or 0
-                                        _chat_call(b, "agy", i, cr, 0, o, 0)
+                                        _chat_call(b, "agy", i, cr, 0, o, 0,
+                                                   (js.get("created_at") or "")[:10])
                                 except: pass
                             elif "USER_INPUT" in line:
                                 try:
@@ -10438,6 +10512,7 @@ def analyze_chats(days=30, home=None):
             "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
             "errors": s["errors"],
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+            "daily": dict(sorted(s["days"].items())),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
            "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips],
@@ -10489,7 +10564,7 @@ def merge_analysis(parts):
         for a, s in (r.get("agents") or {}).items():
             m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
                                    "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
-                                   "nudges": {}, "chars": 0, "nud": 0})
+                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}})
             n = s.get("prompts") or 0
             for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
                 m[k] += s.get(k) or 0
@@ -10498,6 +10573,9 @@ def merge_analysis(parts):
                              ("nudges", dict(s.get("nudges") or []))):
                 for k, v in (src or {}).items():
                     m[key][k] = m[key].get(k, 0) + (v or 0)
+            for k, (c, q) in (s.get("daily") or {}).items():
+                d = m["daily"].setdefault(k, [0, 0])
+                d[0], d[1] = d[0] + c, d[1] + q
             m["chars"] += (s.get("avg_prompt") or 0) * n
             m["nud"] += (s.get("nudge_pct") or 0) * n
     for a, m in acc.items():
@@ -10505,6 +10583,7 @@ def merge_analysis(parts):
         ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
         out["agents"][a] = dict(
             {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
+            daily=dict(sorted(m["daily"].items())),
             cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
             avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
             avg_prompt=round(m["chars"] / n) if n else None,
@@ -11207,6 +11286,23 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 #setup .ok { color: var(--ok); font-size: 13px; margin: 14px 0 0; height: auto; }
 #setup li { margin-bottom: 6px; } #setup li span { color: var(--mut); font-size: 12px; display: block; } .sname { font-size: 12px; color: var(--mut); margin-bottom: 6px; }
 .sname:empty { display: none; }
+/* live floor: one pixel desk per agent, animated by what it is doing */
+.floor { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 46%), 1fr)); }
+.desk { display: block; text-decoration: none; color: inherit; background: linear-gradient(180deg, var(--card2), var(--card));
+        border: 1px solid var(--line); border-radius: 14px; padding: 8px 8px 9px; min-width: 0; position: relative;
+        transition: border-color .3s, transform .15s; -webkit-tap-highlight-color: transparent; }
+.desk:active { transform: scale(.97); }
+.desk canvas { width: 100%; aspect-ratio: 48 / 36; image-rendering: pixelated; image-rendering: crisp-edges;
+               border-radius: 9px; display: block; background: #141a2b; }
+.desk.waiting { border-color: var(--ask); box-shadow: 0 0 0 3px #f0883e2e; }
+.desk.busy { border-color: #e3b34155; }
+.desk .nm { font-weight: 650; font-size: 13px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk .st { font-size: 11px; color: var(--mut); }
+.desk .st b { font-weight: 600; display: block; } .desk .srvtag { color: var(--dim); display: block; min-height: 15px; }
+.cells { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin-top: 6px; height: 6px; }
+.cells i { background: #1d2333; } .cells i.g { background: var(--ok); } .cells i.y { background: var(--busy); }
+.cells i.r { background: var(--bad); }
+.pixchart { width: 100%; height: 120px; image-rendering: pixelated; display: block; }
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
@@ -11214,6 +11310,11 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div>
+<h2>live agents</h2>
+<div class="floor" id="floor"><p class="empty">loading…</p></div>
+<h2>context per model call <span class="sub" id="ctxnote"></span></h2>
+<div class="card"><canvas class="pixchart" id="ctxchart" width="140" height="40"></canvas>
+<div class="meta" id="ctxlegend">lower is cheaper: every call re-reads the whole context</div></div>
 <h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
 <div id="newp" class="card"><form id="newf">
   <div class="f">
@@ -11251,7 +11352,7 @@ sudo tailscale up</pre></li>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
   <button id="run">analyze</button></h2>
-<div id="analysis"><p class="empty">reads every agent's transcripts on this machine — press analyze</p></div>
+<div id="analysis"><p class="empty">reads every agent's transcripts on every server — press analyze</p></div>
 </main>
 <script>
 // Cards are built once and updated in place: the old page re-rendered every
@@ -11505,11 +11606,107 @@ async function send(ev, topic, card) {
   tick();
 }
 
+
+// ---- live floor ----------------------------------------------------------
+// Each agent sits at a pixel desk drawn on a 48x36 canvas and scaled up crisp:
+// typing when busy, a bouncing "!" when it needs you, asleep when idle, dark
+// when stopped. Paper on the desk is its queue; the cells under it its context.
+const AGC = {claude: '#d97757', codex: '#7aa2f7', opencode: '#9ece6a', agy: '#bb9af7', gemini: '#7dcfff'};
+const MODES = {busy: ['working', 'var(--busy)', 1], waiting: ['needs you', 'var(--ask)', 0],
+               limit: ['at limit', 'var(--blue)', 2], idle: ['idle', 'var(--ok)', 3]};
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let desks = [], frame = 0;
+function px(g, x, y, w, h, c) { g.fillStyle = c; g.fillRect(x, y, w, h); }
+function drawDesk(g, r, f) {
+  const m = r.mode, on = r.alive !== false && !['offline', 'gone', 'shell', '?'].includes(m) || m === 'busy';
+  const col = AGC[r.agent] || '#7dcfff', sleep = m === 'idle' || !on;
+  px(g, 0, 0, 48, 25, '#141a2b'); px(g, 0, 25, 48, 11, '#0f1320'); px(g, 0, 25, 48, 1, '#1d2440');
+  px(g, 3, 3, 13, 10, '#0b1022'); px(g, 3, 8, 13, 1, '#1d2440'); px(g, 9, 3, 1, 10, '#1d2440');
+  px(g, 12, 4, 2, 2, '#e0af68'); if ((f >> 3) % 2) px(g, 5, 5, 1, 1, '#dbe1ee'); else px(g, 7, 10, 1, 1, '#dbe1ee');
+  px(g, 9, 23, 33, 2, '#7a5a40'); px(g, 11, 25, 2, 9, '#4a3628'); px(g, 38, 25, 2, 9, '#4a3628');
+  px(g, 24, 12, 15, 10, '#2b3452'); px(g, 25, 13, 13, 8, on ? '#0a0f1c' : '#05070c'); px(g, 30, 22, 3, 1, '#2b3452');
+  if (m === 'busy') for (let i = 0; i < 4; i++) px(g, 26, 14 + i * 2, 2 + (f + i * 5) % 9, 1, i % 2 ? col : '#9aa5ce');
+  if (m === 'idle' && (f >> 2) % 2) px(g, 26, 14, 2, 1, '#3fb950');
+  if (m === 'limit') { px(g, 29, 14, 5, 1, '#7aa2f7'); px(g, 30, 15, 3, 1, '#7aa2f7'); px(g, 31, 16, 1, 2, '#7aa2f7');
+    px(g, 30, 18, 3, 1, '#7aa2f7'); px(g, 29, 19, 5, 1, '#7aa2f7'); }
+  const bob = m === 'busy' ? f % 2 : 0, hx = 13, hy = sleep ? 13 : 10 - bob;
+  px(g, hx - 3, hy + 9, 3, 13, '#2b3452');
+  px(g, hx - 1, hy + 6, 9, 9, on ? col : '#3a4158');
+  px(g, hx, hy, 7, 6, on ? '#f1c27d' : '#6d6457'); px(g, hx, hy, 7, 2, '#2b2b38'); px(g, hx, hy + 2, 1, 1, '#2b2b38');
+  if (sleep) px(g, hx + 4, hy + 3, 2, 1, '#3a2a20'); else px(g, hx + 5, hy + 3, 1, 1, '#111');
+  if (m === 'busy') { px(g, hx + 8, 21 + f % 2, 3, 1, '#f1c27d'); px(g, hx + 11, 22 - f % 2, 3, 1, '#f1c27d'); }
+  if (m === 'waiting') { const y = (f >> 1) % 2; px(g, hx + 8, y, 7, 8, '#f0883e'); px(g, hx + 9, y + 8, 2, 1, '#f0883e');
+    px(g, hx + 11, y + 1, 2, 4, '#fff'); px(g, hx + 11, y + 6, 2, 1, '#fff'); }
+  if (sleep && on) { const t = (f >> 1) % 8, zx = hx + 8 + (t >> 1), zy = 9 - t;
+    px(g, zx, zy, 3, 1, '#8b93a7'); px(g, zx + 1, zy + 1, 1, 1, '#8b93a7'); px(g, zx, zy + 2, 3, 1, '#8b93a7'); }
+  for (let i = 0; i < Math.min(r.queued || 0, 5); i++) px(g, 40, 21 - i * 2, 6, 1, i % 2 ? '#c8b98a' : '#e0d6b0');
+}
+function cells(ctx) {
+  // 10 cells over 200k: green to 60k, amber to 120k (routine autocompact), red past it
+  let out = '';
+  for (let i = 0; i < 10; i++) { const at = (i + 1) * 20000;
+    out += '<i class="' + (ctx && ctx >= at - 19999 ? (at <= 60000 ? 'g' : at <= 120000 ? 'y' : 'r') : '') + '"></i>'; }
+  return out;
+}
+function floor(rows) {
+  const box = $('floor'), order = r => (MODES[r.mode] || [0, 0, 4])[2];
+  rows = rows.slice().sort((a, b) => order(a) - order(b) || String(a.name || a.session).localeCompare(b.name || b.session));
+  if (!rows.length) { box.innerHTML = '<p class="empty">no agents yet — + new project below</p>'; desks = []; return; }
+  const key = rows.map(r => r.server + '/' + r.topic).join();
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.innerHTML = rows.map(() => '<a class="desk"><canvas width="48" height="36"></canvas><div class="nm"></div>' +
+      '<div class="st"><b></b><span class="srvtag"></span></div><div class="cells"></div></a>').join('');
+  }
+  desks = rows.map((r, i) => {
+    const el = box.children[i], md = MODES[r.mode] || [r.mode || '?', 'var(--dim)'];
+    el.className = 'desk ' + esc(r.mode); el.href = '/chat?t=' + encodeURIComponent(r.topic);
+    el.title = (r.agent || '') + (r.usage ? ' · ' + r.usage : '');
+    el.querySelector('.nm').textContent = r.name || r.session;
+    const st = el.querySelector('.st b'); st.textContent = md[0] + (r.queued ? ' · ' + r.queued + ' queued' : '');
+    st.style.color = md[1];
+    el.querySelector('.srvtag').textContent = (r.ctx ? k(r.ctx) + ' ctx' : '') + (r.server ? ' · ' + r.server : '');
+    el.querySelector('.cells').innerHTML = cells(r.ctx);
+    return {g: el.querySelector('canvas').getContext('2d'), r};
+  });
+  desks.forEach(d => drawDesk(d.g, d.r, frame));
+}
+function animate() {
+  if (!document.hidden) { frame++; desks.forEach(d => drawDesk(d.g, d.r, frame)); }
+  setTimeout(() => requestAnimationFrame(animate), 160);
+}
+if (!still) animate();
+
+async function ctxChart() {
+  // Average context per model call per day, every agent on every server: the
+  // number autocompact and fresh threads exist to push down.
+  try {
+    const r = await (await fetch('/api/analysis?days=14')).json(), by = {};
+    Object.values(r.agents || {}).forEach(a => Object.entries(a.daily || {}).forEach(([d, v]) => {
+      by[d] = by[d] || [0, 0]; by[d][0] += v[0]; by[d][1] += v[1]; }));
+    const days = Object.keys(by).sort().slice(-14), avg = days.map(d => by[d][1] ? by[d][0] / by[d][1] : 0);
+    const c = $('ctxchart'), g = c.getContext('2d'), W = c.width, H = c.height, top = Math.max(...avg, 1);
+    g.clearRect(0, 0, W, H);
+    for (let y = 8; y < H; y += 8) px(g, 0, y, W, 1, '#1a2033');
+    const bw = Math.floor(W / 14);
+    avg.forEach((v, i) => { const h = Math.max(1, Math.round(v / top * (H - 4))), x = i * bw + 1;
+      const col = v <= 60000 ? '#3fb950' : v <= 120000 ? '#e3b341' : '#f85149';
+      px(g, x, H - h, bw - 2, h, col); px(g, x, H - h, bw - 2, 1, '#ffffff66');
+      if (i === avg.length - 1) px(g, x, H - h - 3, bw - 2, 1, '#dbe1ee'); });
+    if (avg.length) {
+      const first = avg[0], last = avg[avg.length - 1], d = first ? Math.round((last - first) / first * 100) : 0;
+      $('ctxnote').textContent = k(Math.round(last)) + ' today' + (avg.length > 1 ? ' · ' + (d <= 0 ? '▼ ' : '▲ ') +
+        Math.abs(d) + '% vs ' + days[0].slice(5) : '');
+    } else $('ctxnote').textContent = 'no calls yet';
+  } catch (e) { $('ctxnote').textContent = 'not measured yet'; }
+}
+ctxChart(); setInterval(ctxChart, 600000);
+
 async function tick() {
   if (document.hidden) return;
   try {
     const [t, m] = await Promise.all([fetch('/api/topics').then(r => r.json()), fetch('/api/metrics').then(r => r.json())]);
-    topics(t); servers(m);
+    topics(t); floor(t); servers(m);
   } catch (e) { /* daemon restarting: keep what is on screen */ }
 }
 
@@ -15073,7 +15270,7 @@ def selfcheck():
     st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 22})
     for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
         st.pop(k, None)
-    st["ctx_tok"] = 90000
+    st["ctx_tok"], st["heavy_at"] = 90000, time.time()   # a heavy task: the configured cap
     autocompact(tokc, state, "1", "s")
     assert typed == ["/compact"], "fired under the token cap"   # 90k < 150k
     st["ctx_tok"] = 160000                       # over, though only 22% of window
@@ -15083,6 +15280,17 @@ def selfcheck():
     st["ctx_tok"] = 10000                        # compacted: re-arm
     autocompact(tokc, state, "1", "s")
     assert "compacted" not in st and typed == ["/compact"] * 2
+    # Routine work (no heavy task for two hours) compacts sooner: 130k ≥ 120k.
+    st["heavy_at"] = time.time() - HEAVY_HOLD - 1
+    st["ctx_tok"] = 130000
+    autocompact(tokc, state, "1", "s")
+    assert typed == ["/compact"] * 3 and "≥ 120,000" in sent[-1], sent[-1]
+    for k in ("compacted", "compact_at", "compact_tries", "heavy_at"):
+        st.pop(k, None)
+    remember(state, "s", "refactor the whole auth module and migrate every caller")
+    assert time.time() - st["heavy_at"] < 5 and st["calls"] == 0
+    st["last"] = ""
+    st.pop("heavy_at")
     st.pop("ctx_tok"), typed.clear()
     typed[:] = ["/compact"]
     st.pop("snap"), typed.clear()
@@ -15735,6 +15943,8 @@ def selfcheck():
     assert "terminal" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/term/5").read().decode()
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
+    # the live floor draws from /api/topics on every tick; the chart from the daily series
+    assert "floor(t)" in dash_ and "drawDesk(" in dash_ and "a.daily" in dash_ and "prefers-reduced-motion" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
     # !goal: a red check goes back to the agent as its next prompt, the same
@@ -17893,7 +18103,7 @@ def selfcheck():
                                  "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
                                                            "output": 5, "thinking": 0},
                                  "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
-                                 "models": {"opus": 4}}}}
+                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]}}}}
     a2_ = json.loads(json.dumps(a1_))
     a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
                                    tokens={"input": 90, "cache_read": 10, "cache_write": 0,
@@ -17909,6 +18119,7 @@ def selfcheck():
         m_ = fleet_analysis(fcfg_, 30)
         c_ = m_["agents"]["claude"]
         assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
+        assert c_["daily"] == {"2026-10-12": [800, 8]}, c_["daily"]
         assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
         assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
         assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
@@ -17919,6 +18130,33 @@ def selfcheck():
         # !coach once crashed on an undefined name before drawing anything
         with stubbed(threading=type("T", (), {"Thread": lambda *a, **k: type("X", (), {"start": lambda s: None})()})):
             assert coach_cmd(fcfg_, "1").startswith("🎯 drawing")
+    # A prompt that keeps calling the model: said once, with an esc button.
+    sent_c = []
+    with stubbed(send=lambda c, t, x, **k: sent_c.append(x), agent_key=lambda c, t, s: "agy"):
+        stc = {"calls": CALLS_WARN, "ctx_tok": 150000}
+        warn_ctx({}, stc, "1", "s")
+        warn_ctx({}, stc, "1", "s")
+        assert len(sent_c) == 1 and f"{CALLS_WARN} model calls" in sent_c[0] and "150k" in sent_c[0], sent_c
+    # agy: the context of its newest conversation in this folder, 0 after its CHECKPOINT
+    import sqlite3
+    with tempfile.TemporaryDirectory() as ah_:
+        root_ = os.path.join(ah_, ".gemini", "antigravity-cli")
+        os.makedirs(os.path.join(root_, "brain", "c2", ".system_generated", "logs"))
+        con_ = sqlite3.connect(os.path.join(root_, "conversation_summaries.db"))
+        con_.execute("CREATE TABLE conversation_summaries (conversation_id text, workspace_uris text, "
+                     "nesting_depth integer, last_modified_time datetime)")
+        con_.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?)",
+                         [("c1", '["file:///w/app"]', 0, "2026-10-01"), ("c2", '["file:///w/app"]', 0, "2026-10-02"),
+                          ("c3", '["file:///w/app2"]', 0, "2026-10-03"), ("c4", '["file:///w/app"]', 1, "2026-10-04")])
+        con_.commit()
+        con_.close()
+        tf_ = os.path.join(root_, "brain", "c2", ".system_generated", "logs", "transcript.jsonl")
+        with open(tf_, "w") as f:
+            f.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 3000, "cache_read_tokens": 140000}) + "\n")
+        assert agy_ctx("/w/app", home=ah_) == 143000 and agy_ctx("/w/none", home=ah_) is None
+        with open(tf_, "a") as f:
+            f.write(json.dumps({"type": "CHECKPOINT"}) + "\n")
+        assert agy_ctx("/w/app/", home=ah_) == 0
     print("selfcheck ok")
 
 
