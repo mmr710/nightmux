@@ -4322,9 +4322,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return update_report(update_agents(cfg, only=arg.split() or None))
     if cmd == "!stats":
         days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
-        if days not in _analysis:
+        if ("fleet", days) not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
-        return stats_report(analyze_chats(days))
+        return stats_report(fleet_analysis(cfg, days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!briefing":
@@ -6425,12 +6425,12 @@ def render_html(cfg, page, size="1200,1100"):
         return None
 
 def coach_cmd(cfg, topic):
-    les = prompt_lessons()
+    les = fleet_lessons(cfg)
     if not les["n"]:
         return "🎯 no agent prompts in the last 60 days to learn from"
 
     rate = int(les['ok'] / les['n'] * 100)
-    an = analyze_chats(30)
+    an = fleet_analysis(cfg, 30)
     ag = an.get("agents") or {}
     ctx_tot = sum(a["tokens"]["input"] + a["tokens"]["cache_read"] + a["tokens"]["cache_write"] for a in ag.values())
     cr_tot = sum(a["tokens"]["cache_read"] for a in ag.values())
@@ -6440,7 +6440,8 @@ def coach_cmd(cfg, topic):
     nud_prompts = sum(round((a["nudge_pct"] or 0) * (a["prompts"] or 0)) for a in ag.values())
     nudge_pct = int(nud_prompts / tot_prompts * 100) if tot_prompts else 18
 
-    saved_tokens = _k(saved_in(sav_data(), 30)) or "2.5M"
+    saved_tokens = _k(saved_in(fleet_sav(cfg), 30)) or "2.5M"
+    winner = (les.get("winners") or [""])[0]
     raw_w = "".join(c if (ord(c) < 128 or c in "—–•·‘’“”") else " " for c in winner.replace("\n", " "))
     winner_sanitized = html.escape(re.sub(r"\s+", " ", raw_w).strip()[:140])
 
@@ -7014,7 +7015,7 @@ def saved_in(d, days, key="tokens"):
 
 def wrapped_data(cfg, days):
     """Everything on the card: headline numbers, projects, the hours, and what they say."""
-    d, r = sav_data(), analyze_chats(days)
+    d, r = fleet_sav(cfg), fleet_analysis(cfg, days)
     ag, w = r.get("agents") or {}, r.get("when") or {}
     proj, w = w.get("projects") or [], when_summary(cfg, w)
     tok = {k: sum(a["tokens"][k] for a in ag.values())
@@ -10446,6 +10447,102 @@ def analyze_chats(days=30, home=None):
     return out
 
 
+def fleet(cfg, path, local, timeout=60):
+    """[(server, answer)]: this machine's, then every peer that answered the same
+    route — asked side by side, since each reads its own transcripts."""
+    names = sorted(cfg.get("peers") or {})
+    if not names:
+        return [(host_name(cfg), local)]
+    with concurrent.futures.ThreadPoolExecutor(len(names)) as ex:
+        got = list(zip(names, ex.map(lambda n: peer_call(cfg, n, path, timeout=timeout), names)))
+    return [(host_name(cfg), local)] + [(n, r) for n, r in got if isinstance(r, dict)]
+
+
+def fleet_analysis(cfg, days):
+    """analyze_chats over every server: Wrapped, coach and !stats count all your
+    agents, not only the ones on the machine you asked. Cached like the local one."""
+    if not cfg.get("peers"):
+        return analyze_chats(days)
+    hit = _analysis.get(("fleet", days))
+    if hit and time.time() - hit["at"] < 600:
+        return hit
+    out = merge_analysis(fleet(cfg, f"api/analysis?days={days}", analyze_chats(days)))
+    _analysis[("fleet", days)] = out
+    return out
+
+
+def merge_analysis(parts):
+    """Sum analyze_chats answers; ratios are recomputed from the sums, averages
+    weighted by prompts."""
+    if len(parts) == 1:
+        return parts[0][1]
+    out = {"days": parts[0][1].get("days"), "at": time.time(), "agents": {}, "tips": [],
+           "took": max(r.get("took") or 0 for _, r in parts), "servers": [n for n, _ in parts]}
+    proj, at, acc = {}, {}, {}
+    for _, r in parts:
+        out["tips"] += r.get("tips") or []
+        w = r.get("when") or {}
+        for k, v in w.get("projects") or []:
+            proj[k] = proj.get(k, 0) + v
+        for k, v in (w.get("at") or {}).items():
+            at[str(k)] = at.get(str(k), 0) + v
+        for a, s in (r.get("agents") or {}).items():
+            m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
+                                   "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
+                                   "nudges": {}, "chars": 0, "nud": 0})
+            n = s.get("prompts") or 0
+            for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
+                m[k] += s.get(k) or 0
+            m["max_ctx"] = max(m["max_ctx"], s.get("max_ctx") or 0)
+            for key, src in (("tokens", s.get("tokens")), ("models", s.get("models")),
+                             ("nudges", dict(s.get("nudges") or []))):
+                for k, v in (src or {}).items():
+                    m[key][k] = m[key].get(k, 0) + (v or 0)
+            m["chars"] += (s.get("avg_prompt") or 0) * n
+            m["nud"] += (s.get("nudge_pct") or 0) * n
+    for a, m in acc.items():
+        t, n = m["tokens"], m["prompts"]
+        ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
+        out["agents"][a] = dict(
+            {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
+            cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
+            avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
+            avg_prompt=round(m["chars"] / n) if n else None,
+            nudge_pct=round(m["nud"] / n, 3) if n else None,
+            nudges=sorted(m["nudges"].items(), key=lambda kv: -kv[1])[:5],
+            models=dict(sorted(m["models"].items(), key=lambda kv: -kv[1])[:5]))
+    out["when"] = {"projects": sorted(proj.items(), key=lambda kv: -kv[1]), "at": at}
+    return out
+
+
+def fleet_sav(cfg):
+    """The savings ledger summed over every server: counters and per-day ledgers
+    add up, `since` is the earliest. Lists (spends, races) stay this machine's."""
+    out = dict(sav_data())
+    for _, d in fleet(cfg, "api/savings", None, timeout=5)[1:]:
+        for k, v in d.items():
+            if k == "since" and isinstance(v, (int, float)):
+                out[k] = min(out.get(k, v), v)
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = out.get(k, 0) + v
+            elif k.endswith("_day") and isinstance(v, dict):
+                by = dict(out.get(k) or {})
+                for day, n in v.items():
+                    by[day] = by.get(day, 0) + n
+                out[k] = by
+    return out
+
+
+def fleet_lessons(cfg):
+    """prompt_lessons over every server: the coach's success rate counts them all."""
+    out = dict(prompt_lessons())
+    for _, r in fleet(cfg, "api/lessons", None)[1:]:
+        out["n"] = out.get("n", 0) + (r.get("n") or 0)
+        out["ok"] = out.get("ok", 0) + (r.get("ok") or 0)
+        out["winners"] = (out.get("winners") or []) + (r.get("winners") or [])
+    return out
+
+
 def chat_when(stats):
     """Prompts per project and per UTC hour, summed over every agent."""
     proj, at = {}, {}
@@ -10485,7 +10582,8 @@ def stats_report(r):
     """The analysis as a Telegram message."""
     if not r["agents"]:
         return f"no agent transcripts in the last {r['days']} days"
-    out = [f"📊 last {r['days']} days · read in {r['took']}s"]
+    out = [f"📊 last {r['days']} days · read in {r['took']}s"
+           + (f" · {', '.join(r['servers'])}" if r.get("servers") else "")]
     for a, s in sorted(r["agents"].items()):
         t = s["tokens"]
         line = f"\n{a}: {s['sessions']} sessions · {s['prompts']} prompts · {s['requests']} calls"
@@ -12988,8 +13086,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             d = (q.get("days") or ["30"])[0]
             days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
-            # No lock: reads transcript files, not daemon state.
-            return self.reply(json.dumps(analyze_chats(days)), "application/json")
+            # No lock: reads transcript files, not daemon state. A peer answers for
+            # itself; the dashboard gets every server's.
+            got = analyze_chats(days) if self.peer else fleet_analysis(self.server.cfg, days)
+            return self.reply(json.dumps(got), "application/json")
+        if self.path == "/api/savings":
+            return self.reply(json.dumps(sav_data()), "application/json")
+        if self.path == "/api/lessons":
+            return self.reply(json.dumps(prompt_lessons()), "application/json")
         if self.path.startswith("/chat"):
             return self.reply(inject_telemetry(self.server.cfg, CHAT_HTML), "text/html; charset=utf-8")
         if self.path == "/manifest.json":
@@ -17781,6 +17885,40 @@ def selfcheck():
                     assert False, bad
                 except ValueError:
                     pass
+    # Fleet stats: Wrapped, coach and !stats sum every server's numbers; ratios are
+    # recomputed from the sums, and a peer that does not answer is left out.
+    a1_ = {"days": 30, "took": 1, "tips": [{"agent": "claude", "tip": "t1"}],
+           "when": {"projects": [["shop", 3]], "at": {"10": 2}},
+           "agents": {"claude": {"sessions": 1, "prompts": 10, "requests": 4, "errors": 0, "big_ctx": 0,
+                                 "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
+                                                           "output": 5, "thinking": 0},
+                                 "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
+                                 "models": {"opus": 4}}}}
+    a2_ = json.loads(json.dumps(a1_))
+    a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
+                                   tokens={"input": 90, "cache_read": 10, "cache_write": 0,
+                                           "output": 5, "thinking": 0})
+    a2_["when"] = {"projects": [["shop", 1], ["blog", 2]], "at": {"10": 1, "11": 4}}
+    got_ = {"api/analysis?days=30": a2_, "api/savings": {"since": 50, "tokens": 7, "tokens_day": {"2026-10-01": 7}},
+            "api/lessons": {"n": 4, "ok": 2, "winners": ["w2"]}}
+    fcfg_ = {"peers": {"vps2": {"url": "u"}, "vps3": {"url": "v"}}}
+    with stubbed(peer_call=lambda c, n, p, b=None, timeout=10: got_.get(p) if n == "vps2" else None,
+                 host_name=lambda c: "vps1", analyze_chats=lambda d=30, home=None: a1_,
+                 sav_data=lambda: {"since": 100, "tokens": 3, "tokens_day": {"2026-10-01": 1, "2026-09-30": 2}, "spent": {}},
+                 prompt_lessons=lambda home=None: {"n": 6, "ok": 5, "winners": ["w1"]}, _analysis={}):
+        m_ = fleet_analysis(fcfg_, 30)
+        c_ = m_["agents"]["claude"]
+        assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
+        assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
+        assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
+        assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
+        s_ = fleet_sav(fcfg_)
+        assert s_["since"] == 50 and s_["tokens"] == 10 and s_["tokens_day"] == {"2026-10-01": 8, "2026-09-30": 2}
+        assert fleet_lessons(fcfg_) == {"n": 10, "ok": 7, "winners": ["w1", "w2"]}
+        assert fleet_analysis({}, 30) is a1_            # no peers: no merge, no second cache
+        # !coach once crashed on an undefined name before drawing anything
+        with stubbed(threading=type("T", (), {"Thread": lambda *a, **k: type("X", (), {"start": lambda s: None})()})):
+            assert coach_cmd(fcfg_, "1").startswith("🎯 drawing")
     print("selfcheck ok")
 
 
