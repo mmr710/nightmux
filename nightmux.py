@@ -1743,6 +1743,7 @@ ROUTINE_COMPACT = 120000       # routine work compacts here, under a token autoc
 HEAVY_HOLD = 2 * 3600          # ...unless a heavy task was asked for this recently
 NATIVE_MIN = 100000            # the lowest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code takes
 PARK_COMPACT = 100000          # !autocompact park: an idle session above this is compacted
+PARK_DEFAULT = 45              # ...after this many idle minutes: before the 1h cache expires
 CALLS_WARN = 80                # model calls on one prompt: the top 3% measured on this fleet
 
 
@@ -2113,10 +2114,10 @@ def autocompact(cfg, state, topic, sess):
     # heavy task in the last two hours keeps the configured, roomier limit.
     if tok_at and time.time() - st.get("heavy_at", 0) > HEAVY_HOLD:
         tok_at = min(tok_at, ROUTINE_COMPACT)
-    # Opt-in: idle this many minutes, compact at PARK_COMPACT while the context
+    # On by default: idle this many minutes, compact at PARK_COMPACT while the context
     # is still cached. Coming back after the cache expires rewrites all of it --
-    # 8% of this fleet's spend went on that -- and a compacted one is ~15k.
-    park = cfg.get("park_compact")
+    # ~25% of this fleet's spend went on that -- and a compacted one is ~15k.
+    park = cfg.get("park_compact", PARK_DEFAULT)
     if tok_at and park and time.time() - st.get("changed", time.time()) >= park * 60:
         tok_at = min(tok_at, PARK_COMPACT)
     pct = (st.get("snap") or {}).get("ctx_pct")
@@ -4298,7 +4299,7 @@ HELP = [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
-        "!autocompact park <20m|off> = compact idle sessions over 100k · !idlectx <pct|off>",
+        "!autocompact park <45m|off> = compact sessions idle that long over 100k (default 45m) · !idlectx <pct|off>",
         "!ladder on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when "
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
@@ -4757,9 +4758,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 with lock:
                     cfg["park_compact"] = None if m.group(1) in ("off", "0") else int(m.group(1))
                     save_cfg(cfg)
-            park = cfg.get("park_compact")
+            park = cfg.get("park_compact", PARK_DEFAULT)
             return (f"idle {park}m above {PARK_COMPACT:,} tokens → /compact while still cached"
-                    if park else "park compact off — !autocompact park 20m")
+                    if park else f"park compact off — !autocompact park {PARK_DEFAULT}m")
         if arg:
             if arg in ("off", "0"):
                 v = None
@@ -4777,7 +4778,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return (f"auto /compact when a turn carries {tok_at:,} tokens\n"
                     "counted from the transcript, so Claude Code sessions only\n"
                     "new Claude sessions also compact mid-turn there "
-                    "(!autocompact park 20m: compact idle ones too)")
+                    (f"idle {cfg.get('park_compact', PARK_DEFAULT)}m: compacted too (!autocompact park)"
+                     if cfg.get("park_compact", PARK_DEFAULT) else "idle: !autocompact park 45m"))
         return (f"auto /compact at {at}% of the context window" if at else
                 "auto /compact off — !autocompact 70 (pct) or 150k (tokens)")
     if cmd == "!spendcap":
@@ -18253,8 +18255,12 @@ def selfcheck():
         autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
                                "changed": time.time() - 5 * 60}}, "1", "s")
         autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
-                     "changed": time.time() - 30 * 60}}, "1", "s")
-    assert typed == ["/compact"], typed
+                     "changed": time.time() - 30 * 60}}, "1", "s")      # default 45m: not yet
+        autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                     "changed": time.time() - 50 * 60}}, "1", "s")      # default 45m: now
+        autocompact({"autocompact": "200k", "park_compact": None}, {"s": {"mode": "idle",
+                     "ctx_tok": 110000, "changed": time.time() - 50 * 60}}, "1", "s")  # off
+    assert typed == ["/compact", "/compact"], typed
     # A non-snapshot json in the state dir must not stop prune (and the watcher).
     with tempfile.TemporaryDirectory() as td_:
         with open(os.path.join(td_, "paired_tokens.json"), "w") as f_:
