@@ -3,7 +3,23 @@
 The companion is a single persona you talk to about everything. It watches every
 project, keeps its own memory, and hands work to agents in role.
 
-`!companion [agent]` in any topic starts it.
+`!companion [agent]` in an empty topic of its own starts it. It refuses a
+project's topic, because it would take the topic over from that project's agent.
+
+**Talking to it:** write in its topic in plain words, as with any agent ("what
+moved today?", "push shop toward the checkout redesign tonight"). Its standing
+knowledge of you comes from `PERSONA.md` (tone, risk, `## Priorities`), which you
+edit, and from `MEMORY.md`, which it keeps.
+
+**Targets:** `!companion focus <target>` in a project's topic sets that
+project's target. While any target is set, the progress report covers only
+targeted projects, and an idle targeted project is listed anyway with
+`📌 target: … — idle`. So a night where nothing happens is spent handing the
+next step toward the target to that project (with a `!budget`), or posting it as
+an idea to tap (without one). The same report is skipped when it would repeat,
+so an idle project gets one push per change, not one per round. Use
+`!companion focus off` in that topic to clear it, or in the companion's topic to
+clear all targets; `!companion focus` there lists them.
 
 ## What the owner decided (2026-10-13)
 

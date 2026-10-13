@@ -4187,6 +4187,8 @@ HELP = [
         "a morning summary at the end",
         "!companion watch [3h] | watch off = by day: progress per project and ideas you tap "
         "to send — skipped when nothing moved",
+        "!companion focus <target> | focus off = in a project's topic: the companion works "
+        "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
@@ -8444,7 +8446,9 @@ COMPANION_GUIDE = (
     "that, fresher. Edit it only when you learned something lasting; never rewrite it "
     "whole. Never secrets, tokens or personal data.\n"
     "- Your thread may be cleared before a scheduled round; everything you need is in "
-    "these files and the report.\n")
+    "these files and the report.\n"
+    "- The owner talks to you in this topic in plain words. A 📌 target in the report is "
+    "what they set with !companion focus in that project's topic: work toward it first.\n")
 # Read on every conversation start and kept through compaction: Claude Code
 # imports the files from CLAUDE.md, the others are told to read them.
 COMPANION_HOOKS = {
@@ -8458,7 +8462,9 @@ COMPANION_ROUND = (
     "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
     "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
     "wait for results, the next round reads them. Review what the last round's work "
-    "produced before handing out more in that project. Then stop.")
+    "produced before handing out more in that project. A 📌 target is the owner's goal for "
+    "that project: when it is idle, hand out the next step toward it (its next: lines "
+    "first), or suggest it where there is no budget. Then stop.")
 COMPANION_MORNING = (
     "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
     "out overnight and what came of it (actions.log is the record, the report below the "
@@ -8474,7 +8480,8 @@ COMPANION_WATCH = (
     "a missing test or a shortcut, call suggest with one concrete prompt the agent could "
     "run — the owner taps to send it. Skip generic advice: an idea names the file, feature "
     "or command and quotes the line it builds on (a commit, an answer, a note); never a "
-    "file you have not seen. Put the owner's priorities in PERSONA.md first. Answer an agent's waiting question yourself with send_prompt only "
+    "file you have not seen. Put the owner's priorities in PERSONA.md first; where a 📌 "
+    "target is set, every idea moves toward it, and an idle project gets its next step. Answer an agent's waiting question yourself with send_prompt only "
     "when MEMORY.md or the project's notes already hold the answer and your risk level "
     "allows. If nothing below is worth a line, reply only \"quiet\".")
 SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
@@ -8528,12 +8535,13 @@ def progress_report(cfg, state, since):
     # ponytail: this machine's topics only; add peers via peer_call if they matter.
     """
     own = str((cfg.get("companion") or {}).get("topic"))
+    focus = (cfg.get("companion") or {}).get("focus") or {}
     names, now = cfg.get("topic_names") or {}, time.time()
     since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
     moved, quiet = [], []
     for r in topics_status(cfg, state):
         t, sess = str(r["topic"]), r["session"]
-        if t == own:
+        if t == own or (focus and t not in focus):
             continue
         full = _chat.get(t) or []
         log = [m for m in full if m.get("t", 0) >= since]
@@ -8547,11 +8555,14 @@ def progress_report(cfg, state, since):
         else:
             asked = open_question(full)
         errs = [e for e in _err_log if str(e[1]) == t and e[0] >= since]
-        if not (log or commits or asked or errs):
+        idle = not (log or commits or asked or errs)
+        if idle and t not in focus:
             quiet.append(names.get(t) or sess)
             continue
         lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
                  f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
+        if t in focus:
+            lines.append("  📌 target: " + focus[t] + (" — idle, nothing moved" if idle else ""))
         last = replies[-1]["text"].split("\n", 1)[1].strip() if replies else ""
         if last:
             lines.append("  last: " + last.splitlines()[0][:160])
@@ -8718,7 +8729,7 @@ def companion_night(cfg, state, arg):
     if not sess:
         return "start the companion first: !companion"
     st = state.setdefault(sess, {})
-    keep = [j for j in st.get("sched") or [] if not j.get("companion")]
+    keep = [j for j in st.get("sched") or [] if not j.get("companion") or j.get("watch")]
     words = arg.split()[1:]
     if words == ["off"]:
         st["sched"] = keep
@@ -8762,11 +8773,56 @@ def companion_watch(cfg, state, arg):
             "moves · !companion watch off to stop")
 
 
+def companion_focus(cfg, lock, topic, arg):
+    """The owner's target for a project, said in that project's topic.
+
+    While any target is set, reports carry only the targeted projects — idle
+    ones too, so a quiet night is spent moving them toward the target instead
+    of being skipped. In the companion's own topic: list, or `off` for all.
+    """
+    comp, topic = cfg.get("companion"), str(topic)
+    if not comp:
+        return "start the companion first: !companion"
+    text = arg.split(None, 1)[1].strip() if len(arg.split()) > 1 else ""
+    focus = comp.get("focus") or {}
+    if topic == comp.get("topic"):
+        if text == "off":
+            with lock:
+                comp.pop("focus", None)
+                save_cfg(cfg)
+            return "📌 no targets — reports cover every project again"
+        names = cfg.get("topic_names") or {}
+        return "\n".join(f"📌 {names.get(t) or t}: {g}" for t, g in focus.items()) or \
+            "no targets — say !companion focus <target> in a project's topic"
+    if topic not in (cfg.get("topics") or {}):
+        return "say this in a project's topic"
+    if not text:
+        return f"📌 {focus[topic]}" if topic in focus else "usage: !companion focus <target> | focus off"
+    with lock:
+        if text == "off":
+            focus.pop(topic, None)
+        else:
+            focus[topic] = text[:300]
+        comp["focus"] = focus
+        save_cfg(cfg)
+    if text == "off":
+        return "📌 target dropped"
+    return ("📌 the companion works toward this here, idle or not, and reports cover only "
+            "targeted projects" + ("" if topic in (cfg.get("budgets") or {}) else
+                                   " · it can only suggest until you set !budget here"))
+
+
 def companion_cmd(cfg, state, lock, topic, arg):
     if arg.split()[:1] == ["night"]:
         return companion_night(cfg, state, arg)
     if arg.split()[:1] == ["watch"]:
         return companion_watch(cfg, state, arg)
+    if arg.split()[:1] == ["focus"]:
+        return companion_focus(cfg, lock, topic, arg)
+    bound = (cfg.get("topics") or {}).get(str(topic))
+    if bound and bound != "companion":     # would unbind the project and mute its notes
+        return (f"this topic runs '{bound}' — start the companion in an empty topic of its "
+                "own, then say !companion focus <target> here")
     key, _, flags = arg.partition(" ")
     if key and key not in agents(cfg):
         return (f"usage: !companion [{'|'.join(agents(cfg))}] [flags] · !companion night "
@@ -8804,7 +8860,7 @@ def companion_cmd(cfg, state, lock, topic, arg):
     if not out.startswith("started"):
         return out
     with lock:
-        cfg["companion"] = {"topic": str(topic), "session": "companion"}
+        cfg["companion"] = dict(cfg.get("companion") or {}, topic=str(topic), session="companion")
         save_cfg(cfg)
     return (out + f"\n🧭 your companion lives here. Edit {COMPANION_DIR}/PERSONA.md for its "
             "tone and risk, roles/ for the kinds of agent it hands work to. It acts alone only "
@@ -17621,6 +17677,34 @@ def selfcheck():
                          tmux_git=lambda cwd, *a: "abc123 fix login\n"):
                 rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
                 assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
+            # !companion focus, said in the project's topic: reports carry only targeted
+            # projects, idle ones too, so a quiet night still has work toward the target.
+            lk_ = threading.Lock()
+            cff = {"topics": {"5": "shop", "6": "blog", "9": "companion"},
+                   "companion": {"topic": "9", "session": "companion"}}
+            with stubbed(save_cfg=lambda c: None, save_queue=lambda s: None):
+                assert "start the companion" in companion_focus({}, lk_, "5", "focus x")
+                out = companion_focus(cff, lk_, 5, "focus ship checkout v2")
+                assert "suggest until" in out and cff["companion"]["focus"] == {"5": "ship checkout v2"}
+                assert companion_focus(cff, lk_, "9", "focus") == "📌 5: ship checkout v2"
+                assert companion_focus(cff, lk_, "5", "focus") == "📌 ship checkout v2"
+                with stubbed(topics_status=lambda c, s: rows_[:3], _chat={}, tmux_git=lambda *a: ""):
+                    rep5 = progress_report(cff, {}, now_ - 60)
+                assert rep5.startswith("▸ shop (topic 5)") and "📌 target: ship checkout v2 — idle" in rep5 \
+                    and "blog" not in rep5 and "quiet" not in rep5, rep5
+                companion_focus(cff, lk_, "5", "focus off")
+                assert cff["companion"]["focus"] == {}
+                companion_focus(cff, lk_, "5", "focus a")
+                companion_focus(cff, lk_, "9", "focus off")
+                assert "focus" not in cff["companion"]
+                # never in a project's own topic: it would unbind the project
+                assert "runs 'shop'" in companion_cmd(cff, {}, lk_, "5", "")
+                # night rounds leave the day watch alone
+                stw_ = {"companion": {"sched": [{"at": 1, "every": 60, "text": "w",
+                                                 "companion": True, "watch": True}]}}
+                companion_night(dict(cff, tz_offset=0), stw_, "night 01:00 07:30")
+                companion_night(dict(cff, tz_offset=0), stw_, "night off")
+                assert [j["text"] for j in stw_["companion"]["sched"]] == ["w"]
             # Gated rounds: the report rides in the prompt; nothing new, no model call;
             # a big thread is cleared first unless the owner spoke within the hour.
             with stubbed(topics_status=lambda c, s: rows_[0:1], _chat=chat_, tmux_git=lambda *a: "",
