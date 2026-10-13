@@ -2299,21 +2299,28 @@ def due(cfg, state, topic, sess):
             keep.append(job)
             continue
         changed = True
-        if job.get("watch"):
-            # A watch round over projects where nothing moved is a turn spent
-            # learning nothing: skip it until some project's chat does.
-            mark = activity_mark(cfg)
-            if mark == job.get("mark"):
+        text = job.get("text")
+        if job.get("progress"):
+            # The companion's rounds carry the progress report in the prompt, built
+            # here: no tool round-trip, a cursor that survives restarts, and — for a
+            # gated round — no model call at all while the report says what it
+            # said last time (the wait times aside).
+            since = job.get("since") or now - (job.get("every") or 86400)
+            report = progress_report(cfg, state, since)
+            sig = hashlib.sha1(re.sub(r" \([^)]*\)$", "", report, flags=re.M).encode()).hexdigest()
+            if job.get("gate") and (not report.startswith("▸") or sig == job.get("sig")):
                 job["at"] = now + job["every"]
                 keep.append(job)
                 continue
-            job["mark"] = mark
+            job["since"], job["sig"] = now, sig
+            text = f"{text}\n\nProgress since {clock(cfg, since)}:\n{report}"
+            companion_fresh(cfg, state, topic, sess)
         if job.get("kind") == "digest":
             since = job.get("since", now - (job.get("every") or 86400))
             send(cfg, topic, digest_report(cfg, state, topic, sess, since), mode="plain")
             job["since"] = now
         else:
-            st.setdefault("queue", []).append(job["text"])
+            st.setdefault("queue", []).append(text)
             if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
                 fired.append(job)
         if job.get("every"):
@@ -8385,6 +8392,9 @@ COMPANION_DIR = os.path.expanduser("~/.nightmux-companion")
 COMPANION_SEED = {
     "PERSONA.md": (
         "# Persona\n\nname: Nox\nrisk: balanced   # cautious | balanced | bold\n\n"
+        "## Priorities\n"
+        "Rank your projects, each with this week's goal. Effort and ideas go here first.\n"
+        "1. (project) — (goal)\n\n"
         "## Tone and style\n"
         "Short and direct, plain words, no cheerleading. Say what you did, what it cost "
         "and what needs the owner. One question at a time.\n\n"
@@ -8412,8 +8422,8 @@ COMPANION_GUIDE = (
     "# Companion\n\n"
     "You are the owner's companion, above the project agents. PERSONA.md is how you talk "
     "and how much you do without asking; MEMORY.md is what you have learned. Keep to both.\n\n"
-    "- The nightmux MCP tools: progress (what moved in every project since you last looked "
-    "— start here), list_topics (agent, state, folder, budget spent), read_chat (only what "
+    "- Scheduled rounds arrive with a progress report in the prompt. The nightmux MCP "
+    "tools: progress (the same report, for when the owner asks), list_topics (agent, state, folder, budget spent), read_chat (only what "
     "you have not seen), read_terminal, send_prompt (hand work out) and suggest (post an "
     "idea the owner sends with one tap).\n"
     "- Your job is the owner's productivity: notice progress, unblock stuck agents, and "
@@ -8426,9 +8436,12 @@ COMPANION_GUIDE = (
     "alone. actions.log here records every prompt you sent — report from it, not from memory.\n"
     "- Keep reads small: progress first, then read_chat only where something changed; "
     "read_terminal only when the chat does not explain a state.\n"
-    "- After each piece of work, rewrite MEMORY.md (under 150 lines) with what is worth "
-    "knowing next time: the owner's preferences, where each project stands, what worked, "
-    "what failed. Never secrets, tokens or personal data.\n")
+    "- MEMORY.md (under 150 lines) holds what lasts: the owner's preferences, which ideas "
+    "they sent or dropped and why, standing decisions. Not project status — the report has "
+    "that, fresher. Edit it only when you learned something lasting; never rewrite it "
+    "whole. Never secrets, tokens or personal data.\n"
+    "- Your thread may be cleared before a scheduled round; everything you need is in "
+    "these files and the report.\n")
 # Read on every conversation start and kept through compaction: Claude Code
 # imports the files from CLAUDE.md, the others are told to read them.
 COMPANION_HOOKS = {
@@ -8437,38 +8450,49 @@ COMPANION_HOOKS = {
     "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
 }
 COMPANION_ROUND = (
-    "Night round. Call progress, then for each project with a budget that moved or is "
-    "waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
+    "Night round. From the progress report below, for each project with a budget that "
+    "moved or is waiting: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
     "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
     "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
     "wait for results, the next round reads them. Review what the last round's work "
-    "produced before handing out more in that project. Then update MEMORY.md and stop.")
+    "produced before handing out more in that project. Then stop.")
 COMPANION_MORNING = (
     "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
-    "out overnight and what came of it (actions.log is the record), budget spent per "
+    "out overnight and what came of it (actions.log is the record, the report below the "
+    "result), budget spent per "
     "project, what needs the owner's decision, and what you would do next. Nothing else.")
 
 
 COMPANION_WATCH = (
-    "Watch round. Call progress: it lists only the projects that moved since your last "
-    "look. Tell the owner here, one line per project that moved: what got done, and what "
+    "Watch round. The progress report below lists the projects that moved since your "
+    "last round. Tell the owner here, one line per project that moved: what got done, and what "
     "is stuck (waiting on a question, going in circles, out of budget or usage). Then "
     "share ideas: for at most 3 projects where you see a clearly better next step, a risk, "
     "a missing test or a shortcut, call suggest with one concrete prompt the agent could "
-    "run — the owner taps to send it. Skip generic advice; an idea must name the file, "
-    "feature or command. Answer an agent's waiting question yourself with send_prompt only "
+    "run — the owner taps to send it. Skip generic advice: an idea names the file, feature "
+    "or command and quotes the line it builds on (a commit, an answer, a note); never a "
+    "file you have not seen. Put the owner's priorities in PERSONA.md first. Answer an agent's waiting question yourself with send_prompt only "
     "when MEMORY.md or the project's notes already hold the answer and your risk level "
-    "allows. If progress shows nothing worth a line, reply only \"quiet\". Update "
-    "MEMORY.md if you learned something.")
+    "allows. If nothing below is worth a line, reply only \"quiet\".")
 SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
 _ideas = {}           # topic -> {id: prompt}; in memory, a restart drops pending ideas
 _idea_times = []
 
 
-def activity_mark(cfg):
-    """The newest chat id in any project topic — it moves when anything there does."""
-    own = str((cfg.get("companion") or {}).get("topic"))
-    return max((log[-1]["id"] for t, log in list(_chat.items()) if t != own and log), default=0)
+def companion_fresh(cfg, state, topic, sess):
+    """Start a scheduled round from an empty thread when the old one is big.
+
+    Each round is another turn on the same conversation and re-reads all of it
+    — the bill grows every round. Nothing in it is needed: persona and memory
+    reload from CLAUDE.md/AGENTS.md, the report is in the prompt, actions.log
+    holds what was sent. Not while the owner is talking to it (an hour).
+    """
+    clear = FRESH.get(agent_key(cfg, topic, sess))
+    st = state.setdefault(sess, {})
+    owner = max((m.get("t", 0) for m in _chat.get(str(topic)) or [] if m.get("who") == "you"), default=0)
+    if clear and (st.get("ctx_tok") or 0) > FRESH_MIN and time.time() - owner > 3600 \
+            and clear not in (st.get("queue") or []):
+        st.setdefault("queue", []).append(clear)
 
 
 AGENT_REPLY = re.compile(r"✅ \S+\n")   # an agent's answer; everything else is nightmux talking
@@ -8622,9 +8646,9 @@ def companion_night(cfg, state, arg):
     while b <= a:
         b += 86400
     rounds = list(range(int(a), int(b) - 1800, 2 * 3600))
-    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True}
-                          for t in rounds] + [
-        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True}]
+    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True,
+                           "progress": True, "gate": True} for t in rounds] + [
+        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True, "progress": True}]
     save_queue(state)
     return (f"🌙 rounds at {', '.join(clock(cfg, t) for t in rounds)} · ☀️ summary at "
             f"{clock(cfg, b)}, each night · !companion night off to stop")
@@ -8646,7 +8670,8 @@ def companion_watch(cfg, state, arg):
     if not secs or secs < 1800:
         return "usage: !companion watch [3h] | watch off   (30m at least)"
     st["sched"] = keep + [{"at": time.time() + secs, "every": secs, "text": COMPANION_WATCH,
-                           "companion": True, "watch": True, "mark": activity_mark(cfg)}]
+                           "companion": True, "watch": True, "progress": True, "gate": True,
+                           "since": time.time()}]
     save_queue(state)
     return (f"👀 every {when}: progress per project and ideas to tap — skipped while nothing "
             "moves · !companion watch off to stop")
@@ -17497,7 +17522,7 @@ def selfcheck():
                               for i in range(1, 8)]
                 assert "last: step 7" in rep_ and "going in circles" in rep_
                 assert "✋ waiting on you: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
-                assert "comp" not in rep_ and activity_mark(cfgp) == 7
+                assert "comp" not in rep_
                 # a question at the end of an answer, unanswered: flagged with its wait
                 chat_["8"] = [{"id": 30, "t": now_ - 7200, "who": "bot",
                                "text": "✅ old\nDone.\nShould I also add dark mode?"}]
@@ -17511,17 +17536,28 @@ def selfcheck():
                          tmux_git=lambda cwd, *a: "abc123 fix login\n"):
                 rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
                 assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
-                # watch rounds: skipped while the mark has not moved, queued once it does.
-                stw = {"comp": {"sched": [{"at": 0, "every": 3600, "text": "w", "watch": True,
-                                           "companion": True, "mark": 7}]}}
+            # Gated rounds: the report rides in the prompt; nothing new, no model call;
+            # a big thread is cleared first unless the owner spoke within the hour.
+            with stubbed(topics_status=lambda c, s: rows_[0:1], _chat=chat_, tmux_git=lambda *a: "",
+                         agent_key=lambda c, t, s: "claude"):
+                stw = {"comp": {"ctx_tok": 200000, "sched": [
+                    {"at": 0, "every": 3600, "text": "w", "watch": True, "companion": True,
+                     "progress": True, "gate": True, "since": now_ - 60}]}}
                 sent_ = []
                 with stubbed(send=lambda *a, **k: sent_.append(a)):
                     due(cfgp, stw, "9", "comp")
-                    assert not stw["comp"].get("queue") and stw["comp"]["sched"][0]["at"] > now_
-                    chat_["5"].append({"id": 8, "t": now_, "who": "user", "text": "go"})
+                    q_ = stw["comp"]["queue"]
+                    assert q_[0] == "/clear" and q_[1].startswith("w\n\nProgress since "), q_
+                    assert "▸ shop (topic 5)" in q_[1] and not sent_        # no ⏰ ping
+                    stw["comp"]["queue"], stw["comp"]["sched"][0]["at"] = [], 0
+                    due(cfgp, stw, "9", "comp")                 # nothing new since
+                    assert not stw["comp"]["queue"] and stw["comp"]["sched"][0]["at"] > now_
+                    chat_["5"].append({"id": 9, "t": time.time() + 1, "who": "bot", "text": "✅ shop\nadded tests"})
+                    chat_["9"] = [{"id": 10, "t": time.time(), "who": "you", "text": "hi"}]
                     stw["comp"]["sched"][0]["at"] = 0
                     due(cfgp, stw, "9", "comp")
-                    assert stw["comp"]["queue"] == ["w"] and not sent_   # no ⏰ ping
+                    q_ = stw["comp"]["queue"]
+                    assert len(q_) == 1 and "added tests" in q_[0], q_   # owner just spoke: no /clear
             # suggest: posted with a button, capped per hour, unknown topics refused.
             sent_ = []
             with stubbed(send=lambda c, t, x, **k: sent_.append((t, x, k.get("buttons")))):
