@@ -19,6 +19,7 @@ import concurrent.futures
 import contextlib
 import hmac
 import glob
+import hashlib
 import html
 import json
 import os
@@ -483,11 +484,11 @@ def sess_cwd(sess):
     return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
 
 
-SNAP_KEEP = 5   # nightmux/pre-* branches kept per repo; older ones are pruned here
+SNAP_KEEP = 20  # nightmux/pre-* branches kept per repo; older ones are pruned here
 
 
 def snapshot_repo(sess):
-    """Branch off whatever the worktree holds, right before an unattended prompt.
+    """Branch off whatever the worktree holds, right before every prompt.
 
     `git stash create` builds a commit from the worktree without touching it —
     unlike `git stash`, nothing is popped off, so the session never sees its own
@@ -502,8 +503,11 @@ def snapshot_repo(sess):
         if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
             return
         sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
-        if not sha:
-            return
+        newest = tmux_git(cwd, "for-each-ref", "--sort=-creatordate", "--count=1",
+                          "--format=%(refname:short)", "refs/heads/nightmux/pre-*")
+        if not sha or (newest and tmux_git(cwd, "rev-parse", sha + "^{tree}")
+                       == tmux_git(cwd, "rev-parse", newest + "^{tree}")):
+            return          # nothing changed since the last one: keep the history deep
         name = "nightmux/pre-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         tmux_git(cwd, "branch", name, sha)
         prune_snapshots(cwd)
@@ -987,6 +991,15 @@ def tail_transcript(st, path, ladder=False):
                     st["ctx_tok"] = (u.get("input_tokens", 0)
                                      + u.get("cache_creation_input_tokens", 0)
                                      + u.get("cache_read_input_tokens", 0))
+                # A compaction writes no usage record, only this. Without it the
+                # context figure stayed at the pre-compact size, autocompact read
+                # that as "/compact did not take" and ran it again two minutes
+                # later: a second summarising pass over a 14k context that made
+                # it bigger and squeezed the summary a second time.
+                cm = rec.get("compactMetadata") if rec.get("subtype") == "compact_boundary" else None
+                if cm and isinstance(cm.get("postTokens"), int):
+                    sav_ctx(st, cm["postTokens"])        # book the drop before it is the baseline
+                    st["ctx_tok"] = cm["postTokens"]
                 out += render(rec)
     st["tpos"] = pos
     if spent:
@@ -1551,7 +1564,7 @@ def warn_ctx(cfg, st, topic, sess):
         return
         
     pct = (st.get("snap") or {}).get("ctx_pct")
-    if pct is None:
+    if pct is None and st.get("ctx_tok") is None:      # the transcript is a figure too
         if cfg.get("autocompact") and st.get("mode"):   # set by hand: they expect it
             wk = f"ctx_blind_{sess}"
             with _warned_lock:   # wk is sess-scoped, but save_warned() writes one shared file
@@ -2070,13 +2083,20 @@ def idle_hint(cfg, state, topic, sess):
         st.pop("parked", None)     # it moved: arm again for the next park
         return
     pct = (st.get("snap") or {}).get("ctx_pct")
+    tok = st.get("ctx_tok")
+    # Tokens first, as with autocompact: on a 1M window 50% is 500k, so the
+    # percentage never tripped for the 60k-200k band this exists to cover.
+    big = (tok is not None and tok >= FRESH_MIN) or (pct is not None and pct >= (at or 101))
     if (not at or st.get("parked") or st.get("mode") not in ("idle", "unknown")
-            or st.get("queue") or pct is None or pct < at):
+            or st.get("queue") or not big):
         return
     st["parked"] = True
-    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {pct:.0f}% context\n"
-         f"every turn after you resume pays that {pct:.0f}% again — /clear first "
-         f"if the thread is done\n!idlectx off to stop this", mode="plain")
+    size = f"{tok // 1000}k tokens" if tok is not None else f"{pct:.0f}% context"
+    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {size}\n"
+         f"its cache has expired: the next turn re-writes all {size}, and every turn "
+         "after carries it — start fresh if the thread is done\n!idlectx off to stop this",
+         mode="plain", buttons=kb([[("🧼 fresh start (notes kept)", "!fresh now"),
+                                    ("🗜 compact", "/compact")]]))
 
 
 _queued = [None]   # last blob written: an unchanged queue never touches disk
@@ -3848,7 +3868,7 @@ def start_session(cfg, state, lock, topic, arg, key):
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
-    mem_greet(cfg, state, topic, name, cwd)
+    mem_greet(cfg, state, topic, name, cwd, fresh=True)
     return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
             "topic bound").replace("  ", " ")
 
@@ -3998,7 +4018,7 @@ def status_report(cfg, state):
 # is the other half and is caught separately, being everything that is not a
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!all",
@@ -4147,7 +4167,7 @@ HELP = [
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
-        "!undo = snapshot branches + restore commands (never runs them)",
+        "!undo [n] = snapshots taken before every prompt; n restores one (undoable)",
         "!watch pr [n] | merge | off = feed CI failures and review comments "
         "to the agent; merge button when green",
         "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
@@ -4672,14 +4692,25 @@ def handle(cfg, state, lock, topic, text, mid=None):
             "--format=%(refname:short)  %(creatordate:iso-strict)",
             "refs/heads/nightmux/pre-*").split("\n") if l.strip()]
         if not rows:
-            return f"no snapshots in {cwd} · one is taken before every unattended prompt"
+            return f"no snapshots in {cwd} · one is taken before every prompt"
+        if arg.isdigit():
+            if not 0 < int(arg) <= len(rows):
+                return f"no snapshot {arg} — !undo lists them"
+            if pane_state(visible(sess)) == "busy":
+                return f"{sess} is working — !esc it first, then undo"
+            ref = rows[int(arg) - 1].split()[0]
+            snapshot_repo(sess)     # the state being thrown away: undo is undoable
+            tmux_git(cwd, "restore", "--source", ref, "--", ".")
+            return (f"↩️ {cwd} is back to {ref}\n"
+                    "untracked new files are left alone · !undo 1 returns to "
+                    "what was there before this undo · tell the agent what you changed")
         newest = rows[0].split()[0]
-        return ("snapshots in " + cwd + " (newest first):\n"
-                + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
-                + "\n\nnightmux never restores automatically — run this yourself:\n"
-                f"  git restore --source {newest} -- .   # overwrite the worktree\n"
-                f"  git diff {newest}                    # or just look first\n"
-                "(swap in an older branch name to go further back)")
+        return ("snapshots in " + cwd + " (newest first, change vs now):\n"
+                + "\n".join(f"{i + 1}. {r.split()[1][5:16].replace('T', ' ')}  "
+                             f"{tmux_git(cwd, 'diff', '--shortstat', r.split()[0]) or 'same as now'}"
+                             for i, r in enumerate(rows[:10]))
+                + "\n\n!undo N restores one (the current state is snapshotted first)\n"
+                f"look first: git diff {newest}")
     if cmd == "!ctl":
         send(cfg, topic, f"controls · {sess}", mode="plain", buttons=kb([
             [("esc", "!esc"), ("⇧⇥ mode", "!mode"), ("⏎", "!enter"), ("↑", "!up")],
@@ -5607,7 +5638,11 @@ LIGHT = re.compile(r"^\W*(?:rename|format|lint|fix (?:the |a )?typo|typo|add (?:
                    r"run (?:the )?tests|translate|reword)\b", re.I)
 HEAVY = re.compile(r"\b(?:design|architect\w*|refactor\w*|why\b|debug\w*|investigat\w*|"
                    r"race condition|deadlock|security|vulnerab\w*|performance|optimi[sz]\w*|"
-                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*)", re.I)
+                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*|"
+                   # Creative work: the cheap model ships something that runs and
+                   # nobody wants, and no correction ever says "be more creative".
+                   r"game|landing page|ui\b|ux\b|animat\w*|beautiful|polish\w*|"
+                   r"redesign\w*|look (?:better|nicer|good)|creative|brand\w*|story)", re.I)
 _route_last = {}  # topic -> (class, agent) of the last task, for learning
 ROUTE_MIN_N = 5  # outcomes before a learned rate outranks the defaults
 
@@ -5731,7 +5766,11 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["claude-3-5-haiku-20241022", "haiku 5.5", "sonnet", "opus"], "agy": ["low", "medium", "high"]}
+# Aliases, never dated IDs: a pinned ID retires and every light turn then fails
+# (claude-3-5-haiku-20241022 did), and "haiku 5.5" is not an alias /model takes.
+# Tier index = LADDER_START: light → haiku, normal → sonnet, heavy → opus.
+# agy: gemini-3.1-pro offers only low and high effort; /effort medium is refused.
+LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
@@ -7047,6 +7086,8 @@ def upload_media(data, ext="png"):
 
 
 def wrapped_cmd(cfg, topic, arg):
+    share = arg.startswith("share")
+    arg = arg[5:].strip() if share else arg
     days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
     b = browser_bin(cfg)
     if not b:
@@ -7054,24 +7095,35 @@ def wrapped_cmd(cfg, topic, arg):
 
     def go():
         w = wrapped_data(cfg, days)
-        mine = render_html(cfg, wrapped_page(days, w), "1200,1100")
+        mine = None if share else render_html(cfg, wrapped_page(days, w), "1200,1100")
         pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1100")
-        if not (mine and pub):
+        if not (pub and (share or mine)):
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
         cells = w["cells"]
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+        if share:
+            # Only now, on a tap: the card goes to uguu.se + rentry.co so the
+            # post can carry it. Never on a plain !wrapped — that is private.
+            link = upload_media(pub, "png")
+            send(cfg, topic, "📤 card uploaded" + (f": {link}" if link else
+                 " — failed, attach wrapped-share.png yourself"), mode="plain",
+                 buttons=kb([[("🐦 Share on X", tweet_url(
+                     f"My AI coding agents, last {days} days: {top}. Run by nightmux "
+                     f"{REPO_URL} #ClaudeCode #vibecoding\n" + link)),
+                     ("👽 Reddit", reddit_url(f"My AI coding agents, last {days} days: "
+                                              f"{top}. Run by nightmux {REPO_URL}"))]]))
+            return
         send_file(cfg, topic, "wrapped.png", mine, kind="photo",
                   caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
                   + "\n".join(f"• {k}: {v}" for k, v in w["insights"])
                   + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
-                  caption="📤 to share: projects shown as counts only",
-                  buttons=kb([[("🐦 Share on X", tweet_url(
-                      f"My AI coding agents, last {days} days: {top}. Run by nightmux "
-                      f"{REPO_URL} #ClaudeCode #vibecoding\n" + upload_media(pub, "png"))), ("👽 Reddit (attach photo!)", reddit_url(f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"))]]))
+                  caption="📤 to share: projects shown as counts only — "
+                  "tapping share uploads this card (uguu.se + rentry.co) for the link",
+                  buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
-    return f"🎁 drawing your {days}-day card…"
+    return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
 
 
 # ---------- !public: a read-only office anyone can open ----------
@@ -8381,7 +8433,8 @@ MEM_UPDATE = (
 MEM_READ = ("Before anything else, read .nightmux/memory.md — notes left by earlier sessions "
             "on this project: how to run it, decisions, gotchas, what is in progress. "
             "Reply with one line: ready.")
-_mem = {}          # topic -> {"turns": n, "wait": session}
+_mem = {}          # topic -> {"turns": n, "wait": session, "fp": repo state at last update}
+_mem_seen = {}     # session -> (memory.md mtime, HEAD) its conversation already holds
 
 
 def mem_on(cfg, topic):
@@ -8401,9 +8454,41 @@ def mem_exclude(cwd):
             pass
 
 
-def mem_greet(cfg, state, topic, sess, cwd):
-    if cwd and mem_on(cfg, topic) and os.path.exists(os.path.join(cwd, MEM_REL)):
-        state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+def mem_greet(cfg, state, topic, sess, cwd, fresh=False):
+    """Queue MEM_READ — once per conversation and version of the notes.
+
+    Switching back to a bench session that already read them cost a whole turn
+    over its full context to answer "ready": on a 250k session that is ~25k
+    tokens to learn nothing. fresh: a new conversation, which holds nothing.
+    A new commit since then re-sends it too: the reread is where the agent
+    notices the notes lag the code ("memory is stale: it misses b2c0754").
+    """
+    path = os.path.join(cwd or "", MEM_REL)
+    if not (cwd and mem_on(cfg, topic) and os.path.exists(path)):
+        return
+    if fresh:
+        _mem_seen.pop(sess, None)
+    seen = mem_seen_key(path, cwd)
+    if _mem_seen.get(sess) == seen:
+        return
+    _mem_seen[sess] = seen
+    state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+
+
+def mem_seen_key(path, cwd):
+    return os.path.getmtime(path), tmux_git(cwd, "rev-parse", "-q", "--verify", "HEAD")
+
+
+def mem_print(cwd):
+    """What the repo holds right now — HEAD, the diff, untracked names — or None.
+
+    .nightmux/ is git-excluded, so the notes' own rewrite does not move it.
+    """
+    if not cwd or tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    return hashlib.sha1("\0".join(tmux_git(cwd, *a) for a in (
+        ("rev-parse", "HEAD"), ("diff", "HEAD"),
+        ("ls-files", "--others", "--exclude-standard"))).encode()).hexdigest()
 
 
 def mem_capture(cfg, topic, sess):
@@ -8418,6 +8503,9 @@ def mem_reply_capture(cfg, topic, sess, body):
     if not m or m.get("wait") != sess:
         return False
     m.pop("wait")
+    path = os.path.join((cfg.get("dirs") or {}).get(topic) or "", MEM_REL)
+    if os.path.exists(path):        # it wrote them: no need to read them back
+        _mem_seen[sess] = mem_seen_key(path, os.path.dirname(os.path.dirname(path)))
     send(cfg, topic, "🧠 project memory updated", mode="plain", quiet=True)
     return True
 
@@ -8427,7 +8515,7 @@ def mem_ask(cfg, state, topic, sess):
     if cwd:
         os.makedirs(os.path.join(cwd, ".nightmux"), exist_ok=True)
         mem_exclude(cwd)
-    _mem[topic] = {"turns": 0, "wait": sess}
+    _mem[topic] = {"turns": 0, "wait": sess, "fp": mem_print(cwd)}
     state.setdefault(sess, {}).setdefault("queue", []).append(MEM_UPDATE)
 
 
@@ -8440,6 +8528,10 @@ def mem_tick(cfg, state):
                 or st.get("mode") != "idle" or st.get("queue")
                 or now - st.get("changed", now) < MEM_QUIET
                 or topic in _goal_run or (_pair.get(topic) or {}).get("wait")):
+            continue
+        fp = m.get("fp") and mem_print((cfg.get("dirs") or {}).get(topic))
+        if fp and fp == m["fp"]:
+            m["turns"] = 0      # talk, no change to the project: the notes still hold
             continue
         mem_ask(cfg, state, topic, sess)
 
@@ -8621,6 +8713,7 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         else:
             msg += "sends when idle again · !raw overrides"
         return msg
+    snapshot_repo(sess)     # typed from a phone is still unattended for what follows
     text = spill(sess, text)
     if not inject(sess, text):
         # No agent under the pane. Holding it is the whole point: typed into a
@@ -10268,6 +10361,11 @@ def setup_tail(cfg):
           "   !new myproj ~/code/myproj\n"
           "and type to it. !help lists the rest." if cfg.get("token") else
           f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
+    if not cfg.get("token"):
+        url = phone_url(cfg)
+        print(f"\nOn your phone, scan this to open it there:\n{qr_text(url + '/app')}\n{url}/app"
+              if url else "\nOn your phone too: install Tailscale on both devices, run "
+              f"`tailscale serve --bg {cfg['webhook_port']}`, then open /app here for a QR.")
 
 
 def restore_startup(cfg, state, lock):
@@ -10437,6 +10535,7 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
     <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
     <label id="srvl">server<select name="server"></select></label>
   </div>
+  <label style="margin-top:8px">start from<select id="tpl"><option value="">blank — write your own idea</option></select></label>
   <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
     <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
   <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
@@ -10681,6 +10780,18 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
 if (location.hash === '#servers') { $('addsrv').click(); $('addsrv').scrollIntoView(); }
+// Starter ideas for a first project: each is concrete enough that the spec and
+// ./check.sh write themselves, and small enough to go green in one night.
+const TPL = [
+  ['habit tracker', 'a habit tracker web app: add habits, tick them off daily, streaks, a weekly chart, data in localStorage; check.sh runs the unit tests and a headless page load'],
+  ['landing page', 'a one-page product landing site: hero, features, pricing, FAQ, email signup form, responsive and dark-mode aware; check.sh validates the HTML and checks every link and image resolves'],
+  ['telegram bot', 'a Python Telegram bot (stdlib only) that saves notes and lists them with /notes; check.sh runs its tests against a fake Bot API'],
+  ['browser game', 'a small canvas browser game (snake or breakout) with score, levels and a high-score table in localStorage; check.sh runs the game logic tests headless'],
+  ['REST API', 'a JSON REST API for a todo list with SQLite, create/list/update/delete, input validation and an OpenAPI file; check.sh starts it and runs curl tests against every route'],
+];
+TPL.forEach(([t], i) => $('tpl').add(new Option(t, i)));
+$('tpl').onchange = e => { const t = TPL[e.target.value]; if (!t) return;
+  const f = $('newf'); if (!f.title.value) f.title.value = t[0]; f.idea.value = t[1]; };
 $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
@@ -12064,6 +12175,37 @@ def qr_svg(text):
             f"<path d='{d}' fill='#000'/></svg>")
 
 
+def phone_url(cfg, status=None):
+    """The https tailnet URL `tailscale serve` maps onto the dashboard, or None.
+
+    A dashboard opened on the laptop is at 127.0.0.1, and a QR of that sends
+    the phone to itself. This is the address the phone can actually reach.
+    Never sets serve up: putting the dashboard on the tailnet is the owner's call.
+    """
+    port = str(cfg.get("webhook_port") or 9090)
+    try:
+        web = json.loads(status if status is not None else
+                         run("tailscale", "serve", "status", "--json", timeout=5)).get("Web") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    for hostport, v in sorted(web.items()):
+        proxy = (((v or {}).get("Handlers") or {}).get("/") or {}).get("Proxy", "")
+        if re.fullmatch(r"https?://(?:127\.0\.0\.1|localhost):" + port + "/?", proxy):
+            host, _, p = hostport.rpartition(":")
+            return f"https://{host}" + ("" if p == "443" else f":{p}")
+    return None
+
+
+def qr_text(text):
+    """The QR as terminal half-blocks, two modules per character row."""
+    m = qr_matrix(text)
+    m = [[False] * (len(m) + 4)] * 2 + [[False] * 2 + r + [False] * 2 for r in m] \
+        + [[False] * (len(m) + 4)] * 3
+    # Dark modules print as spaces on a light block, so it scans on dark terminals.
+    return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
+                     for top, bot in zip(m[::2], m[1::2]))
+
+
 APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
 TERM_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -12155,9 +12297,16 @@ p{color:var(--mut)}code{color:var(--fg)}
 <a class="b s" href="__APK__">Download the app (.apk)</a>
 <p>Installed it already? <b>Open in app</b> connects it to <code id="here"></code>. No typing.</p>
 </div>
-<p>The app reaches this server the same way this page did, over your tailnet or LAN.</p>
+<p id="how">The app reaches this server the same way this page did, over your tailnet or LAN.</p>
 </main><script>
-const here = location.origin;
+// Opened on the laptop itself, location.origin is 127.0.0.1 — the phone's own
+// loopback. The server says which tailnet address reaches it instead.
+const PHONE = __PHONE__, local = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+const here = local && PHONE ? PHONE : location.origin;
+if (local && !PHONE) document.getElementById('desk').innerHTML =
+  '<p>Your phone cannot reach <code>127.0.0.1</code>. With Tailscale on both devices, run ' +
+  '<code>tailscale serve --bg ' + location.port + '</code> on this machine, then reload. ' +
+  'That opens the dashboard to your tailnet only, never the internet.</p>';
 document.getElementById('here').textContent = here;
 document.getElementById('qr').src = '/qr.svg?d=' + encodeURIComponent(here + '/app');
 document.getElementById('open').href = 'intent://connect?url=' + encodeURIComponent(here) +
@@ -12263,7 +12412,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/icon.svg":
             return self.reply(ICON_SVG, "image/svg+xml")
         if self.path == "/app":
-            return self.reply(inject_telemetry(self.server.cfg, APP_HTML), "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, APP_HTML.replace(
+                "__PHONE__", json.dumps(phone_url(self.server.cfg) or ""))),
+                "text/html; charset=utf-8")
         if self.path.startswith("/qr.svg?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -13579,6 +13730,25 @@ def selfcheck():
     with open(tp, "w") as f:                       # /clear: file shrank, rebaseline
         f.write(rec + "\n")
     assert tail_transcript(tst, tp) == []
+    # /compact: a boundary record and no usage. The figure must drop with it,
+    # or autocompact reads the stale size and compacts the summary again.
+    booked, ct = [], {}
+    tail_transcript(ct, tp)                        # its own baseline
+    with open(tp, "a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"content": [], "usage": {
+            "input_tokens": 5, "cache_read_input_tokens": 200580}}}) + "\n")
+        f.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                            "compactMetadata": {"preTokens": 204183, "postTokens": 14219}}) + "\n")
+    with stubbed(sav_add=lambda *a: booked.append(a)):
+        tail_transcript(ct, tp)
+    assert ct["ctx_tok"] == 14219 and ("drops",) in booked, (ct.get("ctx_tok"), booked)
+    actx, asent = {"autocompact": "200k"}, []
+    with stubbed(send=lambda *a, **k: asent.append(a), inject=lambda *a: asent.append(a)):
+        autocompact(actx, {"s": dict(ct, mode="idle", compacted=True)}, "1", "s")
+    assert asent == [], asent                      # under the line: re-armed, not retried
+    with open(tp, "w") as f:                       # leave the file as the next check expects
+        f.write(rec + "\n")
+    tail_transcript(tst, tp)
     assert "spend" not in tst                      # no usage records, nothing to weigh
     with open(tp, "a") as f:                       # what a turn actually cost
         f.write(json.dumps({"type": "assistant", "message": {
@@ -14223,6 +14393,14 @@ def selfcheck():
     st["snap"]["ctx_pct"] = 62
     idle_hint(cfg, state, "1", "s")
     assert sent[-1].startswith("💤 s idle 6h 0m at 62% context"), sent[-1]
+    st["changed"], st["ctx_tok"] = time.time(), 90000      # re-arm; a 1M window: 9%
+    idle_hint(cfg, state, "1", "s")
+    st["changed"], st["snap"]["ctx_pct"] = time.time() - IDLE_PARK - 1, 9
+    idle_hint(cfg, state, "1", "s")
+    assert sent[-1].startswith("💤 s idle 6h 0m at 90k tokens"), sent[-1]
+    st.pop("ctx_tok")
+    st["snap"]["ctx_pct"] = 62
+    n += 1                                        # the extra hint above
     idle_hint(cfg, state, "1", "s")
     assert len(sent) == n + 1                     # once per park, not per tick
     st["changed"] = time.time()
@@ -14998,6 +15176,43 @@ def selfcheck():
     assert task_class("rename foo to bar in utils") == "light"
     assert task_class("why does the websocket drop under load?") == "heavy"
     assert task_class("add a dark mode toggle to settings") == "normal"
+    # Drift: opencode 2 left its old tables behind, empty. The reader neither
+    # throws nor finds anything; the freshly written database gives it away.
+    import sqlite3
+    dh = tempfile.mkdtemp(prefix="nightmux-selfcheck-drift-")
+    os.makedirs(os.path.join(dh, ".local/share/opencode"))
+    con_ = sqlite3.connect(os.path.join(dh, DRIFT_STORES["opencode"]))
+    con_.executescript("CREATE TABLE message (id, session_id, data, time_created);"
+                       "CREATE TABLE part (message_id, data);"
+                       "CREATE TABLE session (id, directory);")
+    con_.close()
+    assert [a_ for a_, _ in reader_drift(home=dh)] == ["opencode"], reader_drift(home=dh)
+    old_ = time.time() - 30 * 86400
+    os.utime(os.path.join(dh, DRIFT_STORES["opencode"]), (old_, old_))
+    assert reader_drift(home=dh) == []        # untouched for a month: nothing to say
+    shutil.rmtree(dh, ignore_errors=True)
+    assert task_class("make a snake game") == "heavy"          # creative: not the cheap model
+    assert task_class("build a landing page for my app") == "heavy"
+    assert task_class("fix typo in the history page") == "light"  # "story" is a word, not a substring
+    # !wrapped is private: nothing leaves the machine until share is tapped.
+    class _Now:
+        def __init__(self, target, daemon=True):
+            self.go = target
+
+        def start(self):
+            self.go()
+    ups, outs = [], []
+    with stubbed(browser_bin=lambda c: "chromium", render_html=lambda *a: b"png",
+                 wrapped_page=lambda *a, **k: "",
+                 wrapped_data=lambda c, d: {"cells": [("3", "turns")], "insights": [], "split": []},
+                 send_file=lambda *a, **k: outs.append(k.get("buttons")),
+                 send=lambda *a, **k: outs.append(k.get("buttons")),
+                 upload_media=lambda *a: ups.append(a) or "https://uguu.se/x.png",
+                 threading=type("T", (), {"Thread": _Now})):
+        wrapped_cmd({}, 1, "7")
+        assert ups == [] and "!wrapped share 7" in outs[-1], outs
+        wrapped_cmd({}, 1, "share 7")
+        assert len(ups) == 1 and "Share on X" in outs[-1], outs
     rcfg_ = {"topics": {"4": "r"}, "started": {"4": "claude"}, "route": {"4": "auto"},
              "bench": {"4": {"claude": "r", "codex": "r-codex"}}}
     rst_ = {"r": {"mode": "idle", "changed": time.time() - 3600}}
@@ -15092,18 +15307,18 @@ def selfcheck():
         assert "9" not in _lint_pass and "9" not in _lint_hold
         note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
         assert queued and "haiku" in note and cst_["k"]["queue"] == [
-            "/model claude-3-5-haiku-20241022", "rename foo to bar in utils"], cst_
+            "/model haiku", "rename foo to bar in utils"], cst_
         assert _route_last["9"] == ("light", "claude")
         cst_["k"]["queue"] = []
         assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
         assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
         _route_last["9"] = ("light", "claude")
         coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
-        assert cst_["k"]["queue"] == ["/model haiku 5.5"], cst_    # two corrections: step up
+        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
         assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model haiku 5.5"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
         cst_["k"]["queue"] = []
         ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
         assert cst_["k"]["queue"] == [], cst_
@@ -15276,6 +15491,19 @@ def selfcheck():
     assert "Open in app" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/app").read().decode()
     qsvg_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/qr.svg?d=https%3A%2F%2Fbox.ts.net%2Fapp").read()
     assert qsvg_.startswith(b"<svg") and b"M4,4h1" in qsvg_
+    # The terminal QR is the same matrix, module for module, inside a light border.
+    qt_ = [[{" ": (1, 1), "▄": (1, 0), "▀": (0, 1), "█": (0, 0)}[c] for c in l]
+           for l in qr_text("https://box.ts.net/app").split("\n")]
+    back_ = [[bool(c[k]) for c in row] for row in qt_ for k in (0, 1)]
+    assert [r[2:-2] for r in back_[2:2 + len(qr_matrix("https://box.ts.net/app"))]] \
+        == qr_matrix("https://box.ts.net/app")
+    serve_ = json.dumps({"Web": {"box.ts.net:443": {"Handlers": {
+        "/": {"Proxy": "http://127.0.0.1:9090"}, "/apk": {"Proxy": "http://127.0.0.1:9091"}}},
+        "box.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7000"}}}}})
+    assert phone_url({}, serve_) == "https://box.ts.net"
+    assert phone_url({"webhook_port": 7000}, serve_) == "https://box.ts.net:8443"
+    assert phone_url({"webhook_port": 9091}, serve_) is None     # only under /apk
+    assert phone_url({}, "") is None and phone_url({}, "{}") is None
     qm_ = qr_matrix("https://box.ts.net/app")
     assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
     assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
@@ -15537,6 +15765,29 @@ def selfcheck():
         open(os.path.join(md_, MEM_REL), "w").write("## What this is\nx")
         mem_greet(mcfg2_, st3_, "3", "m2", md_)
         assert st3_["m2"]["queue"] == [MEM_READ]
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # back to it: already read
+        assert st3_["m2"]["queue"] == [MEM_READ]
+        later_ = time.time() + 5
+        os.utime(os.path.join(md_, MEM_REL), (later_, later_))
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # notes rewritten since
+        assert st3_["m2"]["queue"] == [MEM_READ] * 2
+        mem_greet(mcfg2_, st3_, "3", "m2", md_, fresh=True)  # new conversation, same name
+        assert st3_["m2"]["queue"] == [MEM_READ] * 3
+        with stubbed(tmux_git=lambda c, *a: "c0ffee"):        # a commit since: the notes may lag it
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
+        # No change to the project since the last rewrite: no rewrite.
+        _mem["3"] = {"turns": MEM_TURNS, "fp": "same"}
+        mst2_["m"]["queue"] = []
+        with stubbed(mem_print=lambda c: "same"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [] and _mem["3"]["turns"] == 0
+        _mem["3"]["turns"] = MEM_TURNS
+        with stubbed(mem_print=lambda c: "moved"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [MEM_UPDATE]
         mcfg2_["memory"] = {"3": "off"}
         mem_capture(mcfg2_, "3", "m")
         assert _mem["3"]["turns"] == 0
@@ -16604,7 +16855,7 @@ def selfcheck():
     assert len(pre) == 1, pre
     tmux_git(repo, "branch", "-D", pre[0])   # clean slate for the deterministic prune below
 
-    for i in range(7):                                    # deterministic creatordate
+    for i in range(SNAP_KEEP + 2):                                    # deterministic creatordate
         d = f"2020-01-01T00:00:{i:02d}"
         env = dict(os.environ, GIT_AUTHOR_DATE=d, GIT_COMMITTER_DATE=d)
         with open(os.path.join(repo, "f"), "w") as f:
@@ -16616,17 +16867,31 @@ def selfcheck():
     survivors = [n_ for n_ in tmux_git(
         repo, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
         "refs/heads/nightmux/pre-*").split("\n") if n_.strip()]
-    assert len(survivors) == SNAP_KEEP, survivors      # only the last 5 survive
-    assert survivors[0] == "nightmux/pre-fake6", survivors
+    assert len(survivors) == SNAP_KEEP, survivors      # only the newest SNAP_KEEP survive
+    assert survivors[0] == f"nightmux/pre-fake{SNAP_KEEP + 1}", survivors
     assert "nightmux/pre-fake0" not in survivors, survivors
 
     cfg4 = {"topics": {"1": "s4"}}
     with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True):
         undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo")
         wt_out = handle(cfg4, {}, threading.Lock(), "1", "!worktrees")
-    assert "nightmux/pre-fake6" in undo_out, undo_out
-    assert "git restore --source nightmux/pre-fake6" in undo_out
-    assert "git diff nightmux/pre-fake6" in undo_out, undo_out
+    assert f"nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+    assert "1. 01-01 00:00  same as now" in undo_out, undo_out
+    assert f"git diff nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+    with open(os.path.join(repo, "f"), "w") as f:      # the agent wrecks the file
+        f.write("wrecked")
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                 visible=lambda s: ["❯ "]):
+        undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo 2")
+        assert f"back to nightmux/pre-fake{SNAP_KEEP}" in undo_out, undo_out
+        with open(os.path.join(repo, "f")) as f:
+            assert f.read() == str(SNAP_KEEP)
+        handle(cfg4, {}, threading.Lock(), "1", "!undo 1")   # undo the undo
+        with open(os.path.join(repo, "f")) as f:
+            assert f.read() == "wrecked"
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                 visible=lambda s: ["esc to interrupt"]):
+        assert "is working" in handle(cfg4, {}, threading.Lock(), "1", "!undo 1")
     assert repo in wt_out and "feature-a" in wt_out, wt_out
 
     shutil.rmtree(repo, ignore_errors=True)
@@ -16641,7 +16906,7 @@ def selfcheck():
 
     with stubbed(load_cfg=_boom):
         assert doctor() is False               # no config at all: nothing else to check
-    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
+    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]}, reader_drift=lambda: [],
                 api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
                 run=lambda *a, **kw: "process" if "KillMode" in a else "active",
                 shutil=_FakeShutil(), installed_agents=lambda c: ["claude"]):
@@ -16683,6 +16948,47 @@ def selfcheck():
     # debris in the live upload cache, where prune would not touch it for a week.
     os.path.exists(CFG_PATH) and os.remove(CFG_PATH)
     print("selfcheck ok")
+
+
+_drift = {}
+# Database stores, where a renamed table reads as "nothing happened" rather than
+# an error: the old table stays behind, empty. The files' mtime is the activity
+# signal that does not go through the reader being checked.
+DRIFT_STORES = {"opencode": ".local/share/opencode/opencode.db",
+                "agy": ".gemini/antigravity-cli/conversation_summaries.db"}
+
+
+def reader_drift(home=None, days=7):
+    """[(agent, what is wrong)] for token readers that broke without saying so.
+
+    Every agent CLI owns its storage and changes it without notice — opencode 2
+    moved its messages to a new table, and the reader kept answering 0, so
+    Wrapped, !stats and the savings all quietly lost an agent. Two symptoms are
+    checkable from here: the reader throws, or it finds activity and no tokens.
+    """
+    hit = _drift.get(days)
+    if home is None and hit and time.time() - hit[0] < 600:
+        return hit[1]
+    out, stats, since = [], {}, time.time() - days * 86400
+    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
+        a = scan.__name__[len("_scan_"):]
+        try:
+            scan(stats, home or os.path.expanduser("~"), since)
+        except Exception as e:
+            out.append((a, f"reader failed: {str(e)[:80]}"))
+            continue
+        s = stats.get(a) or _chat_bucket({}, a)
+        db = os.path.join(home or os.path.expanduser("~"), DRIFT_STORES.get(a, "\0"))
+        wrote = max([os.path.getmtime(f) for f in (db, db + "-wal") if os.path.exists(f)] or [0])
+        if wrote >= since and not (s["sessions"] or s["requests"]):
+            out.append((a, f"its store was written {left(time.time() - wrote)} ago "
+                           "but the reader found no sessions"))
+        elif (s["sessions"] or s["prompts"]) and not (s["input"] + s["output"] + s["cache_read"]):
+            out.append((a, f"{s['sessions']} sessions, {s['prompts']} prompts in {days}d "
+                           "but 0 tokens parsed"))
+    if home is None:
+        _drift[days] = (time.time(), out)
+    return out
 
 
 def setup_checks(cfg=None):
@@ -16756,6 +17062,13 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
+    drift = reader_drift()
+    for a, why in drift:
+        add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "
+            f"({agent_version(a) or 'version unknown'}); "
+            "token stats for it are wrong until nightmux is updated")
+    if not drift:
+        add("token readers match the installed CLIs", True)
     return out
 
 
