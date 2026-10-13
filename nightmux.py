@@ -850,11 +850,16 @@ def snaps():
             mtime = os.path.getmtime(path)
             cached = _snap_cache.get(path)
             if cached and cached[0] == mtime:
-                yield cached[1]
+                if cached[1]:
+                    yield cached[1]
                 continue
             with open(path) as f:
                 data = json.load(f)
-                _snap_cache[path] = (mtime, data)
+            # The directory is shared: a list or a bare value written by anything
+            # else is not a snapshot, and must not take the daemon down at startup.
+            data = data if isinstance(data, dict) else None
+            _snap_cache[path] = (mtime, data)
+            if data:
                 yield data
         except (OSError, ValueError):
             continue
@@ -16947,6 +16952,14 @@ def selfcheck():
     # Later saves recreate the redirected config; leaving it behind drops test
     # debris in the live upload cache, where prune would not touch it for a week.
     os.path.exists(CFG_PATH) and os.remove(CFG_PATH)
+    # A non-snapshot JSON in the shared state dir (a list, from another tool)
+    # once crash-looped the daemon at startup inside snapped().
+    with tempfile.TemporaryDirectory() as sd_, stubbed(STATE_DIR=sd_):
+        with open(os.path.join(sd_, "stray.json"), "w") as f:
+            json.dump(["x"], f)
+        with open(os.path.join(sd_, "s1.json"), "w") as f:
+            json.dump({"pane": "%9", "ts": time.time()}, f)
+        assert list(snapped()) == ["%9"] and list(snapped()) == ["%9"]
     print("selfcheck ok")
 
 
