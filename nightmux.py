@@ -2533,7 +2533,7 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     key = key or body
     if not body or key == st.get("asked") or notified(sess):
         return False
-    st["asked"] = key
+    st["asked"], st["asked_at"] = key, time.time()
     buttons = menu_buttons(lines, sess)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
@@ -8342,6 +8342,11 @@ def nm_call(name, a, base=None, companion=False):
         txt = str(a.get("text") or "").strip()
         if not txt or txt.startswith("!"):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
+        row = next((r for r in get("/api/topics") if str(r.get("topic")) == str(a.get("topic"))), None)
+        if row and row.get("mode") == "waiting":
+            # nightmux refuses text into an open menu — saying "sent" would be a lie
+            raise ValueError("a menu is open there: text would pick an option, so nightmux "
+                             "holds it. Ask the owner with suggest, or read_terminal to see it")
         if companion or a.get("role"):
             txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
             companion_log(a, txt)
@@ -8466,41 +8471,67 @@ def activity_mark(cfg):
     return max((log[-1]["id"] for t, log in list(_chat.items()) if t != own and log), default=0)
 
 
+AGENT_REPLY = re.compile(r"✅ \S+\n")   # an agent's answer; everything else is nightmux talking
+
+
+def open_question(log):
+    """(question, asked at) when the last agent answer ends in a question nobody has
+    answered since — the stall a menu detector misses, because the pane is idle."""
+    for m in reversed(log):
+        if m.get("who") == "you":
+            return None
+        if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or ""):
+            tail = [l.strip() for l in m["text"].splitlines() if l.strip()][-1:]
+            return (tail[0], m.get("t", 0)) if tail and tail[0].endswith("?") else None
+    return None
+
+
 def progress_report(cfg, state, since):
     """What moved in each project since `since`, for the companion to read in one call.
 
     Built here from the chat log and git rather than by the companion reading
     every chat: one call of a few hundred tokens instead of one per project.
-    Flags the two things a person scanning topics misses: a question nobody
-    answered, and an agent busy for a long while without a commit.
+    Only agent answers count as replies — nightmux's own status lines (🧠, 📥,
+    ⚙️, the companion's 💡) would otherwise read as an agent busy going nowhere.
+    Git is asked even with no chat: the log is in memory and empty after a
+    restart, and work done straight in the terminal never passes through it.
+    Flags what a person scanning topics misses: a question nobody answered —
+    a menu or a reply ending in "?" — and how long it has waited, and an agent
+    answering again and again without a commit.
     # ponytail: this machine's topics only; add peers via peer_call if they matter.
     """
     own = str((cfg.get("companion") or {}).get("topic"))
-    names = cfg.get("topic_names") or {}
+    names, now = cfg.get("topic_names") or {}, time.time()
+    since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
     moved, quiet = [], []
     for r in topics_status(cfg, state):
         t, sess = str(r["topic"]), r["session"]
         if t == own:
             continue
-        log = [m for m in _chat.get(t) or [] if m.get("t", 0) >= since]
-        replies = [m for m in log if m.get("who") == "bot"]
+        full = _chat.get(t) or []
+        log = [m for m in full if m.get("t", 0) >= since]
+        replies = [m for m in log if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or "")]
         st = state.get(sess) or {}
-        if not log and r["mode"] != "waiting":
-            quiet.append(names.get(t) or sess)
-            continue
         cwd = (cfg.get("dirs") or {}).get(t)
-        since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
         commits = [c for c in tmux_git(cwd, "log", "--oneline", f"--since={since_s}").split("\n")
                    if c.strip()] if cwd and os.path.isdir(cwd) else []
+        if r["mode"] == "waiting" and st.get("asked"):
+            asked = (st["asked"].strip().splitlines()[0], st.get("asked_at"))
+        else:
+            asked = open_question(full)
+        if not (log or commits or asked):
+            quiet.append(names.get(t) or sess)
+            continue
         lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
                  f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
-        last = replies[-1]["text"].strip() if replies else ""
+        last = replies[-1]["text"].split("\n", 1)[1].strip() if replies else ""
         if last:
             lines.append("  last: " + last.splitlines()[0][:160])
         lines += [f"  {c[:90]}" for c in commits[:3]]
-        if r["mode"] == "waiting" and st.get("asked"):
-            lines.append("  ✋ waiting on: " + st["asked"].strip().splitlines()[0][:140])
-        if len(replies) >= SPIN_REPLIES and not commits and r["mode"] != "waiting":
+        if asked:
+            lines.append(f"  ✋ waiting on you: {asked[0][:140]}"
+                         + (f" ({left(now - asked[1])})" if asked[1] else ""))
+        if len(replies) >= SPIN_REPLIES and not commits and not asked:
             lines.append(f"  ⚠ {len(replies)} replies, no commit — may be going in circles")
         if r.get("held_until"):
             lines.append(f"  💤 held until {clock(cfg, r['held_until'])}")
@@ -8656,6 +8687,9 @@ def companion_cmd(cfg, state, lock, topic, arg):
         return f"could not give {key} the nightmux tools: {e}"
     if p.returncode:
         return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
+    with lock:   # MEMORY.md is its memory; the project-notes turns would bill its whole context
+        cfg.setdefault("memory", {})[str(topic)] = "off"
+        save_cfg(cfg)
     out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR} {flags}".strip(), key)
     if not out.startswith("started"):
         return out
@@ -17367,7 +17401,9 @@ def selfcheck():
         st_ = {}
         with stubbed(COMPANION_DIR=cd_, subprocess=fake_sp,
                      start_session=lambda c, s, l, t, a, k: f"started {k} '{a.split()[0]}'"):
-            out = companion_cmd({"agents": {}}, st_, threading.Lock(), "7", "claude")
+            cfgc_ = {"agents": {}}
+            out = companion_cmd(cfgc_, st_, threading.Lock(), "7", "claude")
+            assert cfgc_["memory"]["7"] == "off"         # no project-notes turns for it
             assert out.startswith("started claude 'companion'"), out
             assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
             with open(os.path.join(cd_, "CLAUDE.md")) as f:
@@ -17417,6 +17453,17 @@ def selfcheck():
                 return io.BytesIO(json.dumps({"items": [m for m in msgs if m["id"] > after]}).encode())
             fake_ul = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
                 "urlopen": staticmethod(fake_open), "Request": urllib.request.Request})})
+            def fake_open2(url, timeout=10):
+                got.append(getattr(url, "full_url", url))
+                return io.BytesIO(json.dumps([{"topic": "5", "mode": "waiting"}]).encode())
+            fake_ul2 = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open2), "Request": urllib.request.Request})})
+            with stubbed(urllib=fake_ul2):
+                try:
+                    nm_call("send_prompt", {"topic": "5", "text": "yes"}, "http://x")
+                    assert False, "typed into an open menu"
+                except ValueError as e:
+                    assert "menu is open" in str(e) and not any("/topic/" in u for u in got)
             with stubbed(urllib=fake_ul):
                 _nm_seen.clear()
                 text = nm_call("read_chat", {"topic": "5"}, base="http://x", companion=True)[0]["text"]
@@ -17434,16 +17481,36 @@ def selfcheck():
                      {"topic": "6", "session": "blog", "mode": "waiting"},
                      {"topic": "8", "session": "old", "mode": "idle"},
                      {"topic": "9", "session": "comp", "mode": "idle"}]
-            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"step {i}\nmore"} for i in range(1, 8)],
+            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"} for i in range(1, 8)]
+                     + [{"id": 20 + i, "t": now_, "who": "bot", "text": f"🧠 memory {i}"} for i in range(9)],
                      "9": [{"id": 50, "t": now_, "who": "bot", "text": "me"}]}
             stp = {"blog": {"asked": "Use postgres or sqlite?"}}
             with stubbed(topics_status=lambda c, s: rows_, _chat=chat_, tmux_git=lambda *a: ""):
                 cfgp = {"companion": {"topic": "9"}, "dirs": {"5": cd_}}
                 rep_ = progress_report(cfgp, stp, now_ - 60)
                 assert "▸ shop (topic 5) [idle] · 7 replies · 0 commits · budget 1M of 5M" in rep_, rep_
+                # status lines are not replies: nine 🧠 lines alone are no circle
+                chat_["5"] = chat_["5"][7:]
+                rep2 = progress_report(cfgp, stp, now_ - 60)
+                assert "0 replies" in rep2 and "circles" not in rep2 and "last:" not in rep2, rep2
+                chat_["5"] = [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"}
+                              for i in range(1, 8)]
                 assert "last: step 7" in rep_ and "going in circles" in rep_
-                assert "✋ waiting on: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
+                assert "✋ waiting on you: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
                 assert "comp" not in rep_ and activity_mark(cfgp) == 7
+                # a question at the end of an answer, unanswered: flagged with its wait
+                chat_["8"] = [{"id": 30, "t": now_ - 7200, "who": "bot",
+                               "text": "✅ old\nDone.\nShould I also add dark mode?"}]
+                assert "✋ waiting on you: Should I also add dark mode? (2h" in \
+                    progress_report(cfgp, stp, now_ - 60)
+                chat_["8"].append({"id": 31, "t": now_ - 3600, "who": "you", "text": "no"})
+                assert "quiet: old" in progress_report(cfgp, stp, now_ - 60)
+                chat_.pop("8")
+            # commits made in the terminal show even with no chat (empty after a restart)
+            with stubbed(topics_status=lambda c, s: rows_[2:3], _chat=chat_,
+                         tmux_git=lambda cwd, *a: "abc123 fix login\n"):
+                rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
+                assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
                 # watch rounds: skipped while the mark has not moved, queued once it does.
                 stw = {"comp": {"sched": [{"at": 0, "every": 3600, "text": "w", "watch": True,
                                            "companion": True, "mark": 7}]}}
