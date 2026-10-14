@@ -71,7 +71,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 `!help tokens`
 
 - `!usage` | `!ctx` | `!cost [days]` | `!forecast` = when each window fills
-- `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k; Claude also compacts mid-turn there) · `!autocompact` park &lt;20m|off> = compact idle sessions over 100k · `!idlectx <pct|off>`
+- `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k; Claude also compacts mid-turn there) · `!autocompact` park &lt;45m|off> = compact sessions idle that long over 100k (default 45m) · `!idlectx <pct|off>`
 - `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
 - `!spendcap <turns|500k|2M|off>` = interrupt a runaway loop
