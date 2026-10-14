@@ -8628,16 +8628,18 @@ COMPANION_MORNING = (
 
 COMPANION_WATCH = (
     "Watch round. The progress report below lists the projects that moved since your "
-    "last round. Tell the owner here, one line per project that moved: what got done, and what "
-    "is stuck (waiting on a question, going in circles, out of budget or usage). Then "
-    "share ideas: for at most 3 projects where you see a clearly better next step, a risk, "
-    "a missing test or a shortcut, call suggest with one concrete prompt the agent could "
-    "run — the owner taps to send it. Skip generic advice: an idea names the file, feature "
-    "or command and quotes the line it builds on (a commit, an answer, a note); never a "
-    "file you have not seen. Put the owner's priorities in PERSONA.md first; where a 📌 "
-    "target is set, every idea moves toward it; an idle 📌 target or ⭐ priority gets its next step (or a question for the owner). Answer an agent's waiting question yourself with send_prompt only "
-    "when MEMORY.md or the project's notes already hold the answer and your risk level "
-    "allows. If nothing below is worth a line, reply only \"quiet\".")
+    "last round, and every ⭐ priority and 📌 target even when idle. Work through it in "
+    "this order. 1) Act: where an agent waits on a question its notes or MEMORY.md "
+    "answer, or a ⭐/📌 project has nothing in flight, hand out the next step with "
+    "send_prompt and a role — wherever you may act (its own !budget or your allowance) "
+    "and your risk level allows. A next: line the project already chose, a fix, a test, a "
+    "review or docs is clear work, not a new feature: do it, don't ask. 2) Where you may "
+    "not act, call suggest with that same one prompt so the owner sends it with a tap — "
+    "never only describe it. At most 3 suggests; each names the file, feature or command "
+    "and quotes the line it builds on (a commit, an answer, a note), never a file you have "
+    "not seen. 3) Then tell the owner, one line per project: what got done, what you sent "
+    "or suggested, what is stuck (a question, going in circles, out of budget or usage). "
+    "Reply only \"quiet\" when nothing moved and no ⭐/📌 project has a next step.")
 SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
 IDEA_STALE = 86400    # an idea nobody tapped in a day counts as ignored
 _idea_times = []
@@ -8752,6 +8754,12 @@ def progress_report(cfg, state, since):
     for t in [t for t in list(focus) + prio if t not in seen and t != own]:
         seen.add(t)
         cwd = (cfg.get("dirs") or {}).get(t)
+        peer = (cfg.get("remote") or {}).get(t)
+        if peer:   # its folder is on that box: the local path is empty or someone else's
+            moved.append(f"▸ {names.get(t) or t} (topic {t}) on {peer} · "
+                         + ("📌 target: " + focus[t] if t in focus else f"⭐ priority {prio.index(t) + 1}")
+                         + " — idle; send_prompt reaches it there")
+            continue
         if not cwd or not os.path.isdir(cwd):
             continue
         moved.append("\n".join(
@@ -8889,6 +8897,9 @@ def companion_wake(base, cfg, topic):
     """Start the agent of a project that has a folder but no session, so work the
     companion hands it is not dropped on an empty topic."""
     folder = (cfg.get("dirs") or {}).get(topic)
+    peer = (cfg.get("remote") or {}).get(topic)
+    if peer:   # never start a stand-in here: its folder lives on the peer
+        raise ValueError(f"topic {topic} runs on {peer}, which did not answer — try next round")
     if not folder or not os.path.isdir(folder):
         raise ValueError(f"topic {topic} has no session and no folder — ask the owner to open it")
     name = re.sub(r"[^\w.-]", "", (cfg.get("topic_names") or {}).get(topic) or
@@ -18452,6 +18463,12 @@ def selfcheck():
         assert job_["at"] - time.time() < 120 and time.time() - job_["since"] > 3 * 3600 - 60, job_
     shutil.rmtree(cdir_, ignore_errors=True)
     shutil.rmtree(pdir_, ignore_errors=True)
+    # A priority on a peer is never woken here, where its folder is empty.
+    try:
+        companion_wake("http://127.0.0.1:1", {"dirs": {"9": "/tmp"}, "remote": {"9": "vps2"}}, "9")
+        raise AssertionError("woke a remote topic locally")
+    except ValueError as e_:
+        assert "vps2" in str(e_), e_
     print("selfcheck ok")
 
 
