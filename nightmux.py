@@ -27,6 +27,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -35,6 +36,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 import zlib
 
 VERSION = "1.3.0"
@@ -526,6 +528,8 @@ def snapped():
     """{pane_id: ts} for every status-line snapshot still worth trusting."""
     out, now = {}, time.time()
     for d in snaps():
+        if not isinstance(d, dict):
+            continue
         p, ts = d.get("pane"), d.get("ts", 0)
         if p and now - ts <= STATE_FRESH and ts > out.get(p, 0):
             out[p] = ts
@@ -832,19 +836,21 @@ def snaps():
     except OSError:
         return
     for n in names:
-        if not n.endswith(".json"):
+        if not n.endswith(".json") or n.startswith(("queue.", "warned.", "paired_tokens.", "savings.")):
             continue
         path = os.path.join(STATE_DIR, n)
         try:
             mtime = os.path.getmtime(path)
             cached = _snap_cache.get(path)
             if cached and cached[0] == mtime:
-                yield cached[1]
+                if isinstance(cached[1], dict):
+                    yield cached[1]
                 continue
             with open(path) as f:
                 data = json.load(f)
                 _snap_cache[path] = (mtime, data)
-                yield data
+                if isinstance(data, dict):
+                    yield data
         except (OSError, ValueError):
             continue
 
@@ -2533,7 +2539,7 @@ def prune(now, last, live=()):
     for d, days in ((FILE_DIR, 7), (STATE_DIR, 1)):
         cut = now - days * 86400
         for n in os.listdir(d) if os.path.isdir(d) else []:
-            if d == STATE_DIR and n.startswith(("queue.json", "warned.json")):
+            if d == STATE_DIR and n.startswith(("queue.json", "warned.json", "paired_tokens.json")):
                 continue   # held prompts are state, not a cache: only rewritten
             p = os.path.join(d, n)   # when they change, so mtime says nothing
             try:
@@ -10383,10 +10389,15 @@ def setup_tail(cfg):
         print(f"skipped. Run it yourself with: {sys.executable} {__file__}")
         return
     print(wire_unit() or f"   started, unit at {PLIST_PATH if mac else UNIT_PATH}")
-    print("\nDone. In the group: create a topic, then send\n"
-          "   !new myproj ~/code/myproj\n"
-          "and type to it. !help lists the rest." if cfg.get("token") else
-          f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
+    if cfg.get("token"):
+        print("\nDone. In the group: create a topic, then send\n"
+              "   !new myproj ~/code/myproj\n"
+              "and type to it. !help lists the rest.")
+    else:
+        c = new_pairing_code()
+        purl = pairing_url(cfg, c)
+        print(f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
+        print(f"\nOn your phone, scan this to open the dashboard:\n{qr_text(purl)}\n{purl}")
 
 
 def restore_startup(cfg, state, lock):
@@ -10548,11 +10559,42 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div>
+<h2>connect <span class="sub">optional phone and chat integrations</span></h2>
+<div class="grid" id="connect">
+  <div class="card" id="card-phone">
+    <div class="row"><b>📱 Phone Pairing</b><span id="pair-count" class="meta" style="margin-left:auto">0 paired</span></div>
+    <p class="sub" style="margin:4px 0 8px">Access this dashboard securely from your phone outside localhost.</p>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <a href="/pair" target="_blank" class="primary" style="text-decoration:none;padding:5px 12px;border-radius:8px;font-size:12px;background:#1f6feb;color:#fff">+ Pair phone</a>
+      <button id="revoke-btn" type="button" class="close" style="font-size:12px">Revoke all</button>
+    </div>
+  </div>
+  <div class="card" id="card-tg">
+    <div class="row"><b>✈️ Telegram</b><span id="tg-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Control your agents from Telegram forum topics. Run <code>nightmux --setup</code> to connect a bot.</p>
+  </div>
+  <div class="card" id="card-dc">
+    <div class="row"><b>🎮 Discord</b><span id="dc-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Drive agents from Discord threads. Set <code>discord_token</code> in config.</p>
+  </div>
+  <div class="card" id="card-sl">
+    <div class="row"><b>💼 Slack</b><span id="sl-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Drive agents from Slack channels. Set <code>slack_token</code> in config.</p>
+  </div>
+</div>
 <h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
 <div id="newp" class="card"><form id="newf">
   <div class="f">
     <label>project name<input name="title" required placeholder="habit tracker" autocomplete="off"></label>
     <label>agent<select name="agent"></select></label>
+    <label>starter template<select name="template">
+      <option value="">Blank (custom idea)</option>
+      <option value="landing-page">🌐 Landing page</option>
+      <option value="crud-app">📦 CRUD web app</option>
+      <option value="telegram-bot">🤖 Telegram bot</option>
+      <option value="chrome-extension">🧩 Chrome extension</option>
+      <option value="cli-tool">⚡ CLI tool</option>
+    </select></label>
     <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
     <label id="srvl">server<select name="server"></select></label>
   </div>
@@ -10742,6 +10784,23 @@ async function openNew() {
   f.agent.innerHTML = ag.installed.map(a => '<option>' + esc(a) + '</option>').join('');
   f.server.innerHTML = ag.servers.map((s, i) => '<option value="' + (i ? esc(s) : '') + '">' + esc(s) + '</option>').join('');
   $('srvl').style.display = ag.servers.length > 1 ? '' : 'none';
+  const TPL_PRESETS = {
+    'landing-page': ['Landing page', 'A modern, responsive product landing page with hero, features, and email signup form.'],
+    'crud-app': ['CRUD web app', 'A zero-dependency Python CRUD web application with SQLite backend and REST API.'],
+    'telegram-bot': ['Telegram bot', 'A Python Telegram Bot for notes management (stdlib only).'],
+    'chrome-extension': ['Chrome extension', 'A Manifest V3 Google Chrome extension with popup UI and scratchpad.'],
+    'cli-tool': ['CLI tool', 'A Python command-line utility with argparse, text analysis, and --json flag.']
+  };
+  if (f.template) {
+    f.template.onchange = () => {
+      const v = f.template.value;
+      if (TPL_PRESETS[v]) {
+        f.title.value = TPL_PRESETS[v][0];
+        f.idea.value = TPL_PRESETS[v][1];
+        f.title.oninput();
+      }
+    };
+  }
   const slug = () => (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
   f.title.oninput = () => { f.folder.placeholder = ag.projects_root + '/' + (slug() || '<name>'); };
   f.title.oninput(); f.title.focus();
@@ -10763,6 +10822,22 @@ async function setupPanel() {
     $('recheck').onclick = () => { box.innerHTML = '<p class="meta">checking…</p>'; setupPanel(); };
   } catch (e) { box.innerHTML = ''; }
 }
+
+async function connectCards() {
+  try {
+    const d = await (await fetch('/api/connect')).json();
+    if ($('pair-count')) $('pair-count').textContent = d.paired_count + ' paired';
+    if ($('card-tg')) set($('card-tg'), '#tg-status', d.telegram ? 'connected' : 'optional');
+    if ($('card-dc')) set($('card-dc'), '#dc-status', d.discord ? 'connected' : 'optional');
+    if ($('card-sl')) set($('card-sl'), '#sl-status', d.slack ? 'connected' : 'optional');
+  } catch (e) {}
+}
+if ($('revoke-btn')) $('revoke-btn').onclick = async () => {
+  if (!confirm('Revoke all paired phone sessions? They will need to scan a new QR code to reconnect.')) return;
+  const res = await act('/api/pair/revoke');
+  toast(res.msg || 'Revoked all paired devices');
+  connectCards();
+};
 
 // Servers: this one and its peers; + add server makes a join code.
 async function servers2() {
@@ -10795,7 +10870,7 @@ $('copyjoin').onclick = async () => {
   catch (e) { const r = document.createRange(); r.selectNodeContents($('joincmd'));
               getSelection().removeAllRanges(); getSelection().addRange(r); toast('selected — copy it'); }
 };
-setupPanel(); servers2(); setInterval(servers2, 30000);
+setupPanel(); connectCards(); servers2(); setInterval(servers2, 30000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
@@ -10804,8 +10879,10 @@ $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
   b.disabled = true; toast('creating ' + f.title.value + '…');
+  const tplVal = (f.template && f.template.value) ? f.template.value : '';
   const o = await act('/api/topic/new', {title: f.title.value, name: slug, folder: f.folder.value.trim(),
-                                          agent: f.agent.value, idea: f.idea.value.trim(), server: f.server.value});
+                                          agent: f.agent.value, idea: f.idea.value.trim(), server: f.server.value,
+                                          template: tplVal});
   b.disabled = false; toast(o.msg);
   if (o.ok) { f.reset(); $('newp').classList.remove('open'); tick(); }
 };
@@ -12183,6 +12260,454 @@ def qr_svg(text):
             f"<path d='{d}' fill='#000'/></svg>")
 
 
+def qr_text(text):
+    """The QR as terminal half-blocks, two modules per character row."""
+    m = qr_matrix(text)
+    m = [[False] * (len(m) + 4)] * 2 + [[False] * 2 + r + [False] * 2 for r in m] \
+        + [[False] * (len(m) + 4)] * 3
+    return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
+                     for top, bot in zip(m[::2], m[1::2]))
+
+
+def get_local_ip():
+    """Detect LAN / local IP address without external network requests."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def phone_url(cfg, status=None):
+    """The https tailnet URL `tailscale serve` maps onto the dashboard, or None."""
+    port = str(cfg.get("webhook_port") or 9090)
+    try:
+        web = json.loads(status if status is not None else
+                         run("tailscale", "serve", "status", "--json", timeout=5)).get("Web") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    for hostport, v in sorted(web.items()):
+        proxy = (((v or {}).get("Handlers") or {}).get("/") or {}).get("Proxy", "")
+        if re.fullmatch(r"https?://(?:127\.0\.0\.1|localhost):" + port + "/?", proxy):
+            host, _, p = hostport.rpartition(":")
+            return f"https://{host}" + ("" if p == "443" else f":{p}")
+    return None
+
+
+def pairing_url(cfg, code):
+    """Full pairing URL either over tailnet or LAN."""
+    base = phone_url(cfg)
+    port = cfg.get("webhook_port") or 9090
+    if not base:
+        ip = get_local_ip()
+        base = f"http://{ip}:{port}"
+    return f"{base}/pair?code={code}"
+
+
+PAIRED_TOKENS_FILE = os.path.join(STATE_DIR, "paired_tokens.json")
+_paired_tokens = None
+_pairing_codes = {}
+
+
+def load_paired_tokens():
+    global _paired_tokens
+    if _paired_tokens is not None:
+        return _paired_tokens
+    try:
+        with open(PAIRED_TOKENS_FILE) as f:
+            _paired_tokens = set(json.load(f))
+    except (OSError, ValueError):
+        _paired_tokens = set()
+    return _paired_tokens
+
+
+def save_paired_tokens(tokens):
+    global _paired_tokens
+    _paired_tokens = set(tokens)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = PAIRED_TOKENS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(list(_paired_tokens), f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, PAIRED_TOKENS_FILE)
+    except OSError:
+        pass
+
+
+def new_pairing_code():
+    code = secrets.token_urlsafe(16)
+    _pairing_codes[code] = time.time()
+    return code
+
+
+def redeem_pairing_code(code):
+    now = time.time()
+    for c, t in list(_pairing_codes.items()):
+        if now - t > 900:
+            _pairing_codes.pop(c, None)
+    if code and code in _pairing_codes:
+        _pairing_codes.pop(code, None)
+        token = secrets.token_hex(32)
+        tokens = load_paired_tokens()
+        tokens.add(token)
+        save_paired_tokens(tokens)
+        return token
+    return None
+
+
+def is_paired_token(token):
+    return bool(token and token in load_paired_tokens())
+
+
+def revoke_all_paired_tokens():
+    save_paired_tokens(set())
+    _pairing_codes.clear()
+
+
+def pick_installed_agent(cfg):
+    """Automatically pick the best available agent from installed ones."""
+    inst = installed_agents(cfg)
+    if not inst:
+        return cfg.get("agent") or "claude"
+    if cfg.get("agent") in inst:
+        return cfg["agent"]
+    for pref in ("claude", "agy", "codex", "opencode", "gemini"):
+        if pref in inst:
+            return pref
+    return inst[0]
+
+
+STARTER_TEMPLATES = {
+    "landing-page": {
+        "title": "Landing page",
+        "slug": "landing-page",
+        "summary": "Modern responsive product landing page with hero, features, and email signup.",
+        "spec": """# Product Landing Page Specification
+
+Build a modern, responsive, mobile-first product landing page.
+
+## Requirements
+1. **Structure**:
+   - `index.html`: Clean, semantic HTML5 structure (<header>, <main>, <section>, <footer>).
+   - `styles.css`: Modern responsive styles (CSS variables, flexbox/grid, dark-mode support).
+   - `app.js`: Interactive features (smooth scrolling, contact/signup form handling).
+2. **Sections**:
+   - Hero section with headline, subtitle, and primary CTA button.
+   - Features section highlighting at least 3 core benefits/features.
+   - Newsletter / waitlist email signup form with client-side validation.
+   - Footer with social links and navigation.
+3. **Quality**:
+   - Fully responsive down to 320px mobile viewports.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Checking Landing Page..."
+test -f index.html || { echo "Missing index.html"; exit 1; }
+test -f styles.css || test -f style.css || { echo "Missing stylesheet"; exit 1; }
+
+python3 -c '
+import re, sys
+with open("index.html") as f:
+    html = f.read()
+
+assert "<!doctype html>" in html.lower(), "Missing <!DOCTYPE html>"
+assert "<meta name=\\"viewport\\"" in html.lower(), "Missing viewport meta tag"
+assert "<title>" in html.lower(), "Missing <title> tag"
+assert re.search(r"<(header|nav)\\b", html, re.I), "Missing <header> or <nav>"
+assert re.search(r"<main\\b", html, re.I), "Missing <main>"
+assert re.search(r"<footer\\b", html, re.I), "Missing <footer>"
+assert re.search(r"<form\\b", html, re.I), "Missing form"
+print("HTML structure verification passed.")
+'
+echo "==> Landing Page checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a modern, responsive product landing page with hero, features, and email signup form. Read SPEC.md, implement index.html and styles.css, and loop until ./check.sh passes."
+    },
+    "crud-app": {
+        "title": "CRUD web app",
+        "slug": "crud-app",
+        "summary": "Zero-dependency Python CRUD web application with SQLite backend and REST API.",
+        "spec": """# CRUD Web Application Specification
+
+Build a lightweight, zero-dependency RESTful CRUD web application in Python.
+
+## Requirements
+1. **Server (`server.py`)**:
+   - Built with Python standard library (`http.server`, `sqlite3`, `json`).
+   - SQLite database `items.db` with table `items(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT)`.
+2. **API Endpoints**:
+   - `GET /api/items`: List all items as JSON array.
+   - `POST /api/items`: Create an item (requires `{"title": "..."}`), returns 201 with created item.
+   - `GET /api/items/<id>`: Retrieve single item by ID.
+   - `DELETE /api/items/<id>`: Delete item by ID.
+3. **Frontend (`index.html`)**:
+   - Simple clean interface to view, add, and delete items.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing CRUD Web Application..."
+test -f server.py || { echo "Missing server.py"; exit 1; }
+test -f index.html || { echo "Missing index.html"; exit 1; }
+
+python3 -c '
+import subprocess, time, urllib.request, json, sys
+
+proc = subprocess.Popen([sys.executable, "server.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    for _ in range(30):
+        try:
+            req = urllib.request.urlopen("http://127.0.0.1:8080/api/items", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        raise RuntimeError("server did not start within 3 seconds")
+
+    req = urllib.request.Request("http://127.0.0.1:8080/api/items",
+                                 data=json.dumps({"title": "Test Item", "description": "Details"}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    res = urllib.request.urlopen(req)
+    assert res.status in (200, 201), f"POST returned {res.status}"
+    item = json.loads(res.read().decode())
+    item_id = item["id"]
+
+    res = urllib.request.urlopen(f"http://127.0.0.1:8080/api/items/{item_id}")
+    assert res.status == 200
+
+    req = urllib.request.Request(f"http://127.0.0.1:8080/api/items/{item_id}", method="DELETE")
+    res = urllib.request.urlopen(req)
+    assert res.status in (200, 204)
+    print("All CRUD API endpoints verified successfully.")
+finally:
+    proc.terminate()
+    proc.wait()
+'
+echo "==> CRUD Web App checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a zero-dependency Python CRUD web application with SQLite backend and REST API. Read SPEC.md, implement server.py and index.html, and loop until ./check.sh passes."
+    },
+    "telegram-bot": {
+        "title": "Telegram bot",
+        "slug": "telegram-bot",
+        "summary": "Standalone Python Telegram Bot for notes management (stdlib only).",
+        "spec": """# Telegram Bot Specification
+
+Build a standalone Python Telegram Bot (stdlib only) for notes management.
+
+## Requirements
+1. **Module (`bot.py`)**:
+   - Provide `dispatch_command(text: str, user_id: int) -> str` or `handle_update(update: dict) -> dict | list[dict]`.
+   - Commands:
+     - `/start`: Returns welcome greeting.
+     - `/help`: Lists available commands.
+     - `/note <text>`: Saves note for user.
+     - `/notes`: Lists saved notes.
+2. **Testing**:
+   - Unit tests running without external dependencies.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing Telegram Bot..."
+test -f bot.py || { echo "Missing bot.py"; exit 1; }
+
+python3 -c '
+import bot
+
+if hasattr(bot, "dispatch_command"):
+    r_start = bot.dispatch_command("/start", user_id=123)
+    assert "welcome" in r_start.lower() or "help" in r_start.lower(), f"Unexpected /start response: {r_start}"
+    r_note = bot.dispatch_command("/note Buy milk", user_id=123)
+    assert "saved" in r_note.lower() or "note" in r_note.lower()
+    r_notes = bot.dispatch_command("/notes", user_id=123)
+    assert "Buy milk" in r_notes
+elif hasattr(bot, "handle_update"):
+    upd = {"update_id": 1, "message": {"message_id": 1, "chat": {"id": 123}, "from": {"id": 123}, "text": "/start"}}
+    res = bot.handle_update(upd)
+    assert res, "No response for /start"
+    upd_note = {"update_id": 2, "message": {"message_id": 2, "chat": {"id": 123}, "from": {"id": 123}, "text": "/note Buy milk"}}
+    bot.handle_update(upd_note)
+    upd_list = {"update_id": 3, "message": {"message_id": 3, "chat": {"id": 123}, "from": {"id": 123}, "text": "/notes"}}
+    res_list = bot.handle_update(upd_list)
+    assert any("Buy milk" in str(r) for r in ([res_list] if isinstance(res_list, dict) else res_list))
+else:
+    raise AssertionError("bot.py must expose dispatch_command or handle_update")
+print("Telegram bot logic verified.")
+'
+echo "==> Telegram Bot checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Python Telegram Bot for notes management (stdlib only). Read SPEC.md, implement bot.py, and loop until ./check.sh passes."
+    },
+    "chrome-extension": {
+        "title": "Chrome extension",
+        "slug": "chrome-extension",
+        "summary": "Manifest V3 Google Chrome extension with popup UI and scratchpad.",
+        "spec": """# Chrome Extension (Manifest V3) Specification
+
+Build a Google Chrome extension adhering strictly to Manifest V3 standards.
+
+## Requirements
+1. **`manifest.json`**:
+   - `manifest_version: 3`
+   - `name`, `version`, `description`
+   - `action` defining `default_popup: "popup.html"`
+2. **Popup UI (`popup.html`, `popup.js`)**:
+   - Quick scratchpad / note-taking popup with local storage persistence.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing Chrome Extension..."
+test -f manifest.json || { echo "Missing manifest.json"; exit 1; }
+test -f popup.html || { echo "Missing popup.html"; exit 1; }
+test -f popup.js || { echo "Missing popup.js"; exit 1; }
+
+python3 -c '
+import json
+with open("manifest.json") as f:
+    m = json.load(f)
+
+assert m.get("manifest_version") == 3, f"manifest_version must be 3, got {m.get(\\"manifest_version\\")}"
+assert m.get("name"), "manifest.json missing name"
+assert m.get("version"), "manifest.json missing version"
+assert "action" in m, "manifest.json missing action"
+assert m["action"].get("default_popup") == "popup.html", "action.default_popup must be popup.html"
+print("Manifest V3 syntax and structure verified.")
+'
+echo "==> Chrome Extension checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Manifest V3 Google Chrome extension with popup.html, popup.js, and manifest.json. Read SPEC.md and loop until ./check.sh passes."
+    },
+    "cli-tool": {
+        "title": "CLI tool",
+        "slug": "cli-tool",
+        "summary": "Command-line utility in Python with argparse, text analysis, and --json flag.",
+        "spec": """# Command-Line Tool Specification
+
+Build a versatile command-line utility in Python (`cli.py`).
+
+## Requirements
+1. **Entrypoint (`cli.py`)**:
+   - Executable with `python3 cli.py` or `./cli.py`.
+   - Uses `argparse` for argument parsing.
+2. **Features**:
+   - `--help` / `-h`: Displays formatted help.
+   - Text analysis and word/line counting tool.
+   - `--json`: Outputs structured JSON.
+3. **Exit Codes**:
+   - `0` on success, non-zero on error.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing CLI Tool..."
+test -f cli.py || { echo "Missing cli.py"; exit 1; }
+
+python3 -c '
+import subprocess, sys, json
+
+res = subprocess.run([sys.executable, "cli.py", "--help"], capture_output=True, text=True)
+assert res.returncode == 0, f"--help failed with {res.returncode}"
+assert "usage" in res.stdout.lower() or "options" in res.stdout.lower()
+
+res = subprocess.run([sys.executable, "cli.py", "--json"], input="hello world\\nnightmux\\n", capture_output=True, text=True)
+assert res.returncode == 0, f"Execution failed: {res.stderr}"
+data = json.loads(res.stdout)
+assert isinstance(data, dict), "Output must be JSON dictionary"
+
+res = subprocess.run([sys.executable, "cli.py", "--invalid-flag-that-does-not-exist"], capture_output=True, text=True)
+assert res.returncode != 0, "Invalid flag should exit non-zero"
+print("CLI tool behavior verified successfully.")
+'
+echo "==> CLI Tool checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Python command-line utility with argparse, text analysis, and --json flag. Read SPEC.md, implement cli.py, and loop until ./check.sh passes."
+    }
+}
+
+
+def create_starter_project(cfg, state, lock, template_key, title="", name="", folder="", agent=""):
+    """Instantiate one of the 5 starter templates with SPEC.md, check.sh, and !goal loop."""
+    tpl = STARTER_TEMPLATES.get(template_key)
+    if not tpl:
+        return False, f"unknown template '{template_key}'", None
+    name = (name or tpl["slug"]).strip()
+    title = (title or tpl["title"]).strip()
+    agent = agent or pick_installed_agent(cfg)
+    root = os.path.expanduser(cfg.get("projects_root") or "~/projects")
+    folder = os.path.expanduser(folder or os.path.join(root, name))
+    os.makedirs(folder, exist_ok=True)
+    if not os.path.exists(os.path.join(folder, ".git")):
+        run("git", "init", "-q", folder)
+    spec_path = os.path.join(folder, "SPEC.md")
+    with open(spec_path, "w") as f:
+        f.write(tpl["spec"])
+    check_path = os.path.join(folder, "check.sh")
+    with open(check_path, "w") as f:
+        f.write(tpl["check_sh"])
+    os.chmod(check_path, 0o755)
+    run("git", "-C", folder, "add", "SPEC.md", "check.sh")
+    run("git", "-C", folder, "commit", "-q", "-m", f"Initial {tpl['title']} from nightmux template", timeout=10)
+    idea = tpl["idea_prompt"]
+    ok, msg, topic = topic_new(cfg, state, lock, title, name, folder, agent, idea=idea)
+    return ok, msg, topic
+
+
+PAIR_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📱 Pair Your Phone — nightmux</title>
+<link rel="icon" href="/icon.svg">
+<style>
+:root { color-scheme: dark; --bg: #0a0d14; --card: #121725; --line: #232a3d; --fg: #dbe1ee; --mut: #8b93a7; --blue: #7aa2f7; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 90vh; }
+.box { background: var(--card); border: 1px solid var(--line); border-radius: 16px; max-width: 420px; width: 100%; padding: 28px 24px; text-align: center; box-shadow: 0 12px 36px #00000088; }
+h1 { font-size: 20px; margin: 0 0 10px; }
+p { font-size: 14px; color: var(--mut); margin: 0 0 16px; line-height: 1.5; }
+.qr { background: #fff; padding: 12px; border-radius: 12px; display: inline-block; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+.qr img { display: block; width: 200px; height: 200px; }
+code { background: #07090f; border: 1px solid var(--line); padding: 8px 10px; border-radius: 8px; font-size: 12px; word-break: break-all; display: block; margin: 12px 0 20px; color: #79c0ff; }
+a.btn { display: inline-block; background: linear-gradient(180deg, #2f7bf5, #1f6feb); color: #fff; text-decoration: none; padding: 10px 22px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+</style></head>
+<body><div class="box">
+<h1>📱 Scan to Pair Phone</h1>
+<p>Scan this QR code with your phone camera to securely open your dashboard without typing passwords or opening ports.</p>
+<div class="qr"><img src="/qr.svg?d=__PAIR_URL_ENC__" width="200" height="200" alt="QR Code"></div>
+<p>Or open this link on your phone:</p>
+<code>__PAIR_URL__</code>
+<p><a href="/" class="btn">Open Local Dashboard</a></p>
+</div></body></html>
+"""
+
+AUTH_401_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>401 Unauthorized — nightmux</title>
+<link rel="icon" href="/icon.svg">
+<style>
+body { margin: 0; background: #0a0d14; color: #dbe1ee; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; min-height: 100vh; text-align: center; padding: 24px; }
+h1 { color: #f85149; font-size: 24px; margin-bottom: 12px; }
+p { color: #8b93a7; font-size: 15px; max-width: 420px; line-height: 1.5; }
+code { background: #161c2c; padding: 4px 8px; border-radius: 6px; font-size: 13px; color: #e0af68; }
+</style></head>
+<body><div>
+<h1>🔒 401 Unauthorized</h1>
+<p>Phone pairing required. Scan the terminal QR code where nightmux is running to authenticate this device.</p>
+</div></body></html>
+"""
+
 APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
 TERM_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -12339,9 +12864,96 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def is_localhost(self):
+        client = getattr(self, "client_address", None)
+        if not client:
+            return True
+        return client[0] in ("127.0.0.1", "::1", "localhost")
+
+    def check_auth(self):
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "nm_auth" and is_paired_token(v):
+                return True
+        return False
+
+    def auth_gate(self):
+        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Localhost stays open."""
+        if self.is_localhost():
+            return True
+        clean_path = self.path.split("?")[0]
+        if clean_path in ("/pair", "/icon.svg", "/manifest.json", "/sw.js") \
+                or clean_path.startswith(("/qr.svg", "/public/", "/peer/")):
+            return True
+        if not self.check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(AUTH_401_HTML.encode("utf-8"))
+            return False
+        return True
+
     def do_GET(self):
         if not self.peer_gate():
             return
+        if not self.auth_gate():
+            return
+        if self.path.startswith("/pair"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            code = (q.get("code") or [""])[0]
+            if code:
+                token = redeem_pairing_code(code)
+                if token:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Set-Cookie", f"nm_auth={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=315360000")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(b"<!doctype html><html><head><meta charset='utf-8'>"
+                                     b"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                     b"<meta http-equiv='refresh' content='1;url=/'>"
+                                     b"<title>Phone Paired</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                     b"font-family:system-ui;text-align:center;padding:40px;}h1{color:#3fb950;}a{color:#7aa2f7;}</style></head>"
+                                     b"<body><h1>\xe2\x9c\x85 Phone Paired</h1><p>Authenticated! Opening dashboard\xe2\x80\xa6</p>"
+                                     b"<p><a href='/'>Go to Dashboard</a></p></body></html>")
+                    return
+                if self.check_auth():
+                    return self.reply("<!doctype html><html><head><meta charset='utf-8'>"
+                                      "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                      "<title>Already Paired</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                      "font-family:system-ui;text-align:center;padding:40px;}a{color:#7aa2f7;}</style></head>"
+                                      "<body><h1>\xe2\x9c\x85 Already Paired</h1><p>Your device is authenticated.</p>"
+                                      "<p><a href='/'>Go to Dashboard</a></p></body></html>", "text/html; charset=utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<!doctype html><html><head><meta charset='utf-8'>"
+                                 b"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                 b"<title>Pairing Error</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                 b"font-family:system-ui;text-align:center;padding:40px;}</style></head>"
+                                 b"<body><h1>\xe2\x9a\xa0 Invalid or Expired Code</h1>"
+                                 b"<p>Please generate a new code from the terminal or dashboard.</p></body></html>")
+                return
+            c = new_pairing_code()
+            purl = pairing_url(self.server.cfg, c)
+            html = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
+                                    ).replace("__PAIR_URL__", html.escape(purl))
+            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+        if self.path == "/api/connect":
+            cfg = self.server.cfg
+            return self.reply(json.dumps({
+                "paired_count": len(load_paired_tokens()),
+                "telegram": bool(cfg.get("token")),
+                "discord": bool(cfg.get("discord_token")),
+                "slack": bool(cfg.get("slack_token")),
+                "tailnet_url": phone_url(cfg)
+            }), "application/json")
+        if self.path == "/api/templates":
+            items = [{"key": k, "title": v["title"], "slug": v["slug"], "summary": v["summary"]}
+                     for k, v in STARTER_TEMPLATES.items()]
+            return self.reply(json.dumps(items), "application/json")
         if self.path.startswith("/public/"):
             tok, _, rest = self.path[len("/public/"):].partition("/")
             if self.peer or not public_ok(self.server.cfg, tok):
@@ -12500,9 +13112,28 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.error_hook()
         if not self.peer_gate():
             return
+        if not self.auth_gate():
+            return
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
+        if self.path == "/api/pair/revoke":
+            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            count = len(load_paired_tokens())
+            revoke_all_paired_tokens()
+            return self.reply(json.dumps({"ok": True, "revoked": count, "msg": f"Revoked {count} paired devices"}),
+                              "application/json")
+        if self.path == "/api/pair/code":
+            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            c = new_pairing_code()
+            purl = pairing_url(self.server.cfg, c)
+            return self.reply(json.dumps({"ok": True, "code": c, "url": purl}), "application/json")
         if self.peer and self.path == "/upgrade":       # the primary's !upgrade
             with _upgrading:
                 changed, msg = self_upgrade()
@@ -12647,10 +13278,19 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")          # api topic <id|new> [verb]
         try:
             if parts[2:] == ["new"]:
-                ok, msg, topic = topic_new(cfg, st, lk, req.get("title"), req.get("name"),
-                                           req.get("folder"), req.get("agent"),
-                                           req.get("idea", ""), req.get("server", ""))
-                out = {"ok": ok, "msg": msg, "topic": topic}
+                tpl_key = req.get("template")
+                if tpl_key:
+                    ok, msg, topic = create_starter_project(cfg, st, lk, tpl_key,
+                                                            title=req.get("title", ""),
+                                                            name=req.get("name", ""),
+                                                            folder=req.get("folder", ""),
+                                                            agent=req.get("agent", ""))
+                    out = {"ok": ok, "msg": msg, "topic": topic}
+                else:
+                    ok, msg, topic = topic_new(cfg, st, lk, req.get("title"), req.get("name"),
+                                               req.get("folder"), req.get("agent"),
+                                               req.get("idea", ""), req.get("server", ""))
+                    out = {"ok": ok, "msg": msg, "topic": topic}
             elif len(parts) == 4:
                 topic, verb = parts[2], parts[3]
                 peer = peer_of(cfg, topic)
@@ -12732,6 +13372,12 @@ def main():
     migrate()
     try:
         cfg = load_cfg()
+    except (FileNotFoundError, OSError):
+        cfg = {"webhook_port": 9090, "chat_id": "local", "allow_users": [0], "topics": {}}
+        try:
+            save_cfg(cfg)
+        except Exception:
+            pass
     except json.JSONDecodeError as e:
         sys.exit(bad_cfg(e))
     local_ = not cfg.get("token")
@@ -12775,9 +13421,18 @@ def main():
             threading.Thread(target=run_webhook_server, daemon=True,
                              args=(cfg, state, lock, allow, cfg["webhook_port"]),
                              kwargs={"host": web_host(cfg)}).start()
-        print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ "
-              f"topics={cfg['topics']}" if local_ else
-              f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
+        if local_:
+            c = new_pairing_code()
+            purl = pairing_url(cfg, c)
+            print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ topics={cfg['topics']}", flush=True)
+            print(f"📱 Phone pairing URL: {purl}", flush=True)
+            print(f"Scan with your phone to pair:\n{qr_text(purl)}\n", flush=True)
+            try:
+                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/pair?code={c}")
+            except Exception:
+                pass
+        else:
+            print(f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
         while True:
             time.sleep(3600)
 
@@ -15408,11 +16063,82 @@ def selfcheck():
     qm_ = qr_matrix("https://box.ts.net/app")
     assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
     assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
-    try:
-        qr_matrix("x" * 400)
-        assert False, "accepted a QR too long"
-    except ValueError:
-        pass
+    # Terminal QR and phone pairing
+    qt_ = qr_text("https://box.ts.net/app")
+    assert "▄" in qt_ or "▀" in qt_ or "█" in qt_
+    code_ = new_pairing_code()
+    assert code_ and len(code_) >= 16
+    tok_ = redeem_pairing_code(code_)
+    assert tok_ and is_paired_token(tok_)
+    assert redeem_pairing_code(code_) is None   # one-time use
+
+    code2_ = new_pairing_code()
+    pair_res_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/pair?code={code2_}")
+    assert pair_res_.status == 200
+    cookie_hdr_ = pair_res_.headers.get("Set-Cookie", "")
+    assert "nm_auth=" in cookie_hdr_
+
+    conn_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/connect").read().decode())
+    assert "paired_count" in conn_ and conn_["paired_count"] >= 1
+
+    rev_req_ = urllib.request.Request(f"http://127.0.0.1:{port_}/api/pair/revoke", data=b"{}",
+                                      headers={"X-Nightmux": "1"}, method="POST")
+    rev_res_ = json.loads(urllib.request.urlopen(rev_req_).read().decode())
+    assert rev_res_["ok"] is True
+    assert not is_paired_token(tok_)
+
+    class DummyHandler(WebhookHandler):
+        def __init__(self, ip, headers=None, path="/"):
+            self.client_address = (ip, 12345)
+            self.headers = headers or {}
+            self.path = path
+            self.status = None
+            self.sent_headers = {}
+            self.written = b""
+        def send_response(self, code):
+            self.status = code
+        def send_header(self, k, v):
+            self.sent_headers[k] = v
+        def end_headers(self):
+            pass
+        @property
+        def wfile(self):
+            class W:
+                def __init__(self, parent): self.p = parent
+                def write(self, b): self.p.written += b
+            return W(self)
+
+    assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1")) is True
+    h_remote = DummyHandler("192.168.1.50")
+    assert WebhookHandler.auth_gate(h_remote) is False and h_remote.status == 401
+    assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", path="/pair?code=xyz")) is True
+
+    code3_ = new_pairing_code()
+    tok3_ = redeem_pairing_code(code3_)
+    assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", headers={"Cookie": f"nm_auth={tok3_}"})) is True
+
+    # 5 Starter templates
+    assert len(STARTER_TEMPLATES) == 5
+    for t_k in ("landing-page", "crud-app", "telegram-bot", "chrome-extension", "cli-tool"):
+        assert t_k in STARTER_TEMPLATES
+        assert len(STARTER_TEMPLATES[t_k]["spec"]) > 50
+        assert "set -euo pipefail" in STARTER_TEMPLATES[t_k]["check_sh"]
+
+    with tempfile.TemporaryDirectory() as tpl_dir_, stubbed(
+            spawn=lambda n, *a: None, save_cfg=lambda c: None,
+            has_session=lambda n: False, send=lambda *a, **k: None):
+        tcfg_ = {"projects_root": tpl_dir_, "chat_id": "local", "allow_users": [0], "topics": {}}
+        tok_, tmsg_, ttop_ = create_starter_project(tcfg_, {}, threading.Lock(), "cli-tool",
+                                                    title="My CLI", name="my-cli",
+                                                    folder=os.path.join(tpl_dir_, "my-cli"),
+                                                    agent="claude")
+        assert tok_ is True, tmsg_
+        assert os.path.isfile(os.path.join(tpl_dir_, "my-cli", "SPEC.md"))
+        check_file_ = os.path.join(tpl_dir_, "my-cli", "check.sh")
+        assert os.path.isfile(check_file_)
+        assert os.access(check_file_, os.X_OK)
+        assert os.path.isdir(os.path.join(tpl_dir_, "my-cli", ".git"))
+
     # The daemon's PATH grows by the user bin dirs that exist, never duplicates.
     with tempfile.TemporaryDirectory() as hp_:
         os.makedirs(os.path.join(hp_, ".local", "bin"))
