@@ -2678,9 +2678,12 @@ def snap_pane(path):
     """The pane a status-line snapshot describes, or None if it is unreadable."""
     try:
         with open(path) as f:
-            return json.load(f).get("pane")
+            data = json.load(f)
     except (OSError, ValueError):
         return None
+    # The directory is shared (see snaps()): a list written by anything else here
+    # used to throw on every tick and stop the whole watcher, replies included.
+    return data.get("pane") if isinstance(data, dict) else None
 
 
 def newest_per_pane(live):
@@ -18252,6 +18255,13 @@ def selfcheck():
         autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
                      "changed": time.time() - 30 * 60}}, "1", "s")
     assert typed == ["/compact"], typed
+    # A non-snapshot json in the state dir must not stop prune (and the watcher).
+    with tempfile.TemporaryDirectory() as td_:
+        with open(os.path.join(td_, "paired_tokens.json"), "w") as f_:
+            json.dump(["x"], f_)
+        with stubbed(STATE_DIR=td_):
+            assert snap_pane(os.path.join(td_, "paired_tokens.json")) is None
+            prune(time.time(), 0.0, {"%1"})
     print("selfcheck ok")
 
 
