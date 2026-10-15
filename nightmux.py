@@ -705,8 +705,9 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
                      r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
-                     r"|Do you want\b"
-                     r"|Do you trust\b"
+                     # A dialog's question, only with its options under it: an agent's
+                     # answer ending "Do you want me to restart X?" held the queue for hours.
+                     r"|Do you (?:want|trust)\b.*(?:\n.*){0,4}\n\s*[│┃]?\s*[❯>›]?\s*\[?1[.)\]]\s"
                      r"|Continue\?"
                      r"|Press Enter to continue"
                      r"|Requesting permission"
@@ -2396,6 +2397,8 @@ def due(cfg, state, topic, sess):
             continue
         changed = True
         text = job.get("text")
+        if job.get("companion"):   # saved rounds keep the text of the day they were set: use today's
+            text = COMPANION_WATCH if job.get("watch") else COMPANION_ROUND if job.get("gate") else COMPANION_MORNING
         if job.get("progress"):
             # The companion's rounds carry the progress report in the prompt, built
             # here: no tool round-trip, a cursor that survives restarts, and — for a
@@ -15987,6 +15990,8 @@ def selfcheck():
     assert pane_state(["✻ Brewing… (12s · esc to interrupt)"]) == "busy"
     assert pane_state(["  ⬝⬝⬝ retrying in 58m 6s attempt #13    esc interrupt"]) == "busy"
     assert pane_state(["Do you want to proceed?", "❯ 1. Yes", "  2. No"]) == "waiting"
+    assert pane_state(["● Twitter moved.", "", "  Do you want me to restart egx_scrape?", "",
+                       "✻ Crunched for 13s", "─" * 9, "❯ ", "─" * 9]) == "idle"
 
     menu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes",
                          "│   2. Yes, and don't ask again │", "  3. No (esc)"])
@@ -19190,7 +19195,8 @@ def selfcheck():
                 with stubbed(send=lambda *a, **k: sent_.append(a)):
                     due(cfgp, stw, "9", "comp")
                     q_ = stw["comp"]["queue"]
-                    assert q_[0] == "/clear" and q_[1].startswith("w\n\nProgress since "), q_
+                    # a saved round runs today's prompt, not the "w" it was saved with
+                    assert q_[0] == "/clear" and q_[1].startswith(COMPANION_WATCH + "\n\nProgress since "), q_
                     assert "▸ shop (topic 5)" in q_[1] and not sent_        # no ⏰ ping
                     stw["comp"]["queue"], stw["comp"]["sched"][0]["at"] = [], 0
                     due(cfgp, stw, "9", "comp")                 # nothing new since
