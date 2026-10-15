@@ -699,8 +699,9 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
                      r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
-                     r"|Do you want\b"
-                     r"|Do you trust\b"
+                     # A dialog's question, only with its options under it: an agent's
+                     # answer ending "Do you want me to restart X?" held the queue for hours.
+                     r"|Do you (?:want|trust)\b.*(?:\n.*){0,4}\n\s*[│┃]?\s*[❯>›]?\s*\[?1[.)\]]\s"
                      r"|Continue\?"
                      r"|Press Enter to continue"
                      r"|Requesting permission"
@@ -15171,6 +15172,8 @@ def selfcheck():
     assert pane_state(["✻ Brewing… (12s · esc to interrupt)"]) == "busy"
     assert pane_state(["  ⬝⬝⬝ retrying in 58m 6s attempt #13    esc interrupt"]) == "busy"
     assert pane_state(["Do you want to proceed?", "❯ 1. Yes", "  2. No"]) == "waiting"
+    assert pane_state(["● Twitter moved.", "", "  Do you want me to restart egx_scrape?", "",
+                       "✻ Crunched for 13s", "─" * 9, "❯ ", "─" * 9]) == "idle"
 
     menu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes",
                          "│   2. Yes, and don't ask again │", "  3. No (esc)"])
