@@ -61,13 +61,17 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!route` auto|off|stats = send each task to the agent that fits it, learned from results
 - `!all <sess1,sess2|--all> <prompt>` = one prompt to several sessions
 - `!center [off]` = this topic watches every session · `!board` = all at a glance
+- `!companion [agent]` = a persona over every project: keeps its own memory, hands work to role agents, acts alone only where a `!budget` is set
+- `!companion` night [01:00] [07:30] | night off = rounds every 2h through the night, a morning summary at the end
+- `!companion` watch [3h] | watch off = by day: progress per project and ideas you tap to send — skipped when nothing moved
+- `!companion` focus &lt;target> | focus off = in a project's topic: the companion works toward this target, even when the project is idle; reports cover targeted projects only
 
 ## 🪙 Tokens and limits
 
 `!help tokens`
 
 - `!usage` | `!ctx` | `!cost [days]` | `!forecast` = when each window fills
-- `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k) · `!idlectx <pct|off>`
+- `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k; Claude also compacts mid-turn there) · `!autocompact` park &lt;45m|off> = compact sessions idle that long over 100k (default 45m) · `!idlectx <pct|off>`
 - `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
 - `!spendcap <turns|500k|2M|off>` = interrupt a runaway loop
