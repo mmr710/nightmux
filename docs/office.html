@@ -75,9 +75,10 @@ body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <button class="snd" title="skin" onclick="nextSkin()">🎨</button>
 <span class="meter" id="srvs"></span>
-<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/wrapped" target="_blank">🎁 wrapped</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
-<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span></div>
+<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span>
+<a id="rpshare" class="snd" style="text-decoration:none;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center" target="_blank" title="share on X">🐦 share</a></div>
 <div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
 <h1 id="rtitle" style="display:none">NIGHTMUX REEL</h1>
@@ -743,6 +744,8 @@ async function replay() {
   try { F = (await (await fetch('/api/office/replay', {cache: 'no-store'})).json()).frames || []; } catch (e) {}
   if (!F.length) { lab.textContent = 'nothing recorded yet — the office records while nightmux runs'; return; }
   s.max = F.length - 1;
+  const sh = document.getElementById('rpshare');
+  if (sh) sh.href = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent('My AI coding agents running overnight in @Nightmux: github.com/mmr710/nightmux #vibecoding #ClaudeCode');
   const show = i => { const f = F[i]; T = f.t * 1000; data = {rooms: f.rooms, installed: [], usage: {}};
     lab.textContent = new Date(T).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false})
       + '  ·  ' + (i + 1) + '/' + F.length;

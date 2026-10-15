@@ -11824,7 +11824,7 @@ h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: 
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
-<nav class="top"><a href="/office">🏢 office</a><a href="/app">📱 app</a></nav>
+<nav class="top"><a href="/office">🏢 office</a><a href="/office?replay">⏪ replay</a><a href="/wrapped" target="_blank">🎁 wrapped</a><a href="/app">📱 app</a></nav>
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div><div id="toast"></div>
@@ -12544,9 +12544,10 @@ body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <button class="snd" title="skin" onclick="nextSkin()">🎨</button>
 <span class="meter" id="srvs"></span>
-<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
+<nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/wrapped" target="_blank">🎁 wrapped</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
-<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span></div>
+<input id="rps" type="range" min="0" value="0" aria-label="time"><span id="rpt"></span>
+<a id="rpshare" class="snd" style="text-decoration:none;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center" target="_blank" title="share on X">🐦 share</a></div>
 <div id="offline"></div>
 <main id="rooms"><p class="empty">loading…</p></main>
 <h1 id="rtitle" style="display:none">NIGHTMUX REEL</h1>
@@ -13212,6 +13213,8 @@ async function replay() {
   try { F = (await (await fetch('/api/office/replay', {cache: 'no-store'})).json()).frames || []; } catch (e) {}
   if (!F.length) { lab.textContent = 'nothing recorded yet — the office records while nightmux runs'; return; }
   s.max = F.length - 1;
+  const sh = document.getElementById('rpshare');
+  if (sh) sh.href = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent('My AI coding agents running overnight in @Nightmux: github.com/mmr710/nightmux #vibecoding #ClaudeCode');
   const show = i => { const f = F[i]; T = f.t * 1000; data = {rooms: f.rooms, installed: [], usage: {}};
     lab.textContent = new Date(T).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false})
       + '  ·  ' + (i + 1) + '/' + F.length;
@@ -14463,6 +14466,42 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "session": row.get("session"), "mode": row.get("mode"), "agent": row.get("agent"),
                 "name": (cfg.get("topic_names") or {}).get(topic) or row.get("session") or topic}),
                 "application/json")
+        if self.path.startswith("/api/wrapped"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            d = (q.get("days") or ["30"])[0]
+            days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
+            data = wrapped_data(self.server.cfg, days)
+            return self.reply(json.dumps(data), "application/json")
+        if self.path.startswith("/wrapped"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            d = (q.get("days") or ["30"])[0]
+            days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
+            share = (q.get("share") or ["0"])[0] in ("1", "true", "yes")
+            w = wrapped_data(self.server.cfg, days)
+            page = wrapped_page(days, w, share=share)
+            top = ", ".join(f"{n} {l}" for n, l in w["cells"][:3])
+            share_text = f"My AI coding agents, last {days} days: {top}. Run by @Nightmux github.com/mmr710/nightmux #ClaudeCode #vibecoding"
+            tweet_link = "https://twitter.com/intent/tweet?text=" + urllib.parse.quote(share_text)
+            act_p_color = "#58a6ff" if not share else "#8b949e"
+            act_s_color = "#58a6ff" if share else "#8b949e"
+            act_p_weight = "bold" if not share else "normal"
+            act_s_weight = "bold" if share else "normal"
+            action_bar = (
+                f'<div style="position:sticky;top:0;left:0;right:0;background:rgba(10,13,20,0.95);'
+                f'border-bottom:1px solid rgba(255,255,255,0.1);padding:10px 20px;display:flex;'
+                f'align-items:center;gap:12px;z-index:9999;font-family:sans-serif;font-size:13px">'
+                f'<a href="/" style="color:#79c0ff;text-decoration:none">← Dashboard</a>'
+                f'<span style="color:#8b949e">|</span>'
+                f'<a href="/wrapped?days={days}&share=0" style="color:{act_p_color};'
+                f'text-decoration:none;font-weight:{act_p_weight}">🔒 Private</a>'
+                f'<a href="/wrapped?days={days}&share=1" style="color:{act_s_color};'
+                f'text-decoration:none;font-weight:{act_s_weight}">📤 Shareable</a>'
+                f'<a href="{tweet_link}" target="_blank" style="margin-left:auto;background:#1f6feb;color:#fff;'
+                f'text-decoration:none;padding:5px 14px;border-radius:8px;font-weight:600">🐦 Share on X</a>'
+                f'</div>'
+            )
+            page = page.replace("<body>", "<body>" + action_bar, 1)
+            return self.reply(page, "text/html; charset=utf-8")
         if self.path == "/office":
             return self.reply(OFFICE_HTML, "text/html; charset=utf-8")
         if self.path.startswith("/term/"):
@@ -17765,6 +17804,15 @@ def selfcheck():
                                        headers={"X-Nightmux": "1"}, method="POST")
     undo_res_ = json.loads(urllib.request.urlopen(undo_req_).read().decode())
     assert "ok" in undo_res_
+
+    # M4 share loop tests
+    wrap_html_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/wrapped").read().decode()
+    assert "VIBE CODING RECAP" in wrap_html_
+    assert "Share on X" in wrap_html_
+    wrap_json_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/wrapped").read().decode())
+    assert "cells" in wrap_json_ and "agents" in wrap_json_
+    wrap_share_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/wrapped?share=1").read().decode()
+    assert "Shareable" in wrap_share_
 
     class DummyHandler(WebhookHandler):
         def __init__(self, ip, headers=None, path="/"):
