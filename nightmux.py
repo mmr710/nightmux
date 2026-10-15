@@ -2390,6 +2390,8 @@ def due(cfg, state, topic, sess):
             continue
         changed = True
         text = job.get("text")
+        if job.get("companion"):   # saved rounds keep the text of the day they were set: use today's
+            text = COMPANION_WATCH if job.get("watch") else COMPANION_ROUND if job.get("gate") else COMPANION_MORNING
         if job.get("progress"):
             # The companion's rounds carry the progress report in the prompt, built
             # here: no tool round-trip, a cursor that survives restarts, and — for a
@@ -18261,7 +18263,8 @@ def selfcheck():
                 with stubbed(send=lambda *a, **k: sent_.append(a)):
                     due(cfgp, stw, "9", "comp")
                     q_ = stw["comp"]["queue"]
-                    assert q_[0] == "/clear" and q_[1].startswith("w\n\nProgress since "), q_
+                    # a saved round runs today's prompt, not the "w" it was saved with
+                    assert q_[0] == "/clear" and q_[1].startswith(COMPANION_WATCH + "\n\nProgress since "), q_
                     assert "▸ shop (topic 5)" in q_[1] and not sent_        # no ⏰ ping
                     stw["comp"]["queue"], stw["comp"]["sched"][0]["at"] = [], 0
                     due(cfgp, stw, "9", "comp")                 # nothing new since
