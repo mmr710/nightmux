@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-10-10T12:00:00Z","cwd":"/projects/my-web","message":{"content":"build landing page"}}
+{"type":"assistant","timestamp":"2026-10-10T12:00:05Z","requestId":"req-c1","message":{"model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1200,"cache_read_input_tokens":4000,"cache_creation_input_tokens":500,"output_tokens":350}}}
+{"type":"user","timestamp":"2026-10-10T12:01:00Z","cwd":"/projects/my-web","message":{"content":"continue"}}
+{"type":"assistant","timestamp":"2026-10-10T12:01:05Z","requestId":"req-c2","message":{"model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1500,"cache_read_input_tokens":5500,"cache_creation_input_tokens":0,"output_tokens":420}}}
