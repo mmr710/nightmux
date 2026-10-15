@@ -17,8 +17,10 @@ Config: ~/.nightmux.json
 import calendar
 import concurrent.futures
 import contextlib
+import difflib
 import hmac
 import glob
+import hashlib
 import html
 import json
 import os
@@ -487,7 +489,7 @@ def sess_cwd(sess):
     return tmux("display-message", "-p", "-t", tgt(sess), "#{pane_current_path}")
 
 
-SNAP_KEEP = 10  # nightmux/pre-* branches kept per repo; older ones are pruned here
+SNAP_KEEP = 20  # nightmux/pre-* branches kept per repo; older ones are pruned here
 REDO_KEEP = 5    # nightmux/redo-* branches kept per repo
 
 
@@ -509,10 +511,11 @@ def snapshot_repo(sess):
         sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
         if not sha:
             return None
-        latest_pre = tmux_git(cwd, "for-each-ref", "--sort=-creatordate", "--count=1",
-                              "--format=%(objectname)", "refs/heads/nightmux/pre-*").strip()
-        if latest_pre and latest_pre == sha:
-            return None
+        newest = tmux_git(cwd, "for-each-ref", "--sort=-creatordate", "--count=1",
+                          "--format=%(refname:short)", "refs/heads/nightmux/pre-*")
+        if newest and tmux_git(cwd, "rev-parse", sha + "^{tree}") \
+                == tmux_git(cwd, "rev-parse", newest + "^{tree}"):
+            return None     # nothing changed since the last one: keep the history deep
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         name = "nightmux/pre-" + ts
         if tmux_git(cwd, "rev-parse", "--verify", f"refs/heads/{name}"):
@@ -737,6 +740,21 @@ def settle(sess, needle, timeout=2.0):
         time.sleep(0.05)
 
 
+# agy's conversation picker swallows whatever is typed into its search box: a
+# prompt and two /compact came out as "Continue/compact/compact", nothing sent.
+PICKER = "esc Go back / Clear search"
+
+
+def close_picker(sess):
+    """Leave agy's conversation picker: Esc clears its search, the next goes back.
+    Stops the moment it is gone -- one Esc too many interrupts a running turn."""
+    for _ in range(3):
+        if not any(PICKER in line for line in visible(sess)):
+            return
+        tmux("send-keys", "-t", tgt(sess), "Escape")
+        time.sleep(0.3)
+
+
 def inject(sess, text):
     """Type text into the Claude Code prompt and submit. False if nothing was.
 
@@ -752,6 +770,7 @@ def inject(sess, text):
         print(f"inject {sess}: pane is at a shell, refusing to type a prompt "
               "into it", file=sys.stderr, flush=True)
         return False
+    close_picker(sess)
     args, at = [], tgt(sess)
     for i, line in enumerate(text.split("\n")):
         if i:  # newline inside the prompt box, not a submit
@@ -802,11 +821,12 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r"|Continue\?"
                      r"|Press Enter to continue"
                      r"|Requesting permission"
+                     r"|(?:△\s*)?Permission required"   # opencode 2.x
                      r"|Run this command\?"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
                      r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
-                     r"|Enter to select ·", re.M)   # Claude Code's select menu
+                     r"|Enter to select ·|⇆ select", re.M)   # Claude Code's select menu
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
 # Perusing… — so matching the word list caught almost nothing and read a working
@@ -860,6 +880,14 @@ BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
 # because ❯ turns up in ordinary output; it counts only next to one of ARROWED's
 # footers, which render on menus and nowhere else.
 CHOICE = re.compile(r"^\s*[│┃]?\s*❯\s+\S")
+# opencode 2.x draws a permission dialog as one row of buttons, not a list:
+#
+#   ┃   Allow once   Always allow   Reject  ctrl+f fullscreen  ⇆ select  enter confirm
+#
+# No digits, no ❯, ← → move a background highlight. MENU matched none of it, so
+# the topic got no Allow/Reject buttons and auto-yes never found its "yes".
+BAR = re.compile(r"⇆\s*select")
+BAR_HINT = re.compile(r"\s{2,}(?=ctrl\+|⇆|enter\b|esc\b)")
 # The usage-limit banner. Phrasing lifted from Claude Code's own detector, so it
 # tracks what the CLI actually prints rather than what a changelog once said.
 LIMIT_HIT = re.compile(
@@ -956,14 +984,17 @@ def snaps():
             mtime = os.path.getmtime(path)
             cached = _snap_cache.get(path)
             if cached and cached[0] == mtime:
-                if isinstance(cached[1], dict):
+                if cached[1]:
                     yield cached[1]
                 continue
             with open(path) as f:
                 data = json.load(f)
-                _snap_cache[path] = (mtime, data)
-                if isinstance(data, dict):
-                    yield data
+            # The directory is shared: a list or a bare value written by anything
+            # else is not a snapshot, and must not take the daemon down at startup.
+            data = data if isinstance(data, dict) else None
+            _snap_cache[path] = (mtime, data)
+            if data:
+                yield data
         except (OSError, ValueError):
             continue
 
@@ -1090,6 +1121,8 @@ def tail_transcript(st, path, ladder=False):
                 cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
                 if ladder and turn and cheap > 0:
                     sav_add("model_tokens", round(turn * cheap))
+                if u and rec.get("requestId") != st.get("call_rid"):   # one record per block
+                    st["call_rid"], st["calls"] = rec.get("requestId"), st.get("calls", 0) + 1
                 if u:
                     sav_ctx(st, u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                             + u.get("cache_read_input_tokens", 0))
@@ -1099,6 +1132,15 @@ def tail_transcript(st, path, ladder=False):
                     st["ctx_tok"] = (u.get("input_tokens", 0)
                                      + u.get("cache_creation_input_tokens", 0)
                                      + u.get("cache_read_input_tokens", 0))
+                # A compaction writes no usage record, only this. Without it the
+                # context figure stayed at the pre-compact size, autocompact read
+                # that as "/compact did not take" and ran it again two minutes
+                # later: a second summarising pass over a 14k context that made
+                # it bigger and squeezed the summary a second time.
+                cm = rec.get("compactMetadata") if rec.get("subtype") == "compact_boundary" else None
+                if cm and isinstance(cm.get("postTokens"), int):
+                    sav_ctx(st, cm["postTokens"])        # book the drop before it is the baseline
+                    st["ctx_tok"] = cm["postTokens"]
                 out += render(rec)
     st["tpos"] = pos
     if spent:
@@ -1155,6 +1197,53 @@ def strip_noise(lines, verbose=False):
     return out
 
 
+def _bg(code, bg):
+    """The background colour in force after one SGR escape."""
+    ps, i = code[2:-1].split(";"), 0
+    while i < len(ps):
+        if ps[i] in ("38", "48"):
+            n = 3 if ps[i + 1:i + 2] == ["5"] else 5
+            bg = ";".join(ps[i:i + n]) if ps[i] == "48" else bg
+            i += n
+            continue
+        if ps[i] in ("", "0", "49"):
+            bg = ""
+        elif ps[i].isdigit() and (40 <= int(ps[i]) <= 47 or 100 <= int(ps[i]) <= 107):
+            bg = ps[i]
+        i += 1
+    return bg
+
+
+def bar_opts(lines):
+    """(labels, index of the highlighted one or None) of a button-row dialog, or None.
+
+    The highlight is a background colour, so it is only readable on a -e
+    capture: the button whose background differs from the gap before the key
+    hints is the selected one. Anything else (plain capture, two odd ones out)
+    is None, and nothing should move on a guess.
+    """
+    for l in reversed(lines[-25:]):
+        if not BAR.search(plain(l)):
+            continue
+        text, bgs, bg = "", [], ""
+        for part in re.split(r"(\x1b\[[0-9;]*m)", l):
+            if part.startswith("\x1b["):
+                bg = _bg(part, bg)
+            else:
+                text += part
+                bgs += [bg] * len(part)
+        cut = BAR_HINT.search(text)
+        if not cut:
+            return None
+        labs = [m for m in re.finditer(r"\S+(?: \S+)*", text[:cut.start()])
+                if m.group() not in ("┃", "│")]
+        if not labs:
+            return None
+        marked = [i for i, m in enumerate(labs) if bgs[m.start()] != bgs[cut.end() - 1]]
+        return [m.group() for m in labs], marked[0] if len(marked) == 1 else None
+    return None
+
+
 def menu_buttons(lines, sess=None):
     """One tap-button per option of the menu the pane is waiting on.
 
@@ -1169,12 +1258,17 @@ def menu_buttons(lines, sess=None):
         if m.group(1):
             label = m.group(2)
             opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+    bar = bar_opts(lines)
+    for i, label in enumerate(bar[0] if bar else []):
+        opts[str(i + 1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
     # No numbers means an arrow-driven selector (agy's trust prompt, /model):
     # the nav row alone drives it, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
-    rows.append([("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
-                ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
+    rows.append([("esc", f"!esc{suffix}"), ("←", f"!left{suffix}"),
+                 ("→", f"!right{suffix}"), ("⏎", f"!enter{suffix}")] if bar else
+                [("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
+                 ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
     return kb(rows)
 
 
@@ -1607,11 +1701,18 @@ def warn_ctx(cfg, st, topic, sess):
     """
     if agentless(sess):
         return
+    calls = st.get("calls") or 0
+    if calls >= CALLS_WARN and not st.get("calls_warned"):
+        # Every call re-reads the whole context; the 97th percentile here is ~70.
+        st["calls_warned"] = True
+        send(cfg, topic, f"🔁 {sess}: {calls} model calls on one prompt, each re-reading "
+             f"~{_k(st.get('ctx_tok') or 0)} tokens. If it is going in circles, esc stops it.",
+             mode="plain", buttons=kb([[("esc", "!esc")]]))
     if agent_key(cfg, topic, sess) != "claude":
         return
         
     pct = (st.get("snap") or {}).get("ctx_pct")
-    if pct is None:
+    if pct is None and st.get("ctx_tok") is None:      # the transcript is a figure too
         if cfg.get("autocompact") and st.get("mode"):   # set by hand: they expect it
             wk = f"ctx_blind_{sess}"
             with _warned_lock:   # wk is sess-scoped, but save_warned() writes one shared file
@@ -1756,6 +1857,12 @@ def spend_cap(cfg):
 
 
 AUTOCOMPACT_DEFAULT = "200k"   # on unless set: a 300k turn costs ~6x a 50k one
+ROUTINE_COMPACT = 120000       # routine work compacts here, under a token autocompact...
+HEAVY_HOLD = 2 * 3600          # ...unless a heavy task was asked for this recently
+NATIVE_MIN = 100000            # the lowest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code takes
+PARK_COMPACT = 100000          # !autocompact park: an idle session above this is compacted
+PARK_DEFAULT = 45              # ...after this many idle minutes: before the 1h cache expires
+CALLS_WARN = 80                # model calls on one prompt: the top 3% measured on this fleet
 
 
 def compact_at(cfg):
@@ -1879,6 +1986,15 @@ def budget_tick(cfg, state, topic, sess):
         st["budget_warned"] = key
         send(cfg, topic, f"💸 {sess} at {used / cap:.0%} of its {BUDGET_ADJ[b['per']]} budget "
              f"({_k(used)} of {_k(cap)})", mode="plain")
+
+
+def budget_line(cfg, topic):
+    """"1.2M of 5M today", or None without a budget — what the companion may still spend."""
+    b = (cfg.get("budgets") or {}).get(str(topic))
+    if not b:
+        return None
+    used = budget_used(cfg, topic, budget_window(cfg, b["per"])[0])
+    return f"{_k(used)} of {_k(b['tokens'])} this {b['per']}"
 
 
 def budget_cmd(cfg, state, topic, sess, arg):
@@ -2052,6 +2168,49 @@ def grep_transcripts(needle, days=7, limit=25):
     return head + "\n" + "\n".join(hits)
 
 
+def agy_ctx(cwd, home=None):
+    """Tokens agy's current conversation in `cwd` carries per call: input plus cache
+    read of its last planner call; 0 right after its own CHECKPOINT (agy's
+    compaction), so a /compact that took re-arms autocompact. None when unknown."""
+    import sqlite3
+    root = os.path.join(home or os.path.expanduser("~"), ".gemini", "antigravity-cli")
+    db = os.path.join(root, "conversation_summaries.db")
+    if not cwd or not os.path.exists(db):
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT conversation_id FROM conversation_summaries WHERE "
+                              "workspace_uris LIKE ? AND nesting_depth = 0 ORDER BY "
+                              "last_modified_time DESC LIMIT 1",
+                              ('%"file://' + urllib.parse.quote(cwd.rstrip("/")) + '"%',)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    tf = os.path.join(root, "brain", row[0], ".system_generated", "logs", "transcript.jsonl")
+    try:
+        with open(tf, "rb") as f:
+            f.seek(max(0, os.path.getsize(tf) - 262144))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if '"CHECKPOINT"' in line:
+            return 0
+        if '"PLANNER_RESPONSE"' in line:
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            n = (j.get("input_tokens") or 0) + (j.get("cache_read_tokens") or 0)
+            if n:
+                return n
+    return None
+
+
 def autocompact(cfg, state, topic, sess):
     """Compact a session before carrying its context gets expensive.
 
@@ -2064,6 +2223,21 @@ def autocompact(cfg, state, topic, sess):
     """
     at, tok_at = compact_at(cfg)
     st = state.get(sess) or {}
+    if agent_key(cfg, topic, sess) == "agy" and time.time() - st.get("agy_ctx_at", 0) > 30:
+        st["agy_ctx_at"] = time.time()          # agy has no status line: read its log
+        got = agy_ctx(sess_cwd(sess))
+        if got is not None:
+            st["ctx_tok"] = got
+    # Tiered: a session on routine work compacts at ROUTINE_COMPACT; one given a
+    # heavy task in the last two hours keeps the configured, roomier limit.
+    if tok_at and time.time() - st.get("heavy_at", 0) > HEAVY_HOLD:
+        tok_at = min(tok_at, ROUTINE_COMPACT)
+    # On by default: idle this many minutes, compact at PARK_COMPACT while the context
+    # is still cached. Coming back after the cache expires rewrites all of it --
+    # ~25% of this fleet's spend went on that -- and a compacted one is ~15k.
+    park = cfg.get("park_compact", PARK_DEFAULT)
+    if tok_at and park and time.time() - st.get("changed", time.time()) >= park * 60:
+        tok_at = min(tok_at, PARK_COMPACT)
     pct = (st.get("snap") or {}).get("ctx_pct")
     tok = st.get("ctx_tok")
     if tok_at:
@@ -2130,13 +2304,20 @@ def idle_hint(cfg, state, topic, sess):
         st.pop("parked", None)     # it moved: arm again for the next park
         return
     pct = (st.get("snap") or {}).get("ctx_pct")
+    tok = st.get("ctx_tok")
+    # Tokens first, as with autocompact: on a 1M window 50% is 500k, so the
+    # percentage never tripped for the 60k-200k band this exists to cover.
+    big = (tok is not None and tok >= FRESH_MIN) or (pct is not None and pct >= (at or 101))
     if (not at or st.get("parked") or st.get("mode") not in ("idle", "unknown")
-            or st.get("queue") or pct is None or pct < at):
+            or st.get("queue") or not big):
         return
     st["parked"] = True
-    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {pct:.0f}% context\n"
-         f"every turn after you resume pays that {pct:.0f}% again — /clear first "
-         f"if the thread is done\n!idlectx off to stop this", mode="plain")
+    size = f"{tok // 1000}k tokens" if tok is not None else f"{pct:.0f}% context"
+    send(cfg, topic, f"💤 {sess} idle {left(idle_for)} at {size}\n"
+         f"its cache has expired: the next turn re-writes all {size}, and every turn "
+         "after carries it — start fresh if the thread is done\n!idlectx off to stop this",
+         mode="plain", buttons=kb([[("🧼 fresh start (notes kept)", "!fresh now"),
+                                    ("🗜 compact", "/compact")]]))
 
 
 _queued = [None]   # last blob written: an unchanged queue never touches disk
@@ -2325,13 +2506,31 @@ def due(cfg, state, topic, sess):
             keep.append(job)
             continue
         changed = True
+        text = job.get("text")
+        if job.get("progress"):
+            # The companion's rounds carry the progress report in the prompt, built
+            # here: no tool round-trip, a cursor that survives restarts, and — for a
+            # gated round — no model call at all while the report says what it
+            # said last time (the wait times aside).
+            since = job.get("since") or now - (job.get("every") or 86400)
+            report = progress_report(cfg, state, since)
+            core = "\n".join(l for l in report.splitlines() if not l.startswith(("ideas, ", "  dropped: ")))
+            sig = hashlib.sha1(re.sub(r" \([^)]*\)$", "", core, flags=re.M).encode()).hexdigest()
+            if job.get("gate") and (not report.startswith("▸") or sig == job.get("sig")):
+                job["at"] = now + job["every"]
+                keep.append(job)
+                continue
+            job["since"], job["sig"] = now, sig
+            text = f"{text}\n\nProgress since {clock(cfg, since)}:\n{report}"
+            companion_fresh(cfg, state, topic, sess)
         if job.get("kind") == "digest":
             since = job.get("since", now - (job.get("every") or 86400))
             send(cfg, topic, digest_report(cfg, state, topic, sess, since), mode="plain")
             job["since"] = now
         else:
-            st.setdefault("queue", []).append(job["text"])
-            fired.append(job)
+            st.setdefault("queue", []).append(text)
+            if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
+                fired.append(job)
         if job.get("every"):
             # From now, not from when it was due: a daemon that was off overnight
             # must not wake up and fire six hours of backlog in one go.
@@ -2553,7 +2752,7 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     key = key or body
     if not body or key == st.get("asked") or notified(sess):
         return False
-    st["asked"] = key
+    st["asked"], st["asked_at"] = key, time.time()
     buttons = menu_buttons(lines, sess)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
@@ -2602,9 +2801,12 @@ def snap_pane(path):
     """The pane a status-line snapshot describes, or None if it is unreadable."""
     try:
         with open(path) as f:
-            return json.load(f).get("pane")
+            data = json.load(f)
     except (OSError, ValueError):
         return None
+    # The directory is shared (see snaps()): a list written by anything else here
+    # used to throw on every tick and stop the whole watcher, replies included.
+    return data.get("pane") if isinstance(data, dict) else None
 
 
 def newest_per_pane(live):
@@ -2888,7 +3090,7 @@ def watcher(cfg, state, lock):
 # ---------- commands ----------
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
-        "!down": "Down", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
+        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 
 # The dialogs disagree about Enter. Claude Code's permission prompt acts on the
@@ -2917,6 +3119,9 @@ def dialog_id(lines):
 
 def menu_digit(lines, want):
     """The digit of the first menu option whose label matches `want`."""
+    bar = bar_opts(lines)
+    if bar:
+        return next((str(i + 1) for i, l in enumerate(bar[0]) if want.match(l)), None)
     for l in menu_rows(lines):
         m = MENU.match(plain(l))
         if want.match(m.group(2).strip()):
@@ -2975,21 +3180,26 @@ def pick(sess, want):
     a highlight it must not confirm.
     """
     lines = coloured(sess)      # the highlight is a colour, not a character
-    if not ARROWED.search(plain("\n".join(lines[-25:]))):
+    across = bool(bar_opts(lines))      # opencode 2.x: one row, ← →
+    if not across and not ARROWED.search(plain("\n".join(lines[-25:]))):
         return None
-    opts, at = menu_opts(lines)
+
+    def read(ls):
+        b = bar_opts(ls)
+        return ([str(i + 1) for i in range(len(b[0]))], b[1]) if b else menu_opts(ls)
+    opts, at = read(lines)
     if want not in opts:
         return f"option {want} is not on '{sess}' right now"
     if at is None:
         return f"can't tell which option '{sess}' is on — use ↑ ↓ ⏎"
     step = opts.index(want) - at
     if step:
-        tmux("send-keys", "-t", tgt(sess),
-             *[("Down" if step > 0 else "Up")] * abs(step))
+        fwd, back = ("Right", "Left") if across else ("Down", "Up")
+        tmux("send-keys", "-t", tgt(sess), *[fwd if step > 0 else back] * abs(step))
         time.sleep(0.4)
     # Re-read before confirming: the marker above is a guess about someone
     # else's TUI, and the pane is the only thing that can settle it.
-    opts, at = menu_opts(coloured(sess))
+    opts, at = read(coloured(sess))
     if at is None or opts[at] != want:
         return f"could not move '{sess}' onto option {want} — use ↑ ↓ ⏎"
     tmux("send-keys", "-t", tgt(sess), "Enter")
@@ -3078,6 +3288,9 @@ def remember(state, sess, text):
     st["last"], st["last_at"] = text, time.time()
     st["ran"] = False    # no turn has started for it yet; flush_new sets this
     st["changed"] = time.time()
+    st["calls"], st["calls_warned"] = 0, False     # model calls on this prompt
+    if task_class(text) == "heavy":                # keeps the roomier autocompact
+        st["heavy_at"] = time.time()
 
 
 # Any CLI that runs in a terminal works here: nightmux types into tmux and reads the
@@ -3262,9 +3475,19 @@ def default_agent(cfg):
     return cfg.get("agent") or "claude"
 
 
-def spawn(name, cwd, cmdline):
-    """Detached tmux session in cwd with cmdline typed at its shell."""
-    tmux("new-session", "-d", "-s", name, "-c", cwd)
+def spawn(name, cwd, cmdline, cfg=None):
+    """Detached tmux session in cwd with cmdline typed at its shell.
+
+    With a token autocompact, Claude Code is also told to compact itself there
+    mid-turn: nightmux only compacts idle sessions, so one long task used to run
+    on to 200k-315k (measured) re-reading all of it on every call. Other agents
+    ignore the variable.
+    """
+    env = []
+    tok_at = cfg and compact_at(cfg)[1]
+    if tok_at:
+        env = ["-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % max(NATIVE_MIN, tok_at)]
+    tmux("new-session", "-d", "-s", name, "-c", cwd, *env)
     tmux("send-keys", "-t", name, "-l", "--", cmdline)
     tmux("send-keys", "-t", name, "Enter")
 
@@ -3746,8 +3969,11 @@ def autoyes(cfg, state, topic, sess):
     send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
          "!autoyes off to stop", mode="plain")
     res = pick(sess, digit)
-    if res is None or res:      # not an arrow menu, or arrow navigation errored: press digit with confirm
+    if res is None:             # not an arrow menu: the digit is the answer
         press(sess, digit, confirm=True)
+    elif res:                   # a highlight it could not read or move: Enter
+        send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
+        return
     remember(state, sess, digit)
 
 
@@ -3896,14 +4122,14 @@ def start_session(cfg, state, lock, topic, arg, key):
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
-    spawn(name, cwd, f"{prog} {flags}".strip())
+    spawn(name, cwd, f"{prog} {flags}".strip(), cfg)
     with lock:
         cfg["topics"][topic] = name
         cfg.setdefault("dirs", {})[topic] = cwd   # !resume needs it after a crash
         cfg.setdefault("started", {})[topic] = key   # ...and which agent it was
         save_cfg(cfg)
     state.pop(name, None)
-    mem_greet(cfg, state, topic, name, cwd)
+    mem_greet(cfg, state, topic, name, cwd, fresh=True)
     return (f"started {prog} {flags} '{name}' in {cwd}{note}, "
             "topic bound").replace("  ", " ")
 
@@ -3923,7 +4149,7 @@ def autostart(cfg):
         if not os.path.isdir(cwd):
             print(f"autostart {name}: no dir {cwd}", file=sys.stderr)
             continue
-        spawn(name, cwd, prog)
+        spawn(name, cwd, prog, cfg)
         print(f"autostart {name}: {prog} in {cwd}", flush=True)
 
 
@@ -4053,10 +4279,10 @@ def status_report(cfg, state):
 # is the other half and is caught separately, being everything that is not a
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!autoyes",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover",
               "!server",   # re-routes the topic to another machine
@@ -4184,11 +4410,20 @@ HELP = [
         "learned from results",
         "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
         "!center [off] = this topic watches every session · !board = all at a glance",
+        "!companion [agent] = a persona over every project: keeps its own memory, hands "
+        "work to role agents, acts alone only where a !budget is set",
+        "!companion night [01:00] [07:30] | night off = rounds every 2h through the night, "
+        "a morning summary at the end",
+        "!companion watch [3h] | watch off = by day: progress per project and ideas you tap "
+        "to send — skipped when nothing moved",
+        "!companion focus <target> | focus off = in a project's topic: the companion works "
+        "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
-        "(default 200k) · !idlectx <pct|off>",
+        "(default 200k; Claude also compacts mid-turn there) · "
+        "!autocompact park <45m|off> = compact sessions idle that long over 100k (default 45m) · !idlectx <pct|off>",
         "!ladder on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when "
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
@@ -4319,9 +4554,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return update_report(update_agents(cfg, only=arg.split() or None))
     if cmd == "!stats":
         days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
-        if days not in _analysis:
+        if ("fleet", days) not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
-        return stats_report(analyze_chats(days))
+        return stats_report(fleet_analysis(cfg, days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!briefing":
@@ -4571,6 +4806,20 @@ def handle(cfg, state, lock, topic, text, mid=None):
                              default_agent(cfg) if cmd == "!new" else cmd[1:])
     if cmd in ("!resume", "!restore"):    # !restore: same relaunch, easier to guess
         return resume_session(cfg, state, lock, topic, arg)
+    if cmd == "!companion":
+        return companion_cmd(cfg, state, lock, topic, arg)
+    if cmd == "!suggest":
+        verb, _, sid = arg.partition(" ")
+        rec = idea_ledger().get(sid.strip()) or {}
+        if rec.get("status") != "posted" or str(rec.get("topic")) != str(topic):
+            return "that idea is already taken or dropped"
+        if verb != "run":
+            idea_note(id=rec["id"], status="dropped")
+            return "✕ dropped — the companion will not suggest it again"
+        if not sess:
+            return "no session here to send it to"
+        idea_note(id=rec["id"], status="sent")
+        return send_prompt(cfg, state, topic, sess, rec["prompt"])
     if cmd == "!center":
         with lock:
             prev = cfg.get("center_topic")
@@ -4629,6 +4878,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
             send_file(cfg, topic, os.path.basename(p), f.read(), p)
         return None
     if cmd == "!autocompact":
+        m = re.fullmatch(r"park(?:\s+(off|\d+)m?)?", arg or "")
+        if m:
+            if m.group(1):
+                with lock:
+                    cfg["park_compact"] = None if m.group(1) in ("off", "0") else int(m.group(1))
+                    save_cfg(cfg)
+            park = cfg.get("park_compact", PARK_DEFAULT)
+            return (f"idle {park}m above {PARK_COMPACT:,} tokens → /compact while still cached"
+                    if park else f"park compact off — !autocompact park {PARK_DEFAULT}m")
         if arg:
             if arg in ("off", "0"):
                 v = None
@@ -4644,7 +4902,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         at, tok_at = compact_at(cfg)
         if tok_at:
             return (f"auto /compact when a turn carries {tok_at:,} tokens\n"
-                    "counted from the transcript, so Claude Code sessions only")
+                    "counted from the transcript, so Claude Code sessions only\n"
+                    "new Claude sessions also compact mid-turn there\n" +
+                    (f"idle {cfg.get('park_compact', PARK_DEFAULT)}m: compacted too (!autocompact park)"
+                     if cfg.get("park_compact", PARK_DEFAULT) else "idle: !autocompact park 45m"))
         return (f"auto /compact at {at}% of the context window" if at else
                 "auto /compact off — !autocompact 70 (pct) or 150k (tokens)")
     if cmd == "!spendcap":
@@ -4724,6 +4985,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                               if who.get(l.split()[0]) else "") for l in rows)
     if cmd == "!undo":
         if arg:
+            if pane_state(visible(sess)) == "busy":
+                return f"{sess} is working — !esc it first, then undo"
             ok, msg = undo_repo(sess, arg)
             return msg
         cwd = sess_cwd(sess)
@@ -4915,6 +5178,15 @@ def handle(cfg, state, lock, topic, text, mid=None):
         plugin = run_plugin(sess_cwd(sess), cmd[1:], arg)
         if plugin is not None:
             return plugin
+        # Anything else is typed in (Claude Code runs "!ls" as a shell command) --
+        # unless it is a near-miss of a nightmux command: "!savings" was meant for
+        # nightmux, and the agent ran it in its shell.
+        cmds = set(re.findall(r"!\w+", help_text(cfg, "all")[0]))
+        near = difflib.get_close_matches(cmd, cmds, 3, 0.75) or sorted(
+            c for c in cmds if len(os.path.commonprefix([c, cmd])) >= 4)[:3]
+        if near:
+            return (f"unknown command {cmd} — did you mean {', '.join(near)}? "
+                    f"· !raw {cmd} {arg} sends it to the agent as typed").rstrip()
 
     held = coach(cfg, state, lock, topic, sess, text)
     if held is not None:
@@ -5681,7 +5953,11 @@ LIGHT = re.compile(r"^\W*(?:rename|format|lint|fix (?:the |a )?typo|typo|add (?:
                    r"run (?:the )?tests|translate|reword)\b", re.I)
 HEAVY = re.compile(r"\b(?:design|architect\w*|refactor\w*|why\b|debug\w*|investigat\w*|"
                    r"race condition|deadlock|security|vulnerab\w*|performance|optimi[sz]\w*|"
-                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*)", re.I)
+                   r"migrat\w*|from scratch|root cause|memory leak|concurren\w*|"
+                   # Creative work: the cheap model ships something that runs and
+                   # nobody wants, and no correction ever says "be more creative".
+                   r"game|landing page|ui\b|ux\b|animat\w*|beautiful|polish\w*|"
+                   r"redesign\w*|look (?:better|nicer|good)|creative|brand\w*|story)", re.I)
 _route_last = {}  # topic -> (class, agent) of the last task, for learning
 ROUTE_MIN_N = 5  # outcomes before a learned rate outranks the defaults
 
@@ -5805,11 +6081,15 @@ FAIL_SAY = re.compile(r"^\s*(?:still (?:broken|failing|fails|not working|the sam
 P_FILE = re.compile(r"[\w/-]+\.\w{1,5}\b|`[^`]+`|\b\w+\(\)")
 P_ERR = re.compile(r"error|exception|traceback|failed|exit code|line \d+|\b[45]\d\d\b", re.I)
 P_DONE = re.compile(r"\b(?:done when|until|tests? pass|should|expect\w*|must|so that)\b", re.I)
-LADDER = {"claude": ["claude-3-5-haiku-20241022", "haiku 5.5", "sonnet", "opus"], "agy": ["low", "medium", "high"]}
+# Aliases, never dated IDs: a pinned ID retires and every light turn then fails
+# (claude-3-5-haiku-20241022 did), and "haiku 5.5" is not an alias /model takes.
+# Tier index = LADDER_START: light → haiku, normal → sonnet, heavy → opus.
+# agy: gemini-3.1-pro offers only low and high effort; /effort medium is refused.
+LADDER = {"claude": ["haiku", "sonnet", "opus"], "agy": ["low", "high"]}
 LADDER_START = {"light": 0, "normal": 1, "heavy": 2}
 SWITCH_FREE = 30000         # a model/agent switch re-bills the thread: only below this
 LADDER_HAIKU_MAX = 120000   # past this a smaller window is a risk, not a saving
-FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new"}
+FRESH = {"claude": "/clear", "codex": "/new", "opencode": "/new", "agy": "/clear"}
 FRESH_MIN = 60000           # a thread this small is cheap to keep
 _lint_hold = {}   # topic -> {"text", "better"?}
 _lint_pass = set()
@@ -6406,12 +6686,12 @@ def render_html(cfg, page, size="1200,1100"):
         return None
 
 def coach_cmd(cfg, topic):
-    les = prompt_lessons()
+    les = fleet_lessons(cfg)
     if not les["n"]:
         return "🎯 no agent prompts in the last 60 days to learn from"
 
     rate = int(les['ok'] / les['n'] * 100)
-    an = analyze_chats(30)
+    an = fleet_analysis(cfg, 30)
     ag = an.get("agents") or {}
     ctx_tot = sum(a["tokens"]["input"] + a["tokens"]["cache_read"] + a["tokens"]["cache_write"] for a in ag.values())
     cr_tot = sum(a["tokens"]["cache_read"] for a in ag.values())
@@ -6421,7 +6701,8 @@ def coach_cmd(cfg, topic):
     nud_prompts = sum(round((a["nudge_pct"] or 0) * (a["prompts"] or 0)) for a in ag.values())
     nudge_pct = int(nud_prompts / tot_prompts * 100) if tot_prompts else 18
 
-    saved_tokens = _k(saved_in(sav_data(), 30)) or "2.5M"
+    saved_tokens = _k(saved_in(fleet_sav(cfg), 30)) or "2.5M"
+    winner = (les.get("winners") or [""])[0]
     raw_w = "".join(c if (ord(c) < 128 or c in "—–•·‘’“”") else " " for c in winner.replace("\n", " "))
     winner_sanitized = html.escape(re.sub(r"\s+", " ", raw_w).strip()[:140])
 
@@ -6995,7 +7276,7 @@ def saved_in(d, days, key="tokens"):
 
 def wrapped_data(cfg, days):
     """Everything on the card: headline numbers, projects, the hours, and what they say."""
-    d, r = sav_data(), analyze_chats(days)
+    d, r = fleet_sav(cfg), fleet_analysis(cfg, days)
     ag, w = r.get("agents") or {}, r.get("when") or {}
     proj, w = w.get("projects") or [], when_summary(cfg, w)
     tok = {k: sum(a["tokens"][k] for a in ag.values())
@@ -7121,6 +7402,8 @@ def upload_media(data, ext="png"):
 
 
 def wrapped_cmd(cfg, topic, arg):
+    share = arg.startswith("share")
+    arg = arg[5:].strip() if share else arg
     days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
     b = browser_bin(cfg)
     if not b:
@@ -7128,24 +7411,35 @@ def wrapped_cmd(cfg, topic, arg):
 
     def go():
         w = wrapped_data(cfg, days)
-        mine = render_html(cfg, wrapped_page(days, w), "1200,1100")
+        mine = None if share else render_html(cfg, wrapped_page(days, w), "1200,1100")
         pub = render_html(cfg, wrapped_page(days, w, share=True), "1200,1100")
-        if not (mine and pub):
+        if not (pub and (share or mine)):
             send(cfg, topic, "🌙 the browser drew nothing", mode="plain")
             return
         cells = w["cells"]
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+        if share:
+            # Only now, on a tap: the card goes to uguu.se + rentry.co so the
+            # post can carry it. Never on a plain !wrapped — that is private.
+            link = upload_media(pub, "png")
+            send(cfg, topic, "📤 card uploaded" + (f": {link}" if link else
+                 " — failed, attach wrapped-share.png yourself"), mode="plain",
+                 buttons=kb([[("🐦 Share on X", tweet_url(
+                     f"My AI coding agents, last {days} days: {top}. Run by nightmux "
+                     f"{REPO_URL} #ClaudeCode #vibecoding\n" + link)),
+                     ("👽 Reddit", reddit_url(f"My AI coding agents, last {days} days: "
+                                              f"{top}. Run by nightmux {REPO_URL}"))]]))
+            return
         send_file(cfg, topic, "wrapped.png", mine, kind="photo",
                   caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
                   + "\n".join(f"• {k}: {v}" for k, v in w["insights"])
                   + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
-                  caption="📤 to share: projects shown as counts only",
-                  buttons=kb([[("🐦 Share on X", tweet_url(
-                      f"My AI coding agents, last {days} days: {top}. Run by nightmux "
-                      f"{REPO_URL} #ClaudeCode #vibecoding\n" + upload_media(pub, "png"))), ("👽 Reddit (attach photo!)", reddit_url(f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"))]]))
+                  caption="📤 to share: projects shown as counts only — "
+                  "tapping share uploads this card (uguu.se + rentry.co) for the link",
+                  buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
-    return f"🎁 drawing your {days}-day card…"
+    return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
 
 
 # ---------- !public: a read-only office anyone can open ----------
@@ -7321,7 +7615,7 @@ def pair_reviewer(cfg, topic, key):
     base = re.sub(r"-(%s)$" % "|".join(map(re.escape, agents(cfg))), "",
                   cfg["topics"][topic])
     sess = sess or f"{base}-{key}"
-    spawn(sess, cwd, agent(cfg, key)[0])
+    spawn(sess, cwd, agent(cfg, key)[0], cfg)
     cfg.setdefault("bench", {}).setdefault(str(topic), {})[key] = sess
     save_cfg(cfg)
     return sess, f"started {key} as '{sess}' on the bench"
@@ -7375,7 +7669,7 @@ def race_start(cfg, state, topic, arg):
             return f"🏁 could not make a worktree for {k}: {out[-300:]}"
         sess = f"{stem}-race-{k}"
         tmux("kill-session", "-t", sess)
-        spawn(sess, wt, agent(cfg, k)[0])
+        spawn(sess, wt, agent(cfg, k)[0], cfg)
         state[sess] = {"queue": [prompt + "\n\nWork only in this folder. When it is done, stop."]}
         racers[k] = {"sess": sess, "wt": wt, "branch": branch, "t0": time.time()}
     _race[topic] = {"base": base, "cwd": cwd, "prompt": prompt, "at": time.time(),
@@ -8263,13 +8557,30 @@ NM_TOOLS = [
      "inputSchema": {"type": "object", "required": ["topic"], "properties": dict(
          _topic_arg, after={"type": "integer", "default": 0})}},
     {"name": "send_prompt", "description": "Give the topic's agent a prompt. Queued if "
-     "it is busy or out of usage, like a message from the phone.",
+     "it is busy or out of usage, like a message from the phone. A project with a folder "
+     "and no session gets its agent started first.",
      "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
-         _topic_arg, text={"type": "string"})}},
+         _topic_arg, text={"type": "string"}, role={
+             "type": "string", "description": "a role file in the companion's roles/ "
+             "(builder, reviewer, tester, researcher…) the agent takes on for this task"})}},
+    {"name": "progress", "description": "What moved in every project since your last call "
+     "(or the last `hours`): replies, commits, last answer, who is waiting on a question, "
+     "who is going in circles, budget spent. Quiet projects in one line. Start here.",
+     "inputSchema": {"type": "object", "properties": {"hours": {"type": "number"}}}},
+    {"name": "suggest", "description": "Share an idea with the owner in a project's topic, "
+     "with a button that sends it to that project's agent when they tap it. For ideas that "
+     "need the owner's yes; no budget needed.",
+     "inputSchema": {"type": "object", "required": ["topic", "text"], "properties": dict(
+         _topic_arg, text={"type": "string", "description": "one concrete prompt the agent "
+                                                           "could run, first line = why"},
+         role={"type": "string"})}},
 ]
 
 
-def nm_call(name, a, base=None):
+_nm_seen = {}     # topic -> last chat id this MCP process returned
+
+
+def nm_call(name, a, base=None, companion=False):
     base = base or f"http://127.0.0.1:{load_cfg().get('webhook_port') or 9090}"
     t = urllib.parse.quote(str(a.get("topic", "")), safe="")
 
@@ -8281,26 +8592,679 @@ def nm_call(name, a, base=None):
         text = "\n".join(f"{r['topic']}: {r.get('session')} · {r.get('agent') or '?'} · "
                          f"{r.get('mode')}" + (f" · {r['queued']} queued" if r.get("queued") else "")
                          + (f" · {r.get('server')}" if r.get("server") else "")
+                         + (f" · {r['dir']}" if r.get("dir") else "")
+                         + (f" · budget {r['budget']}" if r.get("budget") else "")
                          for r in rows) or "no topics"
+        if companion:
+            c_ = load_cfg()
+            bound = {str(r["topic"]) for r in rows}
+            names = c_.get("topic_names") or {}
+            text += "".join(f"\n{t}: {names.get(t) or os.path.basename(d)} · no session · {d} "
+                            "· send_prompt starts one" for t, d in (c_.get("dirs") or {}).items()
+                            if t not in bound and os.path.isdir(d))
+            used, cap = companion_allowance(c_)
+            text += (f"\nyour allowance: {_k(used)} of {_k(cap)} this period — covers projects "
+                     "with no !budget of their own" if cap else
+                     "\nno allowance: you act only where a project has its own !budget")
     elif name == "read_terminal":
-        n = max(1, min(int(a.get("lines") or 120), 2000))
+        n = max(1, min(int(a.get("lines") or (40 if companion else 120)), 2000))
         d = get(f"/api/term/{t}?lines={max(n, 50)}")
         text = d.get("error") or "\n".join(d.get("lines", [])[-n:])
     elif name == "read_chat":
-        d = get(f"/api/chat/{t}?after={int(a.get('after') or 0)}")
-        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in d.get("items", [])) \
+        # The companion reads every project every round: by default it gets only
+        # what it has not seen, the last 15 messages at most, each cut at 1500
+        # characters — a night of full transcripts is what would fill its context.
+        key = str(a.get("topic", ""))
+        after = int(a.get("after") or (_nm_seen.get(key, 0) if companion else 0))
+        d = get(f"/api/chat/{t}?after={after}")
+        items = d.get("items", [])
+        if companion:
+            if items:
+                _nm_seen[key] = max(m["id"] for m in items)
+            items = [dict(m, text=str(m.get("text"))[:1500]) for m in items[-15:]]
+        text = "\n\n".join(f"#{m['id']} {m.get('who')}: {m.get('text')}" for m in items) \
             or d.get("error") or "nothing new"
     elif name == "send_prompt":
         txt = str(a.get("text") or "").strip()
         if not txt or txt.startswith("!"):
             raise ValueError("send a prompt for the agent; nightmux commands are not exposed here")
+        row = next((r for r in get("/api/topics") if str(r.get("topic")) == str(a.get("topic"))), None)
+        if companion and row is None:
+            txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
+            companion_wake(base, load_cfg(), str(a.get("topic", "")))
+            companion_log(a, txt)
+            req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
+                                         headers={"X-Nightmux": "1"})
+            urllib.request.urlopen(req, timeout=10).close()
+            return [{"type": "text", "text": "started its agent and sent — read_chat for the answer"}]
+        if row and row.get("mode") == "waiting":
+            # nightmux refuses text into an open menu — saying "sent" would be a lie
+            raise ValueError("a menu is open there: text would pick an option, so nightmux "
+                             "holds it. Ask the owner with suggest, or read_terminal to see it")
+        if companion or a.get("role"):
+            txt = companion_prompt(load_cfg(), str(a.get("topic", "")), txt, a.get("role"), companion)
+            companion_log(a, txt)
         req = urllib.request.Request(f"{base}/topic/{t}", data=txt.encode(),
                                      headers={"X-Nightmux": "1"})
         urllib.request.urlopen(req, timeout=10).close()
         text = "sent — read_chat for the answer"
+    elif name == "progress":
+        now = time.time()
+        since = now - float(a["hours"]) * 3600 if a.get("hours") else \
+            _nm_seen.get("progress", now - 6 * 3600)
+        _nm_seen["progress"] = now
+        text = get(f"/api/progress?since={int(since)}").get("text") or "nothing"
+    elif name == "suggest":
+        txt = str(a.get("text") or "").strip()
+        if not txt or txt.startswith("!"):
+            raise ValueError("suggest a prompt for the agent, not a nightmux command")
+        txt = companion_prompt({}, "", txt, a.get("role"), companion=False)
+        req = urllib.request.Request(f"{base}/api/suggest/{t}", data=txt.encode(),
+                                     headers={"X-Nightmux": "1"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            text = json.loads(r.read()).get("msg", "posted")
     else:
         raise ValueError(f"no tool {name}")
     return [{"type": "text", "text": text}]
+
+
+# ---------- !companion: one persona over every project ----------
+# An ordinary agent session in a private folder — never a repo, never shared —
+# whose PERSONA.md sets its tone and how much risk it takes, whose MEMORY.md it
+# keeps itself, and whose roles/ it hands to project agents with each task, so
+# one project can be built by one role and checked by another. It drives the
+# other topics through `--mcp --companion`, which sends only where the owner
+# set a !budget: alone, it acts within budget and nowhere else.
+COMPANION_DIR = os.path.expanduser("~/.nightmux-companion")
+COMPANION_SEED = {
+    "PERSONA.md": (
+        "# Persona\n\nname: Nox\nrisk: balanced   # cautious | balanced | bold\n\n"
+        "## Priorities\n"
+        "Rank your projects, each with this week's goal. Effort and ideas go here first.\n"
+        "1. (project) — (goal)\n\n"
+        "## Tone and style\n"
+        "Short and direct, plain words, no cheerleading. Say what you did, what it cost "
+        "and what needs the owner. One question at a time.\n\n"
+        "## Risk\n"
+        "- cautious: suggest; send work to a project only when the owner asked for it.\n"
+        "- balanced: act alone on clear, reversible work (fixes, tests, docs, reviews); "
+        "ask before anything that deploys, deletes, pays or posts.\n"
+        "- bold: also start features and refactors alone; still ask before deploys, "
+        "deletions, payments and anything public.\n"),
+    "MEMORY.md": ("# Memory\n\nWhat you learned about the owner, each project and what "
+                  "works. Under 150 lines; rewrite, don't append. No secrets.\n"),
+    "roles/builder.md": ("You are the builder. Implement the task in small, tested steps on a "
+                         "branch, run the project's tests, and report what changed and how you "
+                         "checked it.\n"),
+    "roles/reviewer.md": ("You are the reviewer. Do not edit. Read the latest changes against "
+                          "the main branch and list real defects, most severe first, each with "
+                          "file:line and how it fails. Say plainly if there are none.\n"),
+    "roles/tester.md": ("You are the tester. Write or extend tests for the task, run them, "
+                        "and report failures with the exact output. Change tests, not code.\n"),
+    "roles/researcher.md": ("You are the researcher. Do not edit code. Find out what the task "
+                            "asks from the code, docs or web; answer in under 15 lines with "
+                            "sources.\n"),
+}
+COMPANION_GUIDE = (
+    "# Companion\n\n"
+    "You are the owner's companion, above the project agents. PERSONA.md is how you talk "
+    "and how much you do without asking; MEMORY.md is what you have learned. Keep to both.\n\n"
+    "- Scheduled rounds arrive with a progress report in the prompt. The nightmux MCP "
+    "tools: progress (the same report, for when the owner asks), list_topics (agent, state, folder, budget spent), read_chat (only what "
+    "you have not seen), read_terminal, send_prompt (hand work out) and suggest (post an "
+    "idea the owner sends with one tap).\n"
+    "- Your job is the owner's productivity: notice progress, unblock stuck agents, and "
+    "bring ideas that are specific — a file, a feature, a command — never generic advice.\n"
+    "- Read a project's own notes, <dir>/.nightmux/memory.md, before you direct it.\n"
+    "- Give each task a role (send_prompt role=builder|reviewer|tester|researcher; files in "
+    "roles/, add one when none fits), so the right kind of agent does it in whichever "
+    "project needs it. Build with one role, check with another.\n"
+    "- send_prompt works in projects with their own !budget, and elsewhere within your "
+    "allowance (the !budget in your own topic; list_topics shows what is left). That is "
+    "your limit when you act alone. A project with no session is started by send_prompt. "
+    "actions.log here records every prompt you sent — report from it, not from memory.\n"
+    "- Keep reads small: progress first, then read_chat only where something changed; "
+    "read_terminal only when the chat does not explain a state.\n"
+    "- MEMORY.md (under 150 lines) holds what lasts: the owner's preferences, which ideas "
+    "they sent or dropped and why, standing decisions. Not project status — the report has "
+    "that, fresher. Edit it only when you learned something lasting; never rewrite it "
+    "whole. Never secrets, tokens or personal data.\n"
+    "- Your thread may be cleared before a scheduled round; everything you need is in "
+    "these files and the report.\n"
+    "- The owner talks to you in this topic in plain words. A 📌 target in the report is "
+    "what they set with !companion focus in that project's topic: work toward it first. "
+    "A ⭐ priority is from PERSONA.md's ## Priorities: listed even when idle, so you move "
+    "it forward — its next: lines first, and a question for the owner when the next step "
+    "needs their answer.\n")
+# Read on every conversation start and kept through compaction: Claude Code
+# imports the files from CLAUDE.md, the others are told to read them.
+COMPANION_HOOKS = {
+    "CLAUDE.md": COMPANION_GUIDE + "\n@PERSONA.md\n@MEMORY.md\n",
+    "AGENTS.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+    "GEMINI.md": COMPANION_GUIDE + "\nRead PERSONA.md and MEMORY.md before your first answer.\n",
+}
+COMPANION_ROUND = (
+    "Night round. From the progress report below, for each project you can act in (its own "
+    "budget, or your allowance) that moved, is waiting, or is a 📌 target or ⭐ priority: read_chat for detail where needed and decide, by your risk level, whether there is clear work — a question an agent "
+    "is waiting on, a failing test, an unfinished task in MEMORY.md or the project's notes. "
+    "Hand it out with send_prompt and a role; skip projects with nothing new and do not "
+    "wait for results, the next round reads them. Review what the last round's work "
+    "produced before handing out more in that project. A 📌 target or ⭐ priority that is "
+    "idle gets the next step toward it (its next: lines first), or a suggest where you "
+    "cannot act. Then stop.")
+COMPANION_MORNING = (
+    "Morning summary for the owner, under 15 lines, in your persona's voice: what you handed "
+    "out overnight and what came of it (actions.log is the record, the report below the "
+    "result), budget spent per "
+    "project, what needs the owner's decision, and what you would do next. Nothing else.")
+
+
+COMPANION_WATCH = (
+    "Watch round. The progress report below lists the projects that moved since your "
+    "last round, and every ⭐ priority and 📌 target even when idle. Work through it in "
+    "this order. 1) Act: where an agent waits on a question its notes or MEMORY.md "
+    "answer, or a ⭐/📌 project has nothing in flight, hand out the next step with "
+    "send_prompt and a role — wherever you may act (its own !budget or your allowance) "
+    "and your risk level allows. A next: line the project already chose, a fix, a test, a "
+    "review or docs is clear work, not a new feature: do it, don't ask. 2) Where you may "
+    "not act, call suggest with that same one prompt so the owner sends it with a tap — "
+    "never only describe it. At most 3 suggests; each names the file, feature or command "
+    "and quotes the line it builds on (a commit, an answer, a note), never a file you have "
+    "not seen. 3) Then tell the owner, one line per project: what got done, what you sent "
+    "or suggested, what is stuck (a question, going in circles, out of budget or usage). "
+    "Reply only \"quiet\" when nothing moved and no ⭐/📌 project has a next step.")
+SPIN_REPLIES = 6      # this many answers and no commit: worth a second look
+IDEA_STALE = 86400    # an idea nobody tapped in a day counts as ignored
+_idea_times = []
+
+
+def companion_fresh(cfg, state, topic, sess):
+    """Start a scheduled round from an empty thread when the old one is big.
+
+    Each round is another turn on the same conversation and re-reads all of it
+    — the bill grows every round. Nothing in it is needed: persona and memory
+    reload from CLAUDE.md/AGENTS.md, the report is in the prompt, actions.log
+    holds what was sent. Not while the owner is talking to it (an hour).
+    """
+    clear = FRESH.get(agent_key(cfg, topic, sess))
+    st = state.setdefault(sess, {})
+    owner = max((m.get("t", 0) for m in _chat.get(str(topic)) or [] if m.get("who") == "you"), default=0)
+    if clear and (st.get("ctx_tok") or 0) > FRESH_MIN and time.time() - owner > 3600 \
+            and clear not in (st.get("queue") or []):
+        st.setdefault("queue", []).append(clear)
+
+
+AGENT_REPLY = re.compile(r"✅ \S+\n")   # an agent's answer; everything else is nightmux talking
+
+
+def open_question(log):
+    """(question, asked at) when the last agent answer ends in a question nobody has
+    answered since — the stall a menu detector misses, because the pane is idle."""
+    for m in reversed(log):
+        if m.get("who") == "you":
+            return None
+        if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or ""):
+            tail = [l.strip() for l in m["text"].splitlines() if l.strip()][-1:]
+            return (tail[0], m.get("t", 0)) if tail and tail[0].endswith("?") else None
+    return None
+
+
+def progress_report(cfg, state, since):
+    """What moved in each project since `since`, for the companion to read in one call.
+
+    Built here from the chat log and git rather than by the companion reading
+    every chat: one call of a few hundred tokens instead of one per project.
+    Only agent answers count as replies — nightmux's own status lines (🧠, 📥,
+    ⚙️, the companion's 💡) would otherwise read as an agent busy going nowhere.
+    Git is asked even with no chat: the log is in memory and empty after a
+    restart, and work done straight in the terminal never passes through it.
+    Flags what a person scanning topics misses: a question nobody answered —
+    a menu or a reply ending in "?" — and how long it has waited, and an agent
+    answering again and again without a commit.
+    # ponytail: this machine's topics only; add peers via peer_call if they matter.
+    """
+    own = str((cfg.get("companion") or {}).get("topic"))
+    focus = (cfg.get("companion") or {}).get("focus") or {}
+    prio = [t for t in persona_priorities(cfg) if not focus or t in focus]
+    names, now = cfg.get("topic_names") or {}, time.time()
+    since_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+    moved, quiet, seen = [], [], set()
+    for r in topics_status(cfg, state):
+        t, sess = str(r["topic"]), r["session"]
+        seen.add(t)
+        if t == own or (focus and t not in focus):
+            continue
+        full = _chat.get(t) or []
+        log = [m for m in full if m.get("t", 0) >= since]
+        replies = [m for m in log if m.get("who") == "bot" and AGENT_REPLY.match(m.get("text") or "")]
+        st = state.get(sess) or {}
+        cwd = (cfg.get("dirs") or {}).get(t)
+        # Outside a repo git answers with its error and usage text, which read as a
+        # commit and a 40-line "uncommitted" block, every round.
+        repo = bool(cwd and os.path.isdir(cwd)
+                    and tmux_git(cwd, "rev-parse", "--is-inside-work-tree") == "true")
+        commits = [c for c in tmux_git(cwd, "log", "--oneline", f"--since={since_s}").split("\n")
+                   if c.strip()] if repo else []
+        if r["mode"] == "waiting" and st.get("asked"):
+            asked = (st["asked"].strip().splitlines()[0], st.get("asked_at"))
+        else:
+            asked = open_question(full)
+        errs = [e for e in _err_log if str(e[1]) == t and e[0] >= since]
+        idle = not (log or commits or asked or errs)
+        if idle and t not in focus and t not in prio:
+            quiet.append(names.get(t) or sess)
+            continue
+        lines = [f"▸ {names.get(t) or sess} (topic {t}) [{r['mode']}] · {len(replies)} replies · "
+                 f"{len(commits)} commits" + (f" · budget {r['budget']}" if r.get("budget") else "")]
+        if t in focus:
+            lines.append("  📌 target: " + focus[t] + (" — idle, nothing moved" if idle else ""))
+        elif t in prio:
+            lines.append(f"  ⭐ priority {prio.index(t) + 1}" + (" — idle, nothing moved" if idle else ""))
+        last = replies[-1]["text"].split("\n", 1)[1].strip() if replies else ""
+        if last:
+            lines.append("  last: " + last.splitlines()[0][:160])
+        lines += [f"  {c[:90]}" for c in commits[:3]]
+        if asked:
+            lines.append(f"  ✋ waiting on you: {asked[0][:140]}"
+                         + (f" ({left(now - asked[1])})" if asked[1] else ""))
+        if len(replies) >= SPIN_REPLIES and not commits and not asked:
+            lines.append(f"  ⚠ {len(replies)} replies, no commit — may be going in circles")
+        goal = [m for m in log if re.match(r"(✅ goal green|🛑 goal stuck|🔁 goal round)", m.get("text") or "")]
+        if goal:
+            lines.append("  🎯 " + goal[-1]["text"].splitlines()[0][:110])
+        if errs:
+            lines.append(f"  🚨 {len(errs)} production error{'s' * (len(errs) != 1)}: "
+                         + "; ".join(e[2][:50] for e in errs[-2:]))
+        if repo:
+            diff = tmux_git(cwd, "diff", "--shortstat", "HEAD").strip()
+            if diff:
+                lines.append("  uncommitted: " + diff)
+        if cwd and os.path.isdir(cwd):
+            lines += [f"  next: {l}" for l in project_next(cwd)]
+        if r.get("held_until"):
+            lines.append(f"  💤 held until {clock(cfg, r['held_until'])}")
+        moved.append("\n".join(lines))
+    for t in [t for t in list(focus) + prio if t not in seen and t != own]:
+        seen.add(t)
+        cwd = (cfg.get("dirs") or {}).get(t)
+        peer = (cfg.get("remote") or {}).get(t)
+        if peer:   # its folder is on that box: the local path is empty or someone else's
+            moved.append(f"▸ {names.get(t) or t} (topic {t}) on {peer} · "
+                         + ("📌 target: " + focus[t] if t in focus else f"⭐ priority {prio.index(t) + 1}")
+                         + " — idle; send_prompt reaches it there")
+            continue
+        if not cwd or not os.path.isdir(cwd):
+            continue
+        moved.append("\n".join(
+            [f"▸ {names.get(t) or os.path.basename(cwd)} (topic {t}) [no session] · {cwd}",
+             "  📌 target: " + focus[t] if t in focus else f"  ⭐ priority {prio.index(t) + 1}",
+             "  no agent running — send_prompt starts one"]
+            + [f"  next: {l}" for l in project_next(cwd)]))
+    out = moved or ["nothing moved"]
+    if quiet:
+        out.append("quiet: " + ", ".join(quiet))
+    if moved:
+        ideas = idea_stats(now)
+        out += [ideas] if ideas else []
+    return "\n".join(out)
+
+
+def project_next(cwd, n=4):
+    """The project's own plan: up to n lines under "In progress / next" in its notes —
+    what grounds an idea in work the project already chose."""
+    try:
+        with open(os.path.join(cwd, MEM_REL)) as f:
+            text = f.read()
+    except OSError:
+        return []
+    m = re.search(r"^#+ *in progress[^\n]*\n(.*?)(?=^#|\Z)", text, re.I | re.M | re.S)
+    lines = [l.strip(" -*\t")[:120] for l in (m.group(1).splitlines() if m else []) if l.strip()]
+    return lines[:n]
+
+
+def idea_ledger():
+    """{id: record} from ideas.jsonl — each line a post or a later tap, merged.
+
+    On disk, so the ▶ button survives a restart and the companion learns
+    what the owner sends and drops.
+    # ponytail: append-only and never trimmed; a busy year is a few MB.
+    """
+    out = {}
+    try:
+        with open(os.path.join(COMPANION_DIR, "ideas.jsonl")) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                    out.setdefault(rec["id"], {}).update(rec)
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def idea_note(**rec):
+    try:
+        with open(os.path.join(COMPANION_DIR, "ideas.jsonl"), "a") as f:
+            f.write(json.dumps(dict(rec, t=int(time.time()))) + "\n")
+    except OSError:
+        pass
+
+
+def idea_stats(now=None):
+    """One line on how the last week's ideas landed — the companion's taste feedback."""
+    now, sent, dropped, ignored, pending = now or time.time(), 0, [], 0, 0
+    for rec in idea_ledger().values():
+        if rec.get("posted", 0) < now - 7 * 86400:
+            continue
+        st = rec.get("status")
+        if st == "sent":
+            sent += 1
+        elif st == "dropped":
+            dropped.append(rec.get("prompt", "").rsplit("Task: ", 1)[-1].splitlines()[0][:60])
+        elif now - rec.get("posted", now) > IDEA_STALE:
+            ignored += 1
+        else:
+            pending += 1
+    if not (sent or dropped or ignored or pending):
+        return ""
+    return (f"ideas, 7 days: ▶ {sent} sent · ✕ {len(dropped)} dropped · {ignored} ignored · "
+            f"{pending} waiting" + ("\n  dropped: " + " | ".join(dropped[-3:]) if dropped else ""))
+
+
+def suggest_post(cfg, topic, prompt):
+    """An idea in a project's topic with a button to send it: the owner decides."""
+    now = time.time()
+    _idea_times[:] = [x for x in _idea_times if x > now - 3600]
+    if len(_idea_times) >= 6:
+        return "6 ideas this hour already — keep the best for the next round"
+    if topic not in (cfg.get("topics") or {}) or not prompt.strip():
+        return f"no project topic {topic}"
+    sid = hashlib.sha1(prompt.encode()).hexdigest()[:8]
+    ledger = idea_ledger()
+    if (ledger.get(sid) or {}).get("status") == "dropped":
+        return "the owner dropped this exact idea before — do not repeat it"
+    waiting = [r for r in ledger.values() if r.get("status") == "posted" and r.get("topic") == topic
+               and now - r.get("posted", 0) < IDEA_STALE]
+    if len(waiting) >= 3:
+        return "3 ideas already wait in that topic — let the owner answer those first"
+    _idea_times.append(now)
+    idea_note(id=sid, topic=topic, status="posted", posted=int(now), prompt=prompt)
+    send(cfg, topic, "💡 idea from your companion:\n" + prompt.rsplit("Task: ", 1)[-1][:900],
+         mode="plain", buttons=kb([[("▶ send to agent", f"!suggest run {sid}"),
+                                    ("✕", f"!suggest drop {sid}")]]))
+    return "posted — the owner taps ▶ to send it"
+
+
+def companion_allowance(cfg, now=None):
+    """(used, cap) of the !budget set in the companion's own topic: its allowance for
+    projects that have no budget of their own. Used is everything those projects spent
+    this period -- the owner's turns there too, so it stops early rather than late.
+    Read from disk: this runs in the MCP process, whose copy of the ledger never refreshes.
+    """
+    comp = cfg.get("companion") or {}
+    b = (cfg.get("budgets") or {}).get(str(comp.get("topic")))
+    if not b:
+        return 0, 0
+    start = budget_window(cfg, b["per"], now)[0]
+    acted = set()
+    try:
+        with open(os.path.join(COMPANION_DIR, "actions.log")) as f:
+            for line in f:
+                m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) topic=(\S+)", line)
+                if m and time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M")) >= start - 60:
+                    acted.add(m.group(2))
+    except OSError:
+        pass
+    try:
+        with open(sav_path()) as f:
+            led = json.load(f).get("spent") or {}
+    except (OSError, ValueError):
+        led = {}
+    sessions = {s for t in acted for s in set(bench_of(cfg, t).values()) | {cfg["topics"].get(t)}}
+    used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
+    return int(used), b["tokens"]
+
+
+def companion_wake(base, cfg, topic):
+    """Start the agent of a project that has a folder but no session, so work the
+    companion hands it is not dropped on an empty topic."""
+    folder = (cfg.get("dirs") or {}).get(topic)
+    peer = (cfg.get("remote") or {}).get(topic)
+    if peer:   # never start a stand-in here: its folder lives on the peer
+        raise ValueError(f"topic {topic} runs on {peer}, which did not answer — try next round")
+    if not folder or not os.path.isdir(folder):
+        raise ValueError(f"topic {topic} has no session and no folder — ask the owner to open it")
+    name = re.sub(r"[^\w.-]", "", (cfg.get("topic_names") or {}).get(topic) or
+                  os.path.basename(folder.rstrip("/"))) or f"topic{topic}"
+    body = json.dumps({"name": name, "folder": folder, "agent": default_agent(cfg)}).encode()
+    req = urllib.request.Request(f"{base}/api/topic/{topic}/start", data=body,
+                                 headers={"X-Nightmux": "1", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        out = json.loads(r.read())
+    if not out.get("ok"):
+        raise ValueError(f"could not start topic {topic}: {out.get('msg')}")
+
+
+def persona_priorities(cfg):
+    """Topics named in PERSONA.md's ## Priorities, in rank order. The report keeps
+    listing them while idle, so the companion pushes the owner's projects forward
+    instead of waiting for something to move. A line names one by its topic name,
+    session or folder: `1. nightmux (...) — goal`."""
+    try:
+        with open(os.path.join(COMPANION_DIR, "PERSONA.md")) as f:
+            sec = re.search(r"^## Priorities\n(.*?)(?=^## |\Z)", f.read(), re.S | re.M)
+    except OSError:
+        return []
+    names = {}
+    for t, d in (cfg.get("dirs") or {}).items():
+        names[os.path.basename(d.rstrip("/")).lower()] = t
+    for t, sess in (cfg.get("topics") or {}).items():
+        names[sess.lower()] = t
+    for t, n in (cfg.get("topic_names") or {}).items():
+        names[n.lower()] = t
+    heads = re.findall(r"^\s*\d+\.\s*([\w.-]+)", sec.group(1), re.M) if sec else []
+    return [names[h.lower()] for h in heads if h.lower() in names]
+
+
+def companion_prompt(cfg, topic, text, role=None, companion=True):
+    """The text send_prompt delivers: the role's file first, if one is named.
+
+    The companion may only send where a !budget caps the spend — that cap is
+    what "acts on its own within budget" means, enforced here and not in its
+    prompt. Never to its own topic: that is a loop that bills itself. A role
+    name is a file name, so nothing outside roles/ is read.
+    """
+    if companion and topic == str((cfg.get("companion") or {}).get("topic")):
+        raise ValueError("that is your own topic — send work to a project")
+    if companion and topic not in (cfg.get("budgets") or {}):
+        used, cap = companion_allowance(cfg)
+        if not cap:
+            raise ValueError(f"topic {topic} has no !budget and you have no allowance — "
+                             "suggest it instead, or ask the owner for a !budget in your topic")
+        if used >= cap:
+            raise ValueError(f"your allowance is spent ({_k(used)} of {_k(cap)}) — suggest "
+                             "it instead; it resets with the period")
+    if not role:
+        return text
+    if not re.fullmatch(r"[\w-]{1,40}", str(role)):
+        raise ValueError("a role is a name like builder or reviewer")
+    try:
+        with open(os.path.join(COMPANION_DIR, "roles", role + ".md")) as f:
+            brief = f.read().strip()
+    except OSError:
+        raise ValueError(f"no role {role} — add roles/{role}.md in {COMPANION_DIR}")
+    return f"[role: {role}] {brief}\n\nTask: {text}"
+
+
+def companion_log(a, text):
+    """One line per prompt sent: the morning summary's record, and the owner's audit."""
+    line = (f"{time.strftime('%Y-%m-%d %H:%M')} topic={a.get('topic')} role={a.get('role') or '-'} "
+            f"{text.rsplit('Task: ', 1)[-1].splitlines()[0][:160] if text.strip() else ''}\n")
+    try:
+        with open(os.path.join(COMPANION_DIR, "actions.log"), "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def companion_night(cfg, state, arg):
+    """Rounds every 2h from the night time until the morning, then a summary —
+    plain scheduled prompts on the companion's own queue, so they wait out
+    usage limits and survive restarts like any !every.
+
+    # ponytail: fixed 2h spacing; make it a setting if one round is too few or too many.
+    """
+    sess = (cfg.get("companion") or {}).get("session")
+    if not sess:
+        return "start the companion first: !companion"
+    st = state.setdefault(sess, {})
+    keep = [j for j in st.get("sched") or [] if not j.get("companion") or j.get("watch")]
+    words = arg.split()[1:]
+    if words == ["off"]:
+        st["sched"] = keep
+        save_queue(state)
+        return "🌙 night rounds and morning summary off"
+    start, end = (words + ["01:00", "07:30"][len(words):])[:2]
+    a, b = at_epoch(cfg, start), at_epoch(cfg, end)
+    if a is None or b is None or start.startswith("+") or end.startswith("+"):
+        return "usage: !companion night [01:00] [07:30] | night off"
+    while b <= a:
+        b += 86400
+    rounds = list(range(int(a), int(b) - 1800, 2 * 3600))
+    st["sched"] = keep + [{"at": t, "every": 86400, "text": COMPANION_ROUND, "companion": True,
+                           "progress": True, "gate": True} for t in rounds] + [
+        {"at": b, "every": 86400, "text": COMPANION_MORNING, "companion": True, "progress": True}]
+    save_queue(state)
+    return (f"🌙 rounds at {', '.join(clock(cfg, t) for t in rounds)} · ☀️ summary at "
+            f"{clock(cfg, b)}, each night · !companion night off to stop")
+
+
+def companion_watch(cfg, state, arg):
+    """A watch round every few hours — skipped while no project moves."""
+    sess = (cfg.get("companion") or {}).get("session")
+    if not sess:
+        return "start the companion first: !companion"
+    st = state.setdefault(sess, {})
+    keep = [j for j in st.get("sched") or [] if not j.get("watch")]
+    when = (arg.split()[1:] or ["3h"])[0]
+    if when == "off":
+        st["sched"] = keep
+        save_queue(state)
+        return "👀 watch off"
+    secs = parse_every(when)
+    if not secs or secs < 1800:
+        return "usage: !companion watch [3h] | watch off   (30m at least)"
+    # First round in a minute, looking back one period: waiting a whole period
+    # for the first word made a just-started companion look dead.
+    st["sched"] = keep + [{"at": time.time() + 60, "every": secs, "text": COMPANION_WATCH,
+                           "companion": True, "watch": True, "progress": True, "gate": True,
+                           "since": time.time() - secs}]
+    save_queue(state)
+    return (f"👀 first round in a minute, then every {when}: progress per project and ideas "
+            "to tap — skipped while nothing moves · !companion watch off to stop")
+
+
+def companion_focus(cfg, lock, topic, arg):
+    """The owner's target for a project, said in that project's topic.
+
+    While any target is set, reports carry only the targeted projects — idle
+    ones too, so a quiet night is spent moving them toward the target instead
+    of being skipped. In the companion's own topic: list, or `off` for all.
+    """
+    comp, topic = cfg.get("companion"), str(topic)
+    if not comp:
+        return "start the companion first: !companion"
+    text = arg.split(None, 1)[1].strip() if len(arg.split()) > 1 else ""
+    focus = comp.get("focus") or {}
+    if topic == comp.get("topic"):
+        if text == "off":
+            with lock:
+                comp.pop("focus", None)
+                save_cfg(cfg)
+            return "📌 no targets — reports cover every project again"
+        names = cfg.get("topic_names") or {}
+        return "\n".join(f"📌 {names.get(t) or t}: {g}" for t, g in focus.items()) or \
+            "no targets — say !companion focus <target> in a project's topic"
+    if topic not in (cfg.get("topics") or {}) and topic not in (cfg.get("dirs") or {}):
+        return "say this in a project's topic"
+    if not text:
+        return f"📌 {focus[topic]}" if topic in focus else "usage: !companion focus <target> | focus off"
+    with lock:
+        if text == "off":
+            focus.pop(topic, None)
+        else:
+            focus[topic] = text[:300]
+        comp["focus"] = focus
+        save_cfg(cfg)
+    if text == "off":
+        return "📌 target dropped"
+    return ("📌 the companion works toward this here, idle or not, and reports cover only "
+            "targeted projects" + ("" if topic in (cfg.get("budgets") or {}) else
+                                   " · it can only suggest until you set !budget here"))
+
+
+def companion_cmd(cfg, state, lock, topic, arg):
+    if arg.split()[:1] == ["night"]:
+        return companion_night(cfg, state, arg)
+    if arg.split()[:1] == ["watch"]:
+        return companion_watch(cfg, state, arg)
+    if arg.split()[:1] == ["focus"]:
+        return companion_focus(cfg, lock, topic, arg)
+    bound = (cfg.get("topics") or {}).get(str(topic))
+    if bound and bound != "companion":     # would unbind the project and mute its notes
+        return (f"this topic runs '{bound}' — start the companion in an empty topic of its "
+                "own, then say !companion focus <target> here")
+    key, _, flags = arg.partition(" ")
+    comp = cfg.get("companion") or {}
+    if (key and key not in agents(cfg) and str(topic) == comp.get("topic")
+            and has_session(comp.get("session"))):
+        # "!companion work on pennywise" reads as talking to it: pass it on.
+        state.setdefault(comp["session"], {}).setdefault("queue", []).append(arg)
+        save_queue(state)
+        return "🧭 passed to your companion — next time just write it here"
+    if key and key not in agents(cfg):
+        return (f"usage: !companion [{'|'.join(agents(cfg))}] [flags] · !companion night "
+                "[01:00] [07:30] · !companion watch [3h]")
+    key = key or default_agent(cfg)
+    os.makedirs(os.path.join(COMPANION_DIR, "roles"), exist_ok=True)
+    os.chmod(COMPANION_DIR, 0o700)              # its memory is about the owner
+    for rel, text in COMPANION_SEED.items():
+        path = os.path.join(COMPANION_DIR, rel)
+        if not os.path.exists(path):            # the owner's edits are theirs
+            with open(path, "w") as f:
+                f.write(text)
+    for rel, text in COMPANION_HOOKS.items():   # nightmux's own: refreshed every start
+        with open(os.path.join(COMPANION_DIR, rel), "w") as f:
+            f.write(text)
+    server = [sys.executable, os.path.abspath(__file__), "--mcp", "--companion"]
+    argv = mcp_argv(key, "add", "nightmux", server)
+    if not argv:
+        return f"{key} takes no MCP server nightmux knows how to add — try !companion claude"
+    try:
+        old = mcp_argv(key, "remove", "nightmux")
+        if old:                                 # `mcp add` refuses a name it already has
+            subprocess.run(old, cwd=COMPANION_DIR, capture_output=True, timeout=90,
+                           stdin=subprocess.DEVNULL)
+        p = subprocess.run(argv, cwd=COMPANION_DIR, capture_output=True, text=True,
+                           timeout=90, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not give {key} the nightmux tools: {e}"
+    if p.returncode:
+        return f"could not give {key} the nightmux tools: {(p.stderr or p.stdout).strip()[-200:]}"
+    with lock:   # MEMORY.md is its memory; the project-notes turns would bill its whole context
+        cfg.setdefault("memory", {})[str(topic)] = "off"
+        save_cfg(cfg)
+    out = start_session(cfg, state, lock, topic, f"companion {COMPANION_DIR} {flags}".strip(), key)
+    if not out.startswith("started"):
+        return out
+    with lock:
+        cfg["companion"] = dict(cfg.get("companion") or {}, topic=str(topic), session="companion")
+        save_cfg(cfg)
+    return (out + f"\n🧭 your companion lives here. Edit {COMPANION_DIR}/PERSONA.md for its "
+            "tone and risk, roles/ for the kinds of agent it hands work to. It acts alone only "
+            "in topics with a !budget · !companion watch 3h to hear progress and ideas by day · "
+            "!companion night 01:00 07:30 for night rounds and a morning summary.")
 
 
 # ---------- !errors: production errors become fix prompts ----------
@@ -8455,7 +9419,8 @@ MEM_UPDATE = (
 MEM_READ = ("Before anything else, read .nightmux/memory.md — notes left by earlier sessions "
             "on this project: how to run it, decisions, gotchas, what is in progress. "
             "Reply with one line: ready.")
-_mem = {}          # topic -> {"turns": n, "wait": session}
+_mem = {}          # topic -> {"turns": n, "wait": session, "fp": repo state at last update}
+_mem_seen = {}     # session -> (memory.md mtime, HEAD) its conversation already holds
 
 
 def mem_on(cfg, topic):
@@ -8475,9 +9440,41 @@ def mem_exclude(cwd):
             pass
 
 
-def mem_greet(cfg, state, topic, sess, cwd):
-    if cwd and mem_on(cfg, topic) and os.path.exists(os.path.join(cwd, MEM_REL)):
-        state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+def mem_greet(cfg, state, topic, sess, cwd, fresh=False):
+    """Queue MEM_READ — once per conversation and version of the notes.
+
+    Switching back to a bench session that already read them cost a whole turn
+    over its full context to answer "ready": on a 250k session that is ~25k
+    tokens to learn nothing. fresh: a new conversation, which holds nothing.
+    A new commit since then re-sends it too: the reread is where the agent
+    notices the notes lag the code ("memory is stale: it misses b2c0754").
+    """
+    path = os.path.join(cwd or "", MEM_REL)
+    if not (cwd and mem_on(cfg, topic) and os.path.exists(path)):
+        return
+    if fresh:
+        _mem_seen.pop(sess, None)
+    seen = mem_seen_key(path, cwd)
+    if _mem_seen.get(sess) == seen:
+        return
+    _mem_seen[sess] = seen
+    state.setdefault(sess, {}).setdefault("queue", []).append(MEM_READ)
+
+
+def mem_seen_key(path, cwd):
+    return os.path.getmtime(path), tmux_git(cwd, "rev-parse", "-q", "--verify", "HEAD")
+
+
+def mem_print(cwd):
+    """What the repo holds right now — HEAD, the diff, untracked names — or None.
+
+    .nightmux/ is git-excluded, so the notes' own rewrite does not move it.
+    """
+    if not cwd or tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    return hashlib.sha1("\0".join(tmux_git(cwd, *a) for a in (
+        ("rev-parse", "HEAD"), ("diff", "HEAD"),
+        ("ls-files", "--others", "--exclude-standard"))).encode()).hexdigest()
 
 
 def mem_capture(cfg, topic, sess):
@@ -8492,6 +9489,9 @@ def mem_reply_capture(cfg, topic, sess, body):
     if not m or m.get("wait") != sess:
         return False
     m.pop("wait")
+    path = os.path.join((cfg.get("dirs") or {}).get(topic) or "", MEM_REL)
+    if os.path.exists(path):        # it wrote them: no need to read them back
+        _mem_seen[sess] = mem_seen_key(path, os.path.dirname(os.path.dirname(path)))
     send(cfg, topic, "🧠 project memory updated", mode="plain", quiet=True)
     return True
 
@@ -8501,7 +9501,7 @@ def mem_ask(cfg, state, topic, sess):
     if cwd:
         os.makedirs(os.path.join(cwd, ".nightmux"), exist_ok=True)
         mem_exclude(cwd)
-    _mem[topic] = {"turns": 0, "wait": sess}
+    _mem[topic] = {"turns": 0, "wait": sess, "fp": mem_print(cwd)}
     state.setdefault(sess, {}).setdefault("queue", []).append(MEM_UPDATE)
 
 
@@ -8514,6 +9514,10 @@ def mem_tick(cfg, state):
                 or st.get("mode") != "idle" or st.get("queue")
                 or now - st.get("changed", now) < MEM_QUIET
                 or topic in _goal_run or (_pair.get(topic) or {}).get("wait")):
+            continue
+        fp = m.get("fp") and mem_print((cfg.get("dirs") or {}).get(topic))
+        if fp and fp == m["fp"]:
+            m["turns"] = 0      # talk, no change to the project: the notes still hold
             continue
         mem_ask(cfg, state, topic, sess)
 
@@ -8695,6 +9699,7 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         else:
             msg += "sends when idle again · !raw overrides"
         return msg
+    snapshot_repo(sess)     # typed from a phone is still unattended for what follows
     text = spill(sess, text)
     snapshot_repo(sess)
     if not inject(sess, text):
@@ -8791,6 +9796,10 @@ def topics_status(cfg, state):
             "queued": len(st.get("queue") or []),
             "held_until": held if held > now else None,
             "bench": {k: s for k, s in bench_of(cfg, topic).items() if s != sess},
+            "dir": (cfg.get("dirs") or {}).get(topic),
+            "budget": budget_line(cfg, topic),
+            "name": (cfg.get("topic_names") or {}).get(topic),
+            "ctx": st.get("ctx_tok"), "calls": st.get("calls") or 0,
         })
     return out
 
@@ -9535,7 +10544,7 @@ def _chat_bucket(stats, agent):
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
         "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
-        "projects": {}, "at": {}})
+        "projects": {}, "at": {}, "days": {}})
 
 
 def _chat_when(b, ts, cwd):
@@ -9566,8 +10575,11 @@ def _chat_prompt(b, text, ts=None, cwd=None):
         b["nudge_text"][t] = b["nudge_text"].get(t, 0) + 1
 
 
-def _chat_call(b, model, inp, cread, cwrite, out, think=0):
+def _chat_call(b, model, inp, cread, cwrite, out, think=0, day=None):
     ctx = inp + cread + cwrite
+    if day:      # [context carried, calls] per UTC day: is the average falling?
+        d = b["days"].setdefault(day, [0, 0])
+        d[0], d[1] = d[0] + ctx, d[1] + 1
     b["requests"] += 1
     b["input"] += inp
     b["cache_read"] += cread
@@ -9616,7 +10628,8 @@ def _scan_claude(stats, home, since):
                                    u.get("cache_read_input_tokens") or 0,
                                    u.get("cache_creation_input_tokens") or 0,
                                    u.get("output_tokens") or 0,
-                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)
+                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
+                                   d.get("timestamp", "")[:10])
                     if not counted:
                         counted, b["sessions"] = True, b["sessions"] + 1
 
@@ -9787,7 +10800,8 @@ def _scan_agy_transcript(b, home, cid):
                                 cr = cr or u.get("cache_read_tokens") or u.get("cache_read") or 0
                                 o = o or u.get("output_tokens") or u.get("output") or 0
                                 th = th or u.get("thinking_tokens") or u.get("thinking") or 0
-                            _chat_call(b, "agy", i or 0, cr or 0, 0, o or 0, th or 0)
+                            _chat_call(b, "agy", i or 0, cr or 0, 0, o or 0, th or 0,
+                                       (js.get("created_at") or "")[:10])
                     except Exception:
                         pass
                 elif "USER_INPUT" in line:
@@ -10011,12 +11025,113 @@ def analyze_chats(days=30, home=None):
             "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
             "errors": s["errors"],
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+            "daily": dict(sorted(s["days"].items())),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
            "agents": agents_, "tips": [{"agent": a, "tip": t} for a, t in tips],
            "when": chat_when(stats)}
     if home is None:
         _analysis[days] = out
+    return out
+
+
+def fleet(cfg, path, local, timeout=60):
+    """[(server, answer)]: this machine's, then every peer that answered the same
+    route — asked side by side, since each reads its own transcripts."""
+    names = sorted(cfg.get("peers") or {})
+    if not names:
+        return [(host_name(cfg), local)]
+    with concurrent.futures.ThreadPoolExecutor(len(names)) as ex:
+        got = list(zip(names, ex.map(lambda n: peer_call(cfg, n, path, timeout=timeout), names)))
+    return [(host_name(cfg), local)] + [(n, r) for n, r in got if isinstance(r, dict)]
+
+
+def fleet_analysis(cfg, days):
+    """analyze_chats over every server: Wrapped, coach and !stats count all your
+    agents, not only the ones on the machine you asked. Cached like the local one."""
+    if not cfg.get("peers"):
+        return analyze_chats(days)
+    hit = _analysis.get(("fleet", days))
+    if hit and time.time() - hit["at"] < 600:
+        return hit
+    out = merge_analysis(fleet(cfg, f"api/analysis?days={days}", analyze_chats(days)))
+    _analysis[("fleet", days)] = out
+    return out
+
+
+def merge_analysis(parts):
+    """Sum analyze_chats answers; ratios are recomputed from the sums, averages
+    weighted by prompts."""
+    if len(parts) == 1:
+        return parts[0][1]
+    out = {"days": parts[0][1].get("days"), "at": time.time(), "agents": {}, "tips": [],
+           "took": max(r.get("took") or 0 for _, r in parts), "servers": [n for n, _ in parts]}
+    proj, at, acc = {}, {}, {}
+    for _, r in parts:
+        out["tips"] += r.get("tips") or []
+        w = r.get("when") or {}
+        for k, v in w.get("projects") or []:
+            proj[k] = proj.get(k, 0) + v
+        for k, v in (w.get("at") or {}).items():
+            at[str(k)] = at.get(str(k), 0) + v
+        for a, s in (r.get("agents") or {}).items():
+            m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
+                                   "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
+                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}})
+            n = s.get("prompts") or 0
+            for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
+                m[k] += s.get(k) or 0
+            m["max_ctx"] = max(m["max_ctx"], s.get("max_ctx") or 0)
+            for key, src in (("tokens", s.get("tokens")), ("models", s.get("models")),
+                             ("nudges", dict(s.get("nudges") or []))):
+                for k, v in (src or {}).items():
+                    m[key][k] = m[key].get(k, 0) + (v or 0)
+            for k, (c, q) in (s.get("daily") or {}).items():
+                d = m["daily"].setdefault(k, [0, 0])
+                d[0], d[1] = d[0] + c, d[1] + q
+            m["chars"] += (s.get("avg_prompt") or 0) * n
+            m["nud"] += (s.get("nudge_pct") or 0) * n
+    for a, m in acc.items():
+        t, n = m["tokens"], m["prompts"]
+        ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
+        out["agents"][a] = dict(
+            {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
+            daily=dict(sorted(m["daily"].items())),
+            cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
+            avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
+            avg_prompt=round(m["chars"] / n) if n else None,
+            nudge_pct=round(m["nud"] / n, 3) if n else None,
+            nudges=sorted(m["nudges"].items(), key=lambda kv: -kv[1])[:5],
+            models=dict(sorted(m["models"].items(), key=lambda kv: -kv[1])[:5]))
+    out["when"] = {"projects": sorted(proj.items(), key=lambda kv: -kv[1]), "at": at}
+    return out
+
+
+def fleet_sav(cfg):
+    """The savings ledger summed over every server: counters and per-day ledgers
+    add up, `since` is the earliest. Lists (spends, races) stay this machine's."""
+    out = dict(sav_data())
+    for _, d in fleet(cfg, "api/savings", None, timeout=5)[1:]:
+        for k, v in d.items():
+            if k == "since" and isinstance(v, (int, float)):
+                out[k] = min(out.get(k, v), v)
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = out.get(k, 0) + v
+            elif k.endswith("_day") and isinstance(v, dict):
+                by = dict(out.get(k) or {})
+                for day, n in v.items():
+                    by[day] = by.get(day, 0) + n
+                out[k] = by
+    return out
+
+
+def fleet_lessons(cfg):
+    """prompt_lessons over every server: the coach's success rate counts them all."""
+    out = dict(prompt_lessons())
+    for _, r in fleet(cfg, "api/lessons", None)[1:]:
+        out["n"] = out.get("n", 0) + (r.get("n") or 0)
+        out["ok"] = out.get("ok", 0) + (r.get("ok") or 0)
+        out["winners"] = (out.get("winners") or []) + (r.get("winners") or [])
     return out
 
 
@@ -10059,7 +11174,8 @@ def stats_report(r):
     """The analysis as a Telegram message."""
     if not r["agents"]:
         return f"no agent transcripts in the last {r['days']} days"
-    out = [f"📊 last {r['days']} days · read in {r['took']}s"]
+    out = [f"📊 last {r['days']} days · read in {r['took']}s"
+           + (f" · {', '.join(r['servers'])}" if r.get("servers") else "")]
     for a, s in sorted(r["agents"].items()):
         t = s["tokens"]
         line = f"\n{a}: {s['sessions']} sessions · {s['prompts']} prompts · {s['requests']} calls"
@@ -10683,12 +11799,37 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
 #setup .ok { color: var(--ok); font-size: 13px; margin: 14px 0 0; height: auto; }
 #setup li { margin-bottom: 6px; } #setup li span { color: var(--mut); font-size: 12px; display: block; } .sname { font-size: 12px; color: var(--mut); margin-bottom: 6px; }
 .sname:empty { display: none; }
+/* live floor: one pixel desk per agent, animated by what it is doing */
+.floor { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(150px, 30%), 1fr)); }
+h2.fold { cursor: pointer; user-select: none; }
+h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: "\25B8"; }
+.desk { display: block; text-decoration: none; color: inherit; background: linear-gradient(180deg, var(--card2), var(--card));
+        border: 1px solid var(--line); border-radius: 14px; padding: 8px 8px 9px; min-width: 0; position: relative;
+        transition: border-color .3s, transform .15s; -webkit-tap-highlight-color: transparent; }
+.desk:active { transform: scale(.97); }
+.desk canvas { width: 100%; aspect-ratio: 48 / 36; image-rendering: pixelated; image-rendering: crisp-edges;
+               border-radius: 9px; display: block; background: #141a2b; }
+.desk.waiting { border-color: var(--ask); box-shadow: 0 0 0 3px #f0883e2e; }
+.desk.busy { border-color: #e3b34155; }
+.desk .nm { font-weight: 650; font-size: 13px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk .st { font-size: 11px; color: var(--mut); }
+.desk .st b { font-weight: 600; display: block; } .desk .srvtag { color: var(--dim); display: block; min-height: 15px; }
+.cells { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin-top: 6px; height: 6px; }
+.cells i { background: #1d2333; } .cells i.g { background: var(--ok); } .cells i.y { background: var(--busy); }
+.cells i.r { background: var(--bad); }
+.pixchart { width: 100%; height: 120px; image-rendering: pixelated; display: block; }
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
 <nav class="top"><a href="/office">🏢 office</a><a href="/app">📱 app</a></nav>
 <div id="pulse"></div></div></header>
 <main>
+<div id="setup"></div><div id="toast"></div>
+<h2>live agents</h2>
+<div class="floor" id="floor"><p class="empty">loading…</p></div>
+<h2>context per model call <span class="sub" id="ctxnote"></span></h2>
+<div class="card"><canvas class="pixchart" id="ctxchart" width="140" height="40"></canvas>
+<div class="meta" id="ctxlegend">lower is cheaper: every call re-reads the whole context</div></div>
 <div id="setup"></div>
 <h2>connect <span class="sub">optional phone and chat integrations</span></h2>
 <div class="grid" id="connect">
@@ -10729,6 +11870,7 @@ code { background: #0a0d14; padding: 1px 5px; border-radius: 4px; font-size: 12p
     <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
     <label id="srvl">server<select name="server"></select></label>
   </div>
+  <label style="margin-top:8px">start from<select id="tpl"><option value="">blank — write your own idea</option></select></label>
   <label style="margin-top:8px">idea (optional) — the agent writes a spec, builds it and loops on ./check.sh until green
     <textarea name="idea" placeholder="a habit tracker with streaks and a weekly chart"></textarea></label>
   <div class="row" style="margin-top:8px"><button type="submit" class="primary">create topic</button>
@@ -10753,11 +11895,10 @@ sudo tailscale up</pre></li>
 </div>
 <div class="grid" id="srvlist"></div>
 <div id="server" style="margin-top:12px"></div>
-<div id="toast"></div>
 <h2>chat analysis
   <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
   <button id="run">analyze</button></h2>
-<div id="analysis"><p class="empty">reads every agent's transcripts on this machine — press analyze</p></div>
+<div id="analysis"><p class="empty">reads every agent's transcripts on every server — press analyze</p></div>
 </main>
 <script>
 // Cards are built once and updated in place: the old page re-rendered every
@@ -11012,6 +12153,18 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
 if (location.hash === '#servers') { $('addsrv').click(); $('addsrv').scrollIntoView(); }
+// Starter ideas for a first project: each is concrete enough that the spec and
+// ./check.sh write themselves, and small enough to go green in one night.
+const TPL = [
+  ['habit tracker', 'a habit tracker web app: add habits, tick them off daily, streaks, a weekly chart, data in localStorage; check.sh runs the unit tests and a headless page load'],
+  ['landing page', 'a one-page product landing site: hero, features, pricing, FAQ, email signup form, responsive and dark-mode aware; check.sh validates the HTML and checks every link and image resolves'],
+  ['telegram bot', 'a Python Telegram bot (stdlib only) that saves notes and lists them with /notes; check.sh runs its tests against a fake Bot API'],
+  ['browser game', 'a small canvas browser game (snake or breakout) with score, levels and a high-score table in localStorage; check.sh runs the game logic tests headless'],
+  ['REST API', 'a JSON REST API for a todo list with SQLite, create/list/update/delete, input validation and an OpenAPI file; check.sh starts it and runs curl tests against every route'],
+];
+TPL.forEach(([t], i) => $('tpl').add(new Option(t, i)));
+$('tpl').onchange = e => { const t = TPL[e.target.value]; if (!t) return;
+  const f = $('newf'); if (!f.title.value) f.title.value = t[0]; f.idea.value = t[1]; };
 $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
@@ -11040,11 +12193,107 @@ async function send(ev, topic, card) {
   tick();
 }
 
+
+// ---- live floor ----------------------------------------------------------
+// Each agent sits at a pixel desk drawn on a 48x36 canvas and scaled up crisp:
+// typing when busy, a bouncing "!" when it needs you, asleep when idle, dark
+// when stopped. Paper on the desk is its queue; the cells under it its context.
+const AGC = {claude: '#d97757', codex: '#7aa2f7', opencode: '#9ece6a', agy: '#bb9af7', gemini: '#7dcfff'};
+const MODES = {busy: ['working', 'var(--busy)', 1], waiting: ['needs you', 'var(--ask)', 0],
+               limit: ['at limit', 'var(--blue)', 2], idle: ['idle', 'var(--ok)', 3]};
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let desks = [], frame = 0;
+function px(g, x, y, w, h, c) { g.fillStyle = c; g.fillRect(x, y, w, h); }
+function drawDesk(g, r, f) {
+  const m = r.mode, on = r.alive !== false && !['offline', 'gone', 'shell', '?'].includes(m) || m === 'busy';
+  const col = AGC[r.agent] || '#7dcfff', sleep = m === 'idle' || !on;
+  px(g, 0, 0, 48, 25, '#141a2b'); px(g, 0, 25, 48, 11, '#0f1320'); px(g, 0, 25, 48, 1, '#1d2440');
+  px(g, 3, 3, 13, 10, '#0b1022'); px(g, 3, 8, 13, 1, '#1d2440'); px(g, 9, 3, 1, 10, '#1d2440');
+  px(g, 12, 4, 2, 2, '#e0af68'); if ((f >> 3) % 2) px(g, 5, 5, 1, 1, '#dbe1ee'); else px(g, 7, 10, 1, 1, '#dbe1ee');
+  px(g, 9, 23, 33, 2, '#7a5a40'); px(g, 11, 25, 2, 9, '#4a3628'); px(g, 38, 25, 2, 9, '#4a3628');
+  px(g, 24, 12, 15, 10, '#2b3452'); px(g, 25, 13, 13, 8, on ? '#0a0f1c' : '#05070c'); px(g, 30, 22, 3, 1, '#2b3452');
+  if (m === 'busy') for (let i = 0; i < 4; i++) px(g, 26, 14 + i * 2, 2 + (f + i * 5) % 9, 1, i % 2 ? col : '#9aa5ce');
+  if (m === 'idle' && (f >> 2) % 2) px(g, 26, 14, 2, 1, '#3fb950');
+  if (m === 'limit') { px(g, 29, 14, 5, 1, '#7aa2f7'); px(g, 30, 15, 3, 1, '#7aa2f7'); px(g, 31, 16, 1, 2, '#7aa2f7');
+    px(g, 30, 18, 3, 1, '#7aa2f7'); px(g, 29, 19, 5, 1, '#7aa2f7'); }
+  const bob = m === 'busy' ? f % 2 : 0, hx = 13, hy = sleep ? 13 : 10 - bob;
+  px(g, hx - 3, hy + 9, 3, 13, '#2b3452');
+  px(g, hx - 1, hy + 6, 9, 9, on ? col : '#3a4158');
+  px(g, hx, hy, 7, 6, on ? '#f1c27d' : '#6d6457'); px(g, hx, hy, 7, 2, '#2b2b38'); px(g, hx, hy + 2, 1, 1, '#2b2b38');
+  if (sleep) px(g, hx + 4, hy + 3, 2, 1, '#3a2a20'); else px(g, hx + 5, hy + 3, 1, 1, '#111');
+  if (m === 'busy') { px(g, hx + 8, 21 + f % 2, 3, 1, '#f1c27d'); px(g, hx + 11, 22 - f % 2, 3, 1, '#f1c27d'); }
+  if (m === 'waiting') { const y = (f >> 1) % 2; px(g, hx + 8, y, 7, 8, '#f0883e'); px(g, hx + 9, y + 8, 2, 1, '#f0883e');
+    px(g, hx + 11, y + 1, 2, 4, '#fff'); px(g, hx + 11, y + 6, 2, 1, '#fff'); }
+  if (sleep && on) { const t = (f >> 1) % 8, zx = hx + 8 + (t >> 1), zy = 9 - t;
+    px(g, zx, zy, 3, 1, '#8b93a7'); px(g, zx + 1, zy + 1, 1, 1, '#8b93a7'); px(g, zx, zy + 2, 3, 1, '#8b93a7'); }
+  for (let i = 0; i < Math.min(r.queued || 0, 5); i++) px(g, 40, 21 - i * 2, 6, 1, i % 2 ? '#c8b98a' : '#e0d6b0');
+}
+function cells(ctx) {
+  // 10 cells over 200k: green to 60k, amber to 120k (routine autocompact), red past it
+  let out = '';
+  for (let i = 0; i < 10; i++) { const at = (i + 1) * 20000;
+    out += '<i class="' + (ctx && ctx >= at - 19999 ? (at <= 60000 ? 'g' : at <= 120000 ? 'y' : 'r') : '') + '"></i>'; }
+  return out;
+}
+function floor(rows) {
+  const box = $('floor'), order = r => (MODES[r.mode] || [0, 0, 4])[2];
+  rows = rows.slice().sort((a, b) => order(a) - order(b) || String(a.name || a.session).localeCompare(b.name || b.session));
+  if (!rows.length) { box.innerHTML = '<p class="empty">no agents yet — + new project below</p>'; desks = []; return; }
+  const key = rows.map(r => r.server + '/' + r.topic).join();
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.innerHTML = rows.map(() => '<a class="desk"><canvas width="48" height="36"></canvas><div class="nm"></div>' +
+      '<div class="st"><b></b><span class="srvtag"></span></div><div class="cells"></div></a>').join('');
+  }
+  desks = rows.map((r, i) => {
+    const el = box.children[i], md = MODES[r.mode] || [r.mode || '?', 'var(--dim)'];
+    el.className = 'desk ' + esc(r.mode); el.href = '/chat?t=' + encodeURIComponent(r.topic);
+    el.title = (r.agent || '') + (r.usage ? ' · ' + r.usage : '');
+    el.querySelector('.nm').textContent = r.name || r.session;
+    const st = el.querySelector('.st b'); st.textContent = md[0] + (r.queued ? ' · ' + r.queued + ' queued' : '');
+    st.style.color = md[1];
+    el.querySelector('.srvtag').textContent = (r.ctx ? k(r.ctx) + ' ctx' : '') + (r.server ? ' · ' + r.server : '');
+    el.querySelector('.cells').innerHTML = cells(r.ctx);
+    return {g: el.querySelector('canvas').getContext('2d'), r};
+  });
+  desks.forEach(d => drawDesk(d.g, d.r, frame));
+}
+function animate() {
+  if (!document.hidden) { frame++; desks.forEach(d => drawDesk(d.g, d.r, frame)); }
+  setTimeout(() => requestAnimationFrame(animate), 160);
+}
+if (!still) animate();
+
+async function ctxChart() {
+  // Average context per model call per day, every agent on every server: the
+  // number autocompact and fresh threads exist to push down.
+  try {
+    const r = await (await fetch('/api/analysis?days=14')).json(), by = {};
+    Object.values(r.agents || {}).forEach(a => Object.entries(a.daily || {}).forEach(([d, v]) => {
+      by[d] = by[d] || [0, 0]; by[d][0] += v[0]; by[d][1] += v[1]; }));
+    const days = Object.keys(by).sort().slice(-14), avg = days.map(d => by[d][1] ? by[d][0] / by[d][1] : 0);
+    const c = $('ctxchart'), g = c.getContext('2d'), W = c.width, H = c.height, top = Math.max(...avg, 1);
+    g.clearRect(0, 0, W, H);
+    for (let y = 8; y < H; y += 8) px(g, 0, y, W, 1, '#1a2033');
+    const bw = Math.floor(W / 14);
+    avg.forEach((v, i) => { const h = Math.max(1, Math.round(v / top * (H - 4))), x = i * bw + 1;
+      const col = v <= 60000 ? '#3fb950' : v <= 120000 ? '#e3b341' : '#f85149';
+      px(g, x, H - h, bw - 2, h, col); px(g, x, H - h, bw - 2, 1, '#ffffff66');
+      if (i === avg.length - 1) px(g, x, H - h - 3, bw - 2, 1, '#dbe1ee'); });
+    if (avg.length) {
+      const first = avg[0], last = avg[avg.length - 1], d = first ? Math.round((last - first) / first * 100) : 0;
+      $('ctxnote').textContent = k(Math.round(last)) + ' today' + (avg.length > 1 ? ' · ' + (d <= 0 ? '▼ ' : '▲ ') +
+        Math.abs(d) + '% vs ' + days[0].slice(5) : '');
+    } else $('ctxnote').textContent = 'no calls yet';
+  } catch (e) { $('ctxnote').textContent = 'not measured yet'; }
+}
+ctxChart(); setInterval(ctxChart, 600000);
+
 async function tick() {
   if (document.hidden) return;
   try {
     const [t, m] = await Promise.all([fetch('/api/topics').then(r => r.json()), fetch('/api/metrics').then(r => r.json())]);
-    topics(t); servers(m);
+    topics(t); floor(t); servers(m);
   } catch (e) { /* daemon restarting: keep what is on screen */ }
 }
 
@@ -11079,6 +12328,27 @@ $('run').onclick = analyze;
 document.addEventListener('visibilitychange', tick);
 tick();
 setInterval(tick, 4000);
+// Tap a section heading to fold it; the choice is kept per browser. On a phone
+// everything below the live floor starts folded, so the page opens short.
+(function () {
+  let shut = null;
+  try { shut = JSON.parse(localStorage.getItem('nm-fold') || 'null'); } catch (e) {}
+  if (!shut) shut = matchMedia('(max-width: 700px)').matches
+    ? {'topics': 1, 'limits per agent': 1, 'servers': 1, 'chat analysis': 1} : {};
+  document.querySelectorAll('main > h2').forEach(h => {
+    const key = h.firstChild.textContent.trim(), box = document.createElement('div');
+    for (let n = h.nextElementSibling; n && n.tagName !== 'H2'; n = h.nextElementSibling) box.appendChild(n);
+    h.after(box); h.classList.add('fold');
+    const set = s => { box.hidden = s; h.classList.toggle('shut', s); };
+    set(!!shut[key]);
+    h.addEventListener('click', e => {
+      if (e.target.closest('button, select, input')) return;
+      set(!box.hidden);
+      if (box.hidden) shut[key] = 1; else delete shut[key];
+      try { localStorage.setItem('nm-fold', JSON.stringify(shut)); } catch (e) {}
+    });
+  });
+})();
 </script>
 </body></html>"""
 
@@ -12405,15 +13675,6 @@ def qr_svg(text):
             f"<path d='{d}' fill='#000'/></svg>")
 
 
-def qr_text(text):
-    """The QR as terminal half-blocks, two modules per character row."""
-    m = qr_matrix(text)
-    m = [[False] * (len(m) + 4)] * 2 + [[False] * 2 + r + [False] * 2 for r in m] \
-        + [[False] * (len(m) + 4)] * 3
-    return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
-                     for top, bot in zip(m[::2], m[1::2]))
-
-
 def get_local_ip():
     """Detect LAN / local IP address without external network requests."""
     try:
@@ -12427,7 +13688,12 @@ def get_local_ip():
 
 
 def phone_url(cfg, status=None):
-    """The https tailnet URL `tailscale serve` maps onto the dashboard, or None."""
+    """The https tailnet URL `tailscale serve` maps onto the dashboard, or None.
+
+    A dashboard opened on the laptop is at 127.0.0.1, and a QR of that sends
+    the phone to itself. This is the address the phone can actually reach.
+    Never sets serve up: putting the dashboard on the tailnet is the owner's call.
+    """
     port = str(cfg.get("webhook_port") or 9090)
     try:
         web = json.loads(status if status is not None else
@@ -12440,6 +13706,16 @@ def phone_url(cfg, status=None):
             host, _, p = hostport.rpartition(":")
             return f"https://{host}" + ("" if p == "443" else f":{p}")
     return None
+
+
+def qr_text(text):
+    """The QR as terminal half-blocks, two modules per character row."""
+    m = qr_matrix(text)
+    m = [[False] * (len(m) + 4)] * 2 + [[False] * 2 + r + [False] * 2 for r in m] \
+        + [[False] * (len(m) + 4)] * 3
+    # Dark modules print as spaces on a light block, so it scans on dark terminals.
+    return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
+                     for top, bot in zip(m[::2], m[1::2]))
 
 
 def pairing_url(cfg, code):
@@ -12944,9 +14220,16 @@ p{color:var(--mut)}code{color:var(--fg)}
 <a class="b s" href="__APK__">Download the app (.apk)</a>
 <p>Installed it already? <b>Open in app</b> connects it to <code id="here"></code>. No typing.</p>
 </div>
-<p>The app reaches this server the same way this page did, over your tailnet or LAN.</p>
+<p id="how">The app reaches this server the same way this page did, over your tailnet or LAN.</p>
 </main><script>
-const here = location.origin;
+// Opened on the laptop itself, location.origin is 127.0.0.1 — the phone's own
+// loopback. The server says which tailnet address reaches it instead.
+const PHONE = __PHONE__, local = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+const here = local && PHONE ? PHONE : location.origin;
+if (local && !PHONE) document.getElementById('desk').innerHTML =
+  '<p>Your phone cannot reach <code>127.0.0.1</code>. With Tailscale on both devices, run ' +
+  '<code>tailscale serve --bg ' + location.port + '</code> on this machine, then reload. ' +
+  'That opens the dashboard to your tailnet only, never the internet.</p>';
 document.getElementById('here').textContent = here;
 document.getElementById('qr').src = '/qr.svg?d=' + encodeURIComponent(here + '/app');
 document.getElementById('open').href = 'intent://connect?url=' + encodeURIComponent(here) +
@@ -13126,8 +14409,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             d = (q.get("days") or ["30"])[0]
             days = min(365, int(d)) if d.isdigit() and int(d) > 0 else 30
-            # No lock: reads transcript files, not daemon state.
-            return self.reply(json.dumps(analyze_chats(days)), "application/json")
+            # No lock: reads transcript files, not daemon state. A peer answers for
+            # itself; the dashboard gets every server's.
+            got = analyze_chats(days) if self.peer else fleet_analysis(self.server.cfg, days)
+            return self.reply(json.dumps(got), "application/json")
+        if self.path == "/api/savings":
+            return self.reply(json.dumps(sav_data()), "application/json")
+        if self.path == "/api/lessons":
+            return self.reply(json.dumps(prompt_lessons()), "application/json")
         if self.path.startswith("/chat"):
             return self.reply(inject_telemetry(self.server.cfg, CHAT_HTML), "text/html; charset=utf-8")
         if self.path == "/manifest.json":
@@ -13139,7 +14428,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/icon.svg":
             return self.reply(ICON_SVG, "image/svg+xml")
         if self.path == "/app":
-            return self.reply(inject_telemetry(self.server.cfg, APP_HTML), "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, APP_HTML.replace(
+                "__PHONE__", json.dumps(phone_url(self.server.cfg) or ""))),
+                "text/html; charset=utf-8")
         if self.path.startswith("/qr.svg?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -13214,6 +14505,12 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 "application/json")
         if self.path == "/api/office/replay":
             return self.reply(json.dumps({"frames": replay_frames()}), "application/json")
+        if self.path.startswith("/api/progress"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            since = (q.get("since") or [""])[0]
+            since = int(since) if since.isdigit() else int(time.time()) - 6 * 3600
+            return self.reply(json.dumps({"text": progress_report(
+                self.server.cfg, self.server.state, since)}), "application/json")
         if self.path in ("/api/topics", "/api/office"):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
@@ -13416,6 +14713,13 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             else:
                 out = {"ok": False, "msg": "unknown action"}
             return self.reply(json.dumps(out), "application/json")
+        if self.path.startswith("/api/suggest/") and not self.peer:
+            if self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            msg = suggest_post(cfg, self.path[len("/api/suggest/"):].strip("/"), body)
+            return self.reply(json.dumps({"msg": msg}), "application/json")
         if self.path.startswith("/api/topic"):
             return self.manage(cfg, body)
         parts = self.path.strip('/').split('/')
@@ -14348,6 +15652,9 @@ def stubbed(**globs):
 
 
 def selfcheck():
+    # Pairing tests mint tokens: never into the live state dir the service reads.
+    global PAIRED_TOKENS_FILE
+    PAIRED_TOKENS_FILE = os.path.join(__import__("tempfile").mkdtemp(), "paired_tokens.json")
     cmd_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "COMMANDS.md")
     if os.path.exists(cmd_md):              # a git checkout, not a pip install
         with open(cmd_md) as f:
@@ -14501,6 +15808,15 @@ def selfcheck():
                        capture_output=True)
         _shell.clear()
 
+    # Native mid-turn cap: claude sessions get the token autocompact as their window.
+    made = []
+    with stubbed(tmux=lambda *a: made.append(a)):
+        spawn("s", "/", "claude", {"autocompact": "150k"})
+        spawn("s", "/", "claude", {"autocompact": 70})
+        spawn("s", "/", "claude", {"autocompact": "50k"})
+    assert made[0][-2:] == ("-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000"), made[0]
+    assert "-e" not in made[3]                                  # a percentage: no cap
+    assert made[6][-1] == "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % NATIVE_MIN
     spawned = []
     with stubbed(has_session=lambda s: False, sess_cwd=lambda s: FILE_DIR,
                  spawn=lambda *a: spawned.append(a)):
@@ -14580,6 +15896,25 @@ def selfcheck():
     with open(tp, "w") as f:                       # /clear: file shrank, rebaseline
         f.write(rec + "\n")
     assert tail_transcript(tst, tp) == []
+    # /compact: a boundary record and no usage. The figure must drop with it,
+    # or autocompact reads the stale size and compacts the summary again.
+    booked, ct = [], {}
+    tail_transcript(ct, tp)                        # its own baseline
+    with open(tp, "a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"content": [], "usage": {
+            "input_tokens": 5, "cache_read_input_tokens": 200580}}}) + "\n")
+        f.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                            "compactMetadata": {"preTokens": 204183, "postTokens": 14219}}) + "\n")
+    with stubbed(sav_add=lambda *a: booked.append(a)):
+        tail_transcript(ct, tp)
+    assert ct["ctx_tok"] == 14219 and ("drops",) in booked, (ct.get("ctx_tok"), booked)
+    actx, asent = {"autocompact": "200k"}, []
+    with stubbed(send=lambda *a, **k: asent.append(a), inject=lambda *a: asent.append(a)):
+        autocompact(actx, {"s": dict(ct, mode="idle", compacted=True)}, "1", "s")
+    assert asent == [], asent                      # under the line: re-armed, not retried
+    with open(tp, "w") as f:                       # leave the file as the next check expects
+        f.write(rec + "\n")
+    tail_transcript(tst, tp)
     assert "spend" not in tst                      # no usage records, nothing to weigh
     with open(tp, "a") as f:                       # what a turn actually cost
         f.write(json.dumps({"type": "assistant", "message": {
@@ -14821,6 +16156,36 @@ def selfcheck():
         sel[0] = ""                               # every row alike: unreadable
         assert pick("s", "3").startswith("can't tell") and keyed == []
     assert pane_state([l for l in oc if "┃" not in l]) == "unknown"  # prose alone
+    # opencode 2.x: the permission dialog is one row of buttons, the highlight a
+    # background colour (captured from opencode v2.0.24, cut off at the pane edge).
+    E = "\x1b[%sm".__mod__
+    ocbar = lambda on: [
+        "  ┃  △ Permission required", "  ┃    ← Access external directory ~/x", "  ┃",
+        "  " + E("38;5;216") + E("48;5;233") + "┃" + E("38;5;15") + E("48;5;234") + "  "
+        + "".join((E("48;5;216") if i == on else E("48;5;234")) + " " + E("38;5;232") + lab
+                  + E("38;5;15") + " " + E("48;5;234") + " " for i, lab in
+                  enumerate(["Allow once", "Always allow", "Reject"]))
+        + " " + E("38;5;255") + "ctrl+f " + E("38;5;8") + "fullscreen  " + E("38;5;255")
+        + "⇆ " + E("38;5;8") + "select" + E("38;5;15") + "  enter con"]
+    assert bar_opts(ocbar(0)) == (["Allow once", "Always allow", "Reject"], 0)
+    assert bar_opts(ocbar(2))[1] == 2
+    flat = [plain(l) for l in ocbar(0)]
+    assert bar_opts(flat) == (["Allow once", "Always allow", "Reject"], None)
+    assert pane_state(flat) == "waiting"
+    assert menu_digit(flat, YES_NO["!y"]) == "1" and menu_digit(flat, YES_NO["!n"]) == "3"
+    assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
+        == ["!1 o", "!2 o", "!3 o", "!esc o"]
+    bsel, bkeyed = [0], []
+
+    def bar_tmux(*a):
+        if a[0] != "send-keys":
+            return "\n".join(ocbar(bsel[0]))
+        bkeyed.append(a[3:])
+        bsel[0] += sum({"Right": 1, "Left": -1}.get(k, 0) for k in a[3:])
+        return ""
+    with stubbed(tmux=bar_tmux):
+        assert pick("o", "3") == "" and bkeyed == [("Right", "Right"), ("Enter",)], bkeyed
+        assert bsel[0] == 2
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                  "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
     assert pane_state(agy_trust) == "waiting"
@@ -15168,7 +16533,7 @@ def selfcheck():
     st.update(mode="idle", queue=[], snap={"ts": time.time(), "ctx_pct": 22})
     for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
         st.pop(k, None)
-    st["ctx_tok"] = 90000
+    st["ctx_tok"], st["heavy_at"] = 90000, time.time()   # a heavy task: the configured cap
     autocompact(tokc, state, "1", "s")
     assert typed == ["/compact"], "fired under the token cap"   # 90k < 150k
     st["ctx_tok"] = 160000                       # over, though only 22% of window
@@ -15178,6 +16543,17 @@ def selfcheck():
     st["ctx_tok"] = 10000                        # compacted: re-arm
     autocompact(tokc, state, "1", "s")
     assert "compacted" not in st and typed == ["/compact"] * 2
+    # Routine work (no heavy task for two hours) compacts sooner: 130k ≥ 120k.
+    st["heavy_at"] = time.time() - HEAVY_HOLD - 1
+    st["ctx_tok"] = 130000
+    autocompact(tokc, state, "1", "s")
+    assert typed == ["/compact"] * 3 and "≥ 120,000" in sent[-1], sent[-1]
+    for k in ("compacted", "compact_at", "compact_tries", "heavy_at"):
+        st.pop(k, None)
+    remember(state, "s", "refactor the whole auth module and migrate every caller")
+    assert time.time() - st["heavy_at"] < 5 and st["calls"] == 0
+    st["last"] = ""
+    st.pop("heavy_at")
     st.pop("ctx_tok"), typed.clear()
     typed[:] = ["/compact"]
     st.pop("snap"), typed.clear()
@@ -15194,6 +16570,14 @@ def selfcheck():
     st["snap"]["ctx_pct"] = 62
     idle_hint(cfg, state, "1", "s")
     assert sent[-1].startswith("💤 s idle 6h 0m at 62% context"), sent[-1]
+    st["changed"], st["ctx_tok"] = time.time(), 90000      # re-arm; a 1M window: 9%
+    idle_hint(cfg, state, "1", "s")
+    st["changed"], st["snap"]["ctx_pct"] = time.time() - IDLE_PARK - 1, 9
+    idle_hint(cfg, state, "1", "s")
+    assert sent[-1].startswith("💤 s idle 6h 0m at 90k tokens"), sent[-1]
+    st.pop("ctx_tok")
+    st["snap"]["ctx_pct"] = 62
+    n += 1                                        # the extra hint above
     idle_hint(cfg, state, "1", "s")
     assert len(sent) == n + 1                     # once per park, not per tick
     st["changed"] = time.time()
@@ -15862,6 +17246,8 @@ def selfcheck():
     assert "terminal" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/term/5").read().decode()
     dash_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/").read().decode()
     assert "keyed(" in dash_ and "/api/metrics" in dash_
+    # the live floor draws from /api/topics on every tick; the chart from the daily series
+    assert "floor(t)" in dash_ and "drawDesk(" in dash_ and "a.daily" in dash_ and "prefers-reduced-motion" in dash_ and "nm-fold" in dash_
     met_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/metrics").read())
     assert {"server", "limits"} <= set(met_), met_
     # !goal: a red check goes back to the agent as its next prompt, the same
@@ -16009,6 +17395,43 @@ def selfcheck():
     assert task_class("rename foo to bar in utils") == "light"
     assert task_class("why does the websocket drop under load?") == "heavy"
     assert task_class("add a dark mode toggle to settings") == "normal"
+    # Drift: opencode 2 left its old tables behind, empty. The reader neither
+    # throws nor finds anything; the freshly written database gives it away.
+    import sqlite3
+    dh = tempfile.mkdtemp(prefix="nightmux-selfcheck-drift-")
+    os.makedirs(os.path.join(dh, ".local/share/opencode"))
+    con_ = sqlite3.connect(os.path.join(dh, DRIFT_STORES["opencode"]))
+    con_.executescript("CREATE TABLE message (id, session_id, data, time_created);"
+                       "CREATE TABLE part (message_id, data);"
+                       "CREATE TABLE session (id, directory);")
+    con_.close()
+    assert [a_ for a_, _ in reader_drift(home=dh)] == ["opencode"], reader_drift(home=dh)
+    old_ = time.time() - 30 * 86400
+    os.utime(os.path.join(dh, DRIFT_STORES["opencode"]), (old_, old_))
+    assert reader_drift(home=dh) == []        # untouched for a month: nothing to say
+    shutil.rmtree(dh, ignore_errors=True)
+    assert task_class("make a snake game") == "heavy"          # creative: not the cheap model
+    assert task_class("build a landing page for my app") == "heavy"
+    assert task_class("fix typo in the history page") == "light"  # "story" is a word, not a substring
+    # !wrapped is private: nothing leaves the machine until share is tapped.
+    class _Now:
+        def __init__(self, target, daemon=True):
+            self.go = target
+
+        def start(self):
+            self.go()
+    ups, outs = [], []
+    with stubbed(browser_bin=lambda c: "chromium", render_html=lambda *a: b"png",
+                 wrapped_page=lambda *a, **k: "",
+                 wrapped_data=lambda c, d: {"cells": [("3", "turns")], "insights": [], "split": []},
+                 send_file=lambda *a, **k: outs.append(k.get("buttons")),
+                 send=lambda *a, **k: outs.append(k.get("buttons")),
+                 upload_media=lambda *a: ups.append(a) or "https://uguu.se/x.png",
+                 threading=type("T", (), {"Thread": _Now})):
+        wrapped_cmd({}, 1, "7")
+        assert ups == [] and "!wrapped share 7" in outs[-1], outs
+        wrapped_cmd({}, 1, "share 7")
+        assert len(ups) == 1 and "Share on X" in outs[-1], outs
     rcfg_ = {"topics": {"4": "r"}, "started": {"4": "claude"}, "route": {"4": "auto"},
              "bench": {"4": {"claude": "r", "codex": "r-codex"}}}
     rst_ = {"r": {"mode": "idle", "changed": time.time() - 3600}}
@@ -16103,18 +17526,18 @@ def selfcheck():
         assert "9" not in _lint_pass and "9" not in _lint_hold
         note, queued = coach_after(ccfg_, cst_, "9", "k", "rename foo to bar in utils")
         assert queued and "haiku" in note and cst_["k"]["queue"] == [
-            "/model claude-3-5-haiku-20241022", "rename foo to bar in utils"], cst_
+            "/model haiku", "rename foo to bar in utils"], cst_
         assert _route_last["9"] == ("light", "claude")
         cst_["k"]["queue"] = []
         assert coach(ccfg_, cst_, threading.Lock(), "9", "k", "that's wrong, keep the old name") is None
         assert ccfg_["route_stats"]["light"]["claude"] == [0, 1] and clog_
         _route_last["9"] = ("light", "claude")
         coach(ccfg_, cst_, threading.Lock(), "9", "k", "no, use snake_case there")
-        assert cst_["k"]["queue"] == ["/model haiku 5.5"], cst_    # two corrections: step up
+        assert cst_["k"]["queue"] == ["/model sonnet"], cst_    # two corrections: step up
         cst_["k"]["queue"], cst_["k"]["ctx_tok"] = [], 300000
         _ladder.pop("9", None)
         assert ladder_set(ccfg_, cst_, "9", "k", 0, "t") is None      # big thread: stay put
-        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model haiku 5.5"]
+        assert ladder_set(ccfg_, cst_, "9", "k", 0, "t", up=True) and cst_["k"]["queue"] == ["/model sonnet"]
         cst_["k"]["queue"] = []
         ladder_up(ccfg_, cst_, "9", "k", "x")                 # already escalated this task
         assert cst_["k"]["queue"] == [], cst_
@@ -16287,6 +17710,19 @@ def selfcheck():
     assert "Open in app" in urllib.request.urlopen(f"http://127.0.0.1:{port_}/app").read().decode()
     qsvg_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/qr.svg?d=https%3A%2F%2Fbox.ts.net%2Fapp").read()
     assert qsvg_.startswith(b"<svg") and b"M4,4h1" in qsvg_
+    # The terminal QR is the same matrix, module for module, inside a light border.
+    qt_ = [[{" ": (1, 1), "▄": (1, 0), "▀": (0, 1), "█": (0, 0)}[c] for c in l]
+           for l in qr_text("https://box.ts.net/app").split("\n")]
+    back_ = [[bool(c[k]) for c in row] for row in qt_ for k in (0, 1)]
+    assert [r[2:-2] for r in back_[2:2 + len(qr_matrix("https://box.ts.net/app"))]] \
+        == qr_matrix("https://box.ts.net/app")
+    serve_ = json.dumps({"Web": {"box.ts.net:443": {"Handlers": {
+        "/": {"Proxy": "http://127.0.0.1:9090"}, "/apk": {"Proxy": "http://127.0.0.1:9091"}}},
+        "box.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7000"}}}}})
+    assert phone_url({}, serve_) == "https://box.ts.net"
+    assert phone_url({"webhook_port": 7000}, serve_) == "https://box.ts.net:8443"
+    assert phone_url({"webhook_port": 9091}, serve_) is None     # only under /apk
+    assert phone_url({}, "") is None and phone_url({}, "{}") is None
     qm_ = qr_matrix("https://box.ts.net/app")
     assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
     assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
@@ -16630,6 +18066,29 @@ def selfcheck():
         open(os.path.join(md_, MEM_REL), "w").write("## What this is\nx")
         mem_greet(mcfg2_, st3_, "3", "m2", md_)
         assert st3_["m2"]["queue"] == [MEM_READ]
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # back to it: already read
+        assert st3_["m2"]["queue"] == [MEM_READ]
+        later_ = time.time() + 5
+        os.utime(os.path.join(md_, MEM_REL), (later_, later_))
+        mem_greet(mcfg2_, st3_, "3", "m2", md_)             # notes rewritten since
+        assert st3_["m2"]["queue"] == [MEM_READ] * 2
+        mem_greet(mcfg2_, st3_, "3", "m2", md_, fresh=True)  # new conversation, same name
+        assert st3_["m2"]["queue"] == [MEM_READ] * 3
+        with stubbed(tmux_git=lambda c, *a: "c0ffee"):        # a commit since: the notes may lag it
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
+            mem_greet(mcfg2_, st3_, "3", "m2", md_)
+            assert st3_["m2"]["queue"] == [MEM_READ] * 4
+        # No change to the project since the last rewrite: no rewrite.
+        _mem["3"] = {"turns": MEM_TURNS, "fp": "same"}
+        mst2_["m"]["queue"] = []
+        with stubbed(mem_print=lambda c: "same"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [] and _mem["3"]["turns"] == 0
+        _mem["3"]["turns"] = MEM_TURNS
+        with stubbed(mem_print=lambda c: "moved"):
+            mem_tick(mcfg2_, mst2_)
+        assert mst2_["m"]["queue"] == [MEM_UPDATE]
         mcfg2_["memory"] = {"3": "off"}
         mem_capture(mcfg2_, "3", "m")
         assert _mem["3"]["turns"] == 0
@@ -17268,7 +18727,7 @@ def selfcheck():
     assert default_agent({"agent": "codex"}) == "codex"
 
     spawned, lk = [], threading.Lock()
-    globals()["spawn"] = lambda n, cwd, line: spawned.append((n, cwd, line))
+    globals()["spawn"] = lambda n, cwd, line, cfg=None: spawned.append((n, cwd, line))
     globals()["has_session"] = lambda n: False
     assert "started codex" in start_session(cfg2, {}, lk, "9", "box ~ --sandbox",
                                             "codex")
@@ -17567,6 +19026,8 @@ def selfcheck():
             # a name with no matching plugin still falls through to typing it in
             with stubbed(send_prompt=lambda c, st, t, se, tx, mid=None: "typed:" + tx):
                 assert handle(cfg2, {}, lk, "9", "!not-a-plugin hi") == "typed:!not-a-plugin hi"
+                assert "did you mean !budget" in handle(cfg2, {}, lk, "9", "!budjet 5M")
+                assert "!saved" in handle(cfg2, {}, lk, "9", "!savings")
     shutil.rmtree(plugdir, ignore_errors=True)
     with stubbed(PLUGIN_DIR="/no/such/dir"):
         assert "no plugins in" in handle(cfg2, {}, lk, "9", "!plugins")
@@ -17697,7 +19158,7 @@ def selfcheck():
     assert len(pre) == 1, pre
     tmux_git(repo, "branch", "-D", pre[0])   # clean slate for the deterministic prune below
 
-    for i in range(12):                                   # deterministic creatordate
+    for i in range(SNAP_KEEP + 2):                                    # deterministic creatordate
         d = f"2020-01-01T00:00:{i:02d}"
         env = dict(os.environ, GIT_AUTHOR_DATE=d, GIT_COMMITTER_DATE=d)
         with open(os.path.join(repo, "f"), "w") as f:
@@ -17709,29 +19170,29 @@ def selfcheck():
     survivors = [n_ for n_ in tmux_git(
         repo, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
         "refs/heads/nightmux/pre-*").split("\n") if n_.strip()]
-    assert len(survivors) == SNAP_KEEP, survivors      # only the last SNAP_KEEP survive
-    assert survivors[0] == "nightmux/pre-fake11", survivors
+    assert len(survivors) == SNAP_KEEP, survivors      # only the newest SNAP_KEEP survive
+    assert survivors[0] == f"nightmux/pre-fake{SNAP_KEEP + 1}", survivors
     assert "nightmux/pre-fake0" not in survivors, survivors
 
     cfg4 = {"topics": {"1": "s4"}}
     with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True):
         undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo")
         wt_out = handle(cfg4, {}, threading.Lock(), "1", "!worktrees")
-        assert "nightmux/pre-fake11" in undo_out, undo_out
-        assert "git restore --source nightmux/pre-fake11" in undo_out
-        assert "git diff nightmux/pre-fake11" in undo_out, undo_out
+        assert f"nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+        assert f"git restore --source nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out
+        assert f"git diff nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
         assert repo in wt_out and "feature-a" in wt_out, wt_out
 
         # Test M3: list_snapshots, undo_repo rollback, and redo capability
         snaps_list, has_redo = list_snapshots("s4")
         assert len(snaps_list) == SNAP_KEEP
-        assert snaps_list[0]["branch"] == "nightmux/pre-fake11"
+        assert snaps_list[0]["branch"] == f"nightmux/pre-fake{SNAP_KEEP + 1}"
 
         # Undo to checkpoint 2 (which holds "10")
         u_ok, u_msg = undo_repo("s4", "2")
         assert u_ok is True
         with open(os.path.join(repo, "f")) as f:
-            assert f.read() == "10", "undo 2 should restore content to fake10"
+            assert f.read() == str(SNAP_KEEP), "undo 2 should restore content to fake10"
 
         # Verify redo branch was created
         redos = [n_ for n_ in tmux_git(repo, "for-each-ref", "--format=%(refname:short)",
@@ -17742,7 +19203,10 @@ def selfcheck():
         r_ok, r_msg = undo_repo("s4", "redo")
         assert r_ok is True
         with open(os.path.join(repo, "f")) as f:
-            assert f.read() == "11", "undo redo should restore content to fake11"
+            assert f.read() == str(SNAP_KEEP + 1), "undo redo should restore content to fake11"
+        with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                     visible=lambda s: ["esc to interrupt"]):
+            assert "is working" in handle(cfg4, {}, threading.Lock(), "1", "!undo 1")
 
     shutil.rmtree(repo, ignore_errors=True)
     shutil.rmtree(f"{repo}-wt", ignore_errors=True)
@@ -17756,7 +19220,7 @@ def selfcheck():
 
     with stubbed(load_cfg=_boom):
         assert doctor() is False               # no config at all: nothing else to check
-    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},
+    with stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]}, reader_drift=lambda: [],
                 api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
                 run=lambda *a, **kw: "process" if "KillMode" in a else "active",
                 shutil=_FakeShutil(), installed_agents=lambda c: ["claude"]):
@@ -17797,7 +19261,423 @@ def selfcheck():
     # Later saves recreate the redirected config; leaving it behind drops test
     # debris in the live upload cache, where prune would not touch it for a week.
     os.path.exists(CFG_PATH) and os.remove(CFG_PATH)
+    # A non-snapshot JSON in the shared state dir (a list, from another tool)
+    # once crash-looped the daemon at startup inside snapped().
+    with tempfile.TemporaryDirectory() as sd_, stubbed(STATE_DIR=sd_):
+        with open(os.path.join(sd_, "stray.json"), "w") as f:
+            json.dump(["x"], f)
+        with open(os.path.join(sd_, "s1.json"), "w") as f:
+            json.dump({"pane": "%9", "ts": time.time()}, f)
+        assert list(snapped()) == ["%9"] and list(snapped()) == ["%9"]
+    # !companion: seeds a private folder once, gives the agent the nightmux tools,
+    # and the tools send only where a !budget caps the spend.
+    with tempfile.TemporaryDirectory() as cd_:
+        ran, cd_ = [], os.path.join(cd_, "comp")
+        fake_sp = type("SP", (), {"TimeoutExpired": subprocess.TimeoutExpired, "DEVNULL": None,
+                                  "run": staticmethod(lambda a, **k: ran.append(a) or
+                                                      type("P", (), {"returncode": 0})())})
+        st_ = {}
+        with stubbed(COMPANION_DIR=cd_, subprocess=fake_sp,
+                     start_session=lambda c, s, l, t, a, k: f"started {k} '{a.split()[0]}'"):
+            cfgc_ = {"agents": {}}
+            out = companion_cmd(cfgc_, st_, threading.Lock(), "7", "claude")
+            assert cfgc_["memory"]["7"] == "off"         # no project-notes turns for it
+            assert out.startswith("started claude 'companion'"), out
+            assert ran[-1][:4] == ["claude", "mcp", "add", "-s"] and ran[-1][-2:] == ["--mcp", "--companion"]
+            with open(os.path.join(cd_, "CLAUDE.md")) as f:
+                assert "@PERSONA.md" in f.read()       # persona survives compaction
+            assert oct(os.stat(cd_).st_mode & 0o777) == "0o700"
+            with open(os.path.join(cd_, "PERSONA.md"), "w") as f:
+                f.write("mine")
+            companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "")
+            with open(os.path.join(cd_, "PERSONA.md")) as f:
+                assert f.read() == "mine"            # never overwrites the owner's edits
+            assert "usage" in companion_cmd({"agents": {}}, {}, threading.Lock(), "7", "nope")
+            # night: 2h rounds from the night time to the morning, then the summary;
+            # off drops only the companion's jobs.
+            cfgn = {"companion": {"topic": "7", "session": "companion"}, "tz_offset": 0}
+            stn = {"companion": {"sched": [{"at": 1, "every": 60, "text": "mine"}]}}
+            with stubbed(save_queue=lambda s: None):
+                out = companion_night(cfgn, stn, "night 01:00 07:30")
+                jobs = stn["companion"]["sched"]
+                assert [time.strftime("%H:%M", time.gmtime(j["at"])) for j in jobs[1:]] == \
+                    ["01:00", "03:00", "05:00", "07:30"], out
+                assert jobs[-1]["text"] == COMPANION_MORNING and jobs[0]["text"] == "mine"
+                companion_night(cfgn, stn, "night off")
+                assert stn["companion"]["sched"] == [{"at": 1, "every": 60, "text": "mine"}]
+                assert "start the companion" in companion_night({}, {}, "night")
+            cfg_ = {"budgets": {"5": {"tokens": 1000, "per": "day"}}}
+            for t_ in ("6", ""):
+                try:
+                    companion_prompt(cfg_, t_, "x")
+                    assert False, "sent without a budget"
+                except ValueError as e:
+                    assert "!budget" in str(e)
+            assert companion_prompt(cfg_, "6", "x", companion=False) == "x"
+            cfg_["companion"] = {"topic": "5"}
+            try:
+                companion_prompt(cfg_, "5", "x")
+                assert False, "sent to itself"
+            except ValueError as e:
+                assert "own topic" in str(e)
+            cfg_.pop("companion")
+            # read_chat in companion mode: only unseen messages, at most 15, clipped.
+            got = []
+            msgs = [{"id": i, "who": "agent", "text": "y" * 3000} for i in range(1, 21)]
+
+            def fake_open(url, timeout=10):
+                got.append(url)
+                after = int(url.rsplit("after=", 1)[1])
+                return io.BytesIO(json.dumps({"items": [m for m in msgs if m["id"] > after]}).encode())
+            fake_ul = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open), "Request": urllib.request.Request})})
+            def fake_open2(url, timeout=10):
+                got.append(getattr(url, "full_url", url))
+                return io.BytesIO(json.dumps([{"topic": "5", "mode": "waiting"}]).encode())
+            fake_ul2 = type("U", (), {"parse": urllib.parse, "request": type("R", (), {
+                "urlopen": staticmethod(fake_open2), "Request": urllib.request.Request})})
+            with stubbed(urllib=fake_ul2):
+                try:
+                    nm_call("send_prompt", {"topic": "5", "text": "yes"}, "http://x")
+                    assert False, "typed into an open menu"
+                except ValueError as e:
+                    assert "menu is open" in str(e) and not any("/topic/" in u for u in got)
+            with stubbed(urllib=fake_ul):
+                _nm_seen.clear()
+                text = nm_call("read_chat", {"topic": "5"}, base="http://x", companion=True)[0]["text"]
+                assert text.count("agent:") == 15 and "#20 " in text and len(text) < 15 * 1600
+                assert nm_call("read_chat", {"topic": "5"}, "http://x", True)[0]["text"] == "nothing new"
+                assert got[-1].endswith("after=20")
+                assert nm_call("read_chat", {"topic": "5"}, "http://x")[0]["text"].count("agent:") == 20
+            with stubbed(budget_used=lambda c, t, s: 1_200_000):
+                assert budget_line({"budgets": {"5": {"tokens": 5_000_000, "per": "day"}}}, "5") \
+                    == f"{_k(1_200_000)} of {_k(5_000_000)} this day"
+                assert budget_line({}, "5") is None
+            # progress: moved projects with flags, quiet ones on one line, never itself.
+            now_ = time.time()
+            rows_ = [{"topic": "5", "session": "shop", "mode": "idle", "budget": "1M of 5M this day"},
+                     {"topic": "6", "session": "blog", "mode": "waiting"},
+                     {"topic": "8", "session": "old", "mode": "idle"},
+                     {"topic": "9", "session": "comp", "mode": "idle"}]
+            chat_ = {"5": [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"} for i in range(1, 8)]
+                     + [{"id": 20 + i, "t": now_, "who": "bot", "text": f"🧠 memory {i}"} for i in range(9)],
+                     "9": [{"id": 50, "t": now_, "who": "bot", "text": "me"}]}
+            stp = {"blog": {"asked": "Use postgres or sqlite?"}}
+            with stubbed(topics_status=lambda c, s: rows_, _chat=chat_, tmux_git=lambda *a: ""):
+                cfgp = {"companion": {"topic": "9"}, "dirs": {"5": cd_}}
+                rep_ = progress_report(cfgp, stp, now_ - 60)
+                assert "▸ shop (topic 5) [idle] · 7 replies · 0 commits · budget 1M of 5M" in rep_, rep_
+                # status lines are not replies: nine 🧠 lines alone are no circle
+                chat_["5"] = chat_["5"][7:]
+                rep2 = progress_report(cfgp, stp, now_ - 60)
+                assert "0 replies" in rep2 and "circles" not in rep2 and "last:" not in rep2, rep2
+                chat_["5"] = [{"id": i, "t": now_, "who": "bot", "text": f"✅ shop\nstep {i}\nmore"}
+                              for i in range(1, 8)]
+                assert "last: step 7" in rep_ and "going in circles" in rep_
+                assert "✋ waiting on you: Use postgres or sqlite?" in rep_ and "quiet: old" in rep_
+                assert "comp" not in rep_
+                # a question at the end of an answer, unanswered: flagged with its wait
+                chat_["8"] = [{"id": 30, "t": now_ - 7200, "who": "bot",
+                               "text": "✅ old\nDone.\nShould I also add dark mode?"}]
+                assert "✋ waiting on you: Should I also add dark mode? (2h" in \
+                    progress_report(cfgp, stp, now_ - 60)
+                chat_["8"].append({"id": 31, "t": now_ - 3600, "who": "you", "text": "no"})
+                assert "quiet: old" in progress_report(cfgp, stp, now_ - 60)
+                chat_.pop("8")
+            # commits made in the terminal show even with no chat (empty after a restart)
+            with stubbed(topics_status=lambda c, s: rows_[2:3], _chat=chat_,
+                         tmux_git=lambda cwd, *a: "true" if a[0] == "rev-parse" else "abc123 fix login\n"):
+                rep3 = progress_report({"dirs": {"8": cd_}}, {}, now_ - 60)
+                assert "▸ old (topic 8) [idle] · 0 replies · 1 commits" in rep3, rep3
+            # !companion focus, said in the project's topic: reports carry only targeted
+            # projects, idle ones too, so a quiet night still has work toward the target.
+            lk_ = threading.Lock()
+            cff = {"topics": {"5": "shop", "6": "blog", "9": "companion"},
+                   "companion": {"topic": "9", "session": "companion"}}
+            with stubbed(save_cfg=lambda c: None, save_queue=lambda s: None):
+                assert "start the companion" in companion_focus({}, lk_, "5", "focus x")
+                out = companion_focus(cff, lk_, 5, "focus ship checkout v2")
+                assert "suggest until" in out and cff["companion"]["focus"] == {"5": "ship checkout v2"}
+                assert companion_focus(cff, lk_, "9", "focus") == "📌 5: ship checkout v2"
+                assert companion_focus(cff, lk_, "5", "focus") == "📌 ship checkout v2"
+                with stubbed(topics_status=lambda c, s: rows_[:3], _chat={}, tmux_git=lambda *a: ""):
+                    rep5 = progress_report(cff, {}, now_ - 60)
+                assert rep5.startswith("▸ shop (topic 5)") and "📌 target: ship checkout v2 — idle" in rep5 \
+                    and "blog" not in rep5 and "quiet" not in rep5, rep5
+                companion_focus(cff, lk_, "5", "focus off")
+                assert cff["companion"]["focus"] == {}
+                companion_focus(cff, lk_, "5", "focus a")
+                companion_focus(cff, lk_, "9", "focus off")
+                assert "focus" not in cff["companion"]
+                # never in a project's own topic: it would unbind the project
+                assert "runs 'shop'" in companion_cmd(cff, {}, lk_, "5", "")
+                # night rounds leave the day watch alone
+                stw_ = {"companion": {"sched": [{"at": 1, "every": 60, "text": "w",
+                                                 "companion": True, "watch": True}]}}
+                companion_night(dict(cff, tz_offset=0), stw_, "night 01:00 07:30")
+                companion_night(dict(cff, tz_offset=0), stw_, "night off")
+                assert [j["text"] for j in stw_["companion"]["sched"]] == ["w"]
+            # Gated rounds: the report rides in the prompt; nothing new, no model call;
+            # a big thread is cleared first unless the owner spoke within the hour.
+            with stubbed(topics_status=lambda c, s: rows_[0:1], _chat=chat_, tmux_git=lambda *a: "",
+                         agent_key=lambda c, t, s: "claude"):
+                stw = {"comp": {"ctx_tok": 200000, "sched": [
+                    {"at": 0, "every": 3600, "text": "w", "watch": True, "companion": True,
+                     "progress": True, "gate": True, "since": now_ - 60}]}}
+                sent_ = []
+                with stubbed(send=lambda *a, **k: sent_.append(a)):
+                    due(cfgp, stw, "9", "comp")
+                    q_ = stw["comp"]["queue"]
+                    assert q_[0] == "/clear" and q_[1].startswith("w\n\nProgress since "), q_
+                    assert "▸ shop (topic 5)" in q_[1] and not sent_        # no ⏰ ping
+                    stw["comp"]["queue"], stw["comp"]["sched"][0]["at"] = [], 0
+                    due(cfgp, stw, "9", "comp")                 # nothing new since
+                    assert not stw["comp"]["queue"] and stw["comp"]["sched"][0]["at"] > now_
+                    chat_["5"].append({"id": 9, "t": time.time() + 1, "who": "bot", "text": "✅ shop\nadded tests"})
+                    chat_["9"] = [{"id": 10, "t": time.time(), "who": "you", "text": "hi"}]
+                    stw["comp"]["sched"][0]["at"] = 0
+                    due(cfgp, stw, "9", "comp")
+                    q_ = stw["comp"]["queue"]
+                    assert len(q_) == 1 and "added tests" in q_[0], q_   # owner just spoke: no /clear
+            # suggest: a ledger on disk, so ▶ works after a restart and taps teach it;
+            # 3 waiting per topic, 6 an hour, a dropped idea never comes back.
+            sent_ = []
+            with stubbed(send=lambda c, t, x, **k: sent_.append((t, x, k.get("buttons")))):
+                del _idea_times[:]
+                cfgs = {"topics": {"5": "shop", "6": "blog"}}
+                p1 = "[role: tester] b\n\nTask: add a test for cart totals"
+                assert "posted" in suggest_post(cfgs, "5", p1)
+                t_, x_, btn = sent_[-1]
+                assert t_ == "5" and x_.endswith("add a test for cart totals") and "!suggest run" in btn
+                sid1 = re.search(r"!suggest run (\w+)", btn).group(1)
+                assert "no project" in suggest_post(cfgs, "7", "x")
+                suggest_post(cfgs, "5", "idea 0")
+                sid2 = re.search(r"!suggest drop (\w+)", sent_[-1][2]).group(1)
+                suggest_post(cfgs, "5", "idea 1")
+                assert "3 ideas already wait" in suggest_post(cfgs, "5", "idea 2")
+                got_p = []
+                with stubbed(send_prompt=lambda c, s, t, se, p, mid=None: got_p.append((t, p)) or "sent"):
+                    handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest run {sid1}")
+                    assert got_p == [("5", p1)]
+                    assert "already taken" in handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest run {sid1}")
+                    assert "dropped" in handle(dict(cfgs), {}, threading.Lock(), "5", f"!suggest drop {sid2}")
+                    assert "already taken" in handle(dict(cfgs), {}, threading.Lock(), "6", f"!suggest run {sid2}")
+                assert "dropped this exact idea" in suggest_post(cfgs, "5", "idea 0")
+                stats_ = idea_stats()
+                assert "▶ 1 sent · ✕ 1 dropped · 0 ignored · 1 waiting" in stats_ and "idea 0" in stats_, stats_
+                assert "1 ignored" in idea_stats(time.time() + IDEA_STALE + 60)
+                for i in range(3):
+                    suggest_post(cfgs, "6", f"blog idea {i}")
+                assert "6 ideas" in suggest_post(cfgs, "6", "one more")
+            # the signals an expert scans for: goal state, errors, uncommitted work, the plan
+            os.makedirs(os.path.join(cd_, ".nightmux"), exist_ok=True)
+            with open(os.path.join(cd_, ".nightmux", "memory.md"), "w") as f:
+                f.write("# x\n## Decisions\n- a\n## In progress / next\n- ship checkout\n- add coupons\n")
+            with stubbed(topics_status=lambda c, s: rows_[0:1], _err_log=[(time.time(), "5", "KeyError: cart")],
+                         _chat={"5": [{"id": 1, "t": time.time(), "who": "bot", "text": "🛑 goal stuck — x"}]},
+                         tmux_git=lambda cwd, *a: " 2 files changed, 10 insertions(+)" if a[0] == "diff" else "true" if a[0] == "rev-parse" else ""):
+                rep4 = progress_report({"dirs": {"5": cd_}}, {}, time.time() - 60)
+                for want in ("🎯 🛑 goal stuck", "🚨 1 production error: KeyError: cart",
+                             "uncommitted: 2 files changed", "next: ship checkout", "next: add coupons",
+                             "ideas, 7 days:"):
+                    assert want in rep4, (want, rep4)
+            assert {"progress", "suggest"} <= {t["name"] for t in NM_TOOLS}
+            companion_log({"topic": "5", "role": "tester"}, "[role: tester] brief\n\nTask: add tests\nmore")
+            with open(os.path.join(cd_, "actions.log")) as f:
+                assert f.read().endswith("topic=5 role=tester add tests\n")
+            out = companion_prompt(cfg_, "5", "fix it", "reviewer")
+            assert out.startswith("[role: reviewer] You are the reviewer") and out.endswith("Task: fix it")
+            for bad in ("../PERSONA", "nope"):
+                try:
+                    companion_prompt(cfg_, "5", "x", bad)
+                    assert False, bad
+                except ValueError:
+                    pass
+    # Fleet stats: Wrapped, coach and !stats sum every server's numbers; ratios are
+    # recomputed from the sums, and a peer that does not answer is left out.
+    a1_ = {"days": 30, "took": 1, "tips": [{"agent": "claude", "tip": "t1"}],
+           "when": {"projects": [["shop", 3]], "at": {"10": 2}},
+           "agents": {"claude": {"sessions": 1, "prompts": 10, "requests": 4, "errors": 0, "big_ctx": 0,
+                                 "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
+                                                           "output": 5, "thinking": 0},
+                                 "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
+                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]}}}}
+    a2_ = json.loads(json.dumps(a1_))
+    a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
+                                   tokens={"input": 90, "cache_read": 10, "cache_write": 0,
+                                           "output": 5, "thinking": 0})
+    a2_["when"] = {"projects": [["shop", 1], ["blog", 2]], "at": {"10": 1, "11": 4}}
+    got_ = {"api/analysis?days=30": a2_, "api/savings": {"since": 50, "tokens": 7, "tokens_day": {"2026-10-01": 7}},
+            "api/lessons": {"n": 4, "ok": 2, "winners": ["w2"]}}
+    fcfg_ = {"peers": {"vps2": {"url": "u"}, "vps3": {"url": "v"}}}
+    with stubbed(peer_call=lambda c, n, p, b=None, timeout=10: got_.get(p) if n == "vps2" else None,
+                 host_name=lambda c: "vps1", analyze_chats=lambda d=30, home=None: a1_,
+                 sav_data=lambda: {"since": 100, "tokens": 3, "tokens_day": {"2026-10-01": 1, "2026-09-30": 2}, "spent": {}},
+                 prompt_lessons=lambda home=None: {"n": 6, "ok": 5, "winners": ["w1"]}, _analysis={}):
+        m_ = fleet_analysis(fcfg_, 30)
+        c_ = m_["agents"]["claude"]
+        assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
+        assert c_["daily"] == {"2026-10-12": [800, 8]}, c_["daily"]
+        assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
+        assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
+        assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
+        s_ = fleet_sav(fcfg_)
+        assert s_["since"] == 50 and s_["tokens"] == 10 and s_["tokens_day"] == {"2026-10-01": 8, "2026-09-30": 2}
+        assert fleet_lessons(fcfg_) == {"n": 10, "ok": 7, "winners": ["w1", "w2"]}
+        assert fleet_analysis({}, 30) is a1_            # no peers: no merge, no second cache
+        # !coach once crashed on an undefined name before drawing anything
+        with stubbed(threading=type("T", (), {"Thread": lambda *a, **k: type("X", (), {"start": lambda s: None})()})):
+            assert coach_cmd(fcfg_, "1").startswith("🎯 drawing")
+    # A prompt that keeps calling the model: said once, with an esc button.
+    sent_c = []
+    with stubbed(send=lambda c, t, x, **k: sent_c.append(x), agent_key=lambda c, t, s: "agy"):
+        stc = {"calls": CALLS_WARN, "ctx_tok": 150000}
+        warn_ctx({}, stc, "1", "s")
+        warn_ctx({}, stc, "1", "s")
+        assert len(sent_c) == 1 and f"{CALLS_WARN} model calls" in sent_c[0] and "150k" in sent_c[0], sent_c
+    # agy: the context of its newest conversation in this folder, 0 after its CHECKPOINT
+    import sqlite3
+    with tempfile.TemporaryDirectory() as ah_:
+        root_ = os.path.join(ah_, ".gemini", "antigravity-cli")
+        os.makedirs(os.path.join(root_, "brain", "c2", ".system_generated", "logs"))
+        con_ = sqlite3.connect(os.path.join(root_, "conversation_summaries.db"))
+        con_.execute("CREATE TABLE conversation_summaries (conversation_id text, workspace_uris text, "
+                     "nesting_depth integer, last_modified_time datetime)")
+        con_.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?)",
+                         [("c1", '["file:///w/app"]', 0, "2026-10-01"), ("c2", '["file:///w/app"]', 0, "2026-10-02"),
+                          ("c3", '["file:///w/app2"]', 0, "2026-10-03"), ("c4", '["file:///w/app"]', 1, "2026-10-04")])
+        con_.commit()
+        con_.close()
+        tf_ = os.path.join(root_, "brain", "c2", ".system_generated", "logs", "transcript.jsonl")
+        with open(tf_, "w") as f:
+            f.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 3000, "cache_read_tokens": 140000}) + "\n")
+        assert agy_ctx("/w/app", home=ah_) == 143000 and agy_ctx("/w/none", home=ah_) is None
+        with open(tf_, "a") as f:
+            f.write(json.dumps({"type": "CHECKPOINT"}) + "\n")
+        assert agy_ctx("/w/app/", home=ah_) == 0
+    screens_ = [["Search: Continue", "  esc Go back / Clear search"], ["  esc Go back / Clear search"], [">"]]
+    keys_ = []
+    with stubbed(visible=lambda s_: screens_.pop(0) if len(screens_) > 1 else screens_[0],
+                 tmux=lambda *a: keys_.append(a)):
+        close_picker("x")
+    assert [a[-1] for a in keys_] == ["Escape", "Escape"], keys_   # two, never a third
+    # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
+    typed = []
+    with stubbed(send=lambda *a, **k: None, inject=lambda s_, t: typed.append(t),
+                 remember=lambda *a: None, agent_key=lambda *a: "claude"):
+        pc = {"autocompact": "200k", "park_compact": 20}
+        autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                               "changed": time.time() - 30 * 60}}, "1", "s")
+        autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                               "changed": time.time() - 5 * 60}}, "1", "s")
+        autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                     "changed": time.time() - 30 * 60}}, "1", "s")      # default 45m: not yet
+        autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                     "changed": time.time() - 50 * 60}}, "1", "s")      # default 45m: now
+        autocompact({"autocompact": "200k", "park_compact": None}, {"s": {"mode": "idle",
+                     "ctx_tok": 110000, "changed": time.time() - 50 * 60}}, "1", "s")  # off
+    assert typed == ["/compact", "/compact"], typed
+    with stubbed(save_cfg=lambda c: None, has_session=lambda n: True):
+        ac_ = handle({"topics": {"1": "s"}, "autocompact": "200k"}, {}, threading.Lock(), "1", "!autocompact")
+    assert "200,000 tokens" in ac_ and "idle 45m" in ac_, ac_
+    # A non-snapshot json in the state dir must not stop prune (and the watcher).
+    with tempfile.TemporaryDirectory() as td_:
+        with open(os.path.join(td_, "paired_tokens.json"), "w") as f_:
+            json.dump(["x"], f_)
+        with stubbed(STATE_DIR=td_):
+            assert snap_pane(os.path.join(td_, "paired_tokens.json")) is None
+            prune(time.time(), 0.0, {"%1"})
+    # Companion revamp: priorities from PERSONA.md, an allowance for unbudgeted
+    # projects, projects with no session, and talking to it through !companion.
+    cdir_, pdir_ = tempfile.mkdtemp(), tempfile.mkdtemp()
+    os.makedirs(os.path.join(pdir_, ".nightmux"))
+    with open(os.path.join(pdir_, ".nightmux", "memory.md"), "w") as f:
+        f.write("# x\n## In progress / next\n- ask the owner for sample SMS\n")
+    with open(os.path.join(cdir_, "PERSONA.md"), "w") as f:
+        f.write("# P\n## Priorities\n1. nightmux (x) — a\n2. Pennywise — b\n3. (project)\n## Tone\n")
+    ccf_ = {"topics": {"0": "companion", "7": "work"}, "topic_names": {"9": "Pennywise"},
+            "dirs": {"7": "/srv/nightmux", "9": pdir_}, "companion": {"topic": "0", "session": "companion"}}
+    with stubbed(COMPANION_DIR=cdir_, sav_path=lambda: os.path.join(cdir_, "sav.json")):
+        assert persona_priorities(ccf_) == ["7", "9"], persona_priorities(ccf_)
+        try:
+            companion_prompt(ccf_, "9", "go")
+            raise AssertionError("no budget and no allowance must refuse")
+        except ValueError as e:
+            assert "no allowance" in str(e), e
+        ccf_["budgets"] = {"0": {"tokens": 1000, "per": "day"}}
+        assert companion_prompt(ccf_, "9", "go") == "go"          # the allowance covers it
+        companion_log({"topic": "7"}, "go")
+        hr_ = int(time.time() // 3600)
+        with open(os.path.join(cdir_, "sav.json"), "w") as f:
+            json.dump({"spent": {"work": {str(hr_): 1500}}}, f)
+        assert companion_allowance(ccf_) == (1500, 1000)
+        try:
+            companion_prompt(ccf_, "9", "go")
+            raise AssertionError("a spent allowance must refuse")
+        except ValueError as e:
+            assert "allowance is spent" in str(e), e
+        with stubbed(topics_status=lambda c, st: [], tmux_git=lambda *a: ""):
+            rep_ = progress_report(ccf_, {}, time.time() - 3600)
+        assert "Pennywise (topic 9) [no session]" in rep_ and "⭐ priority 2" in rep_, rep_
+        assert "next: ask the owner for sample SMS" in rep_, rep_
+        cst_ = {}
+        with stubbed(has_session=lambda n: True, save_queue=lambda st: None):
+            assert "passed" in companion_cmd(ccf_, cst_, threading.Lock(), "0", "work on pennywise")
+        assert cst_["companion"]["queue"] == ["work on pennywise"], cst_
+        with stubbed(save_queue=lambda st: None):
+            companion_watch(ccf_, cst_, "watch 3h")
+        job_ = cst_["companion"]["sched"][-1]
+        assert job_["at"] - time.time() < 120 and time.time() - job_["since"] > 3 * 3600 - 60, job_
+    shutil.rmtree(cdir_, ignore_errors=True)
+    shutil.rmtree(pdir_, ignore_errors=True)
+    # A priority on a peer is never woken here, where its folder is empty.
+    try:
+        companion_wake("http://127.0.0.1:1", {"dirs": {"9": "/tmp"}, "remote": {"9": "vps2"}}, "9")
+        raise AssertionError("woke a remote topic locally")
+    except ValueError as e_:
+        assert "vps2" in str(e_), e_
     print("selfcheck ok")
+
+
+_drift = {}
+# Database stores, where a renamed table reads as "nothing happened" rather than
+# an error: the old table stays behind, empty. The files' mtime is the activity
+# signal that does not go through the reader being checked.
+DRIFT_STORES = {"opencode": ".local/share/opencode/opencode.db",
+                "agy": ".gemini/antigravity-cli/conversation_summaries.db"}
+
+
+def reader_drift(home=None, days=7):
+    """[(agent, what is wrong)] for token readers that broke without saying so.
+
+    Every agent CLI owns its storage and changes it without notice — opencode 2
+    moved its messages to a new table, and the reader kept answering 0, so
+    Wrapped, !stats and the savings all quietly lost an agent. Two symptoms are
+    checkable from here: the reader throws, or it finds activity and no tokens.
+    """
+    hit = _drift.get(days)
+    if home is None and hit and time.time() - hit[0] < 600:
+        return hit[1]
+    out, stats, since = [], {}, time.time() - days * 86400
+    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
+        a = scan.__name__[len("_scan_"):]
+        try:
+            scan(stats, home or os.path.expanduser("~"), since)
+        except Exception as e:
+            out.append((a, f"reader failed: {str(e)[:80]}"))
+            continue
+        s = stats.get(a) or _chat_bucket({}, a)
+        db = os.path.join(home or os.path.expanduser("~"), DRIFT_STORES.get(a, "\0"))
+        wrote = max([os.path.getmtime(f) for f in (db, db + "-wal") if os.path.exists(f)] or [0])
+        if wrote >= since and not (s["sessions"] or s["requests"]):
+            out.append((a, f"its store was written {left(time.time() - wrote)} ago "
+                           "but the reader found no sessions"))
+        elif (s["sessions"] or s["prompts"]) and not (s["input"] + s["output"] + s["cache_read"]):
+            out.append((a, f"{s['sessions']} sessions, {s['prompts']} prompts in {days}d "
+                           "but 0 tokens parsed"))
+    if home is None:
+        _drift[days] = (time.time(), out)
+    return out
 
 
 _unknown_pane_since = {}
@@ -17912,7 +19792,16 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
-    add(*check_reader_drift(cfg))
+    drift = reader_drift()
+    for a, why in drift:
+        add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "
+            f"({agent_version(a) or 'version unknown'}); "
+            "token stats for it are wrong until nightmux is updated")
+    if not drift:
+        add("token readers match the installed CLIs", True)
+    stuck = [s for s, t in _unknown_pane_since.items() if time.time() - t > 300]
+    if stuck:
+        add("screen reader", False, f"unknown screen for 5m+: {', '.join(stuck)} — the CLI format may have changed")
     return out
 
 
@@ -18042,7 +19931,7 @@ def cli():
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
     elif "--mcp" in sys.argv:
-        mcp_loop("nightmux", NM_TOOLS, nm_call)
+        mcp_loop("nightmux", NM_TOOLS, lambda n, a: nm_call(n, a, companion="--companion" in sys.argv))
     elif "--demo" in sys.argv:
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
