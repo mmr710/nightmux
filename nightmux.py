@@ -1439,6 +1439,124 @@ def failover_buttons(cfg, topic, sess):
     return kb([[("⏭ hand to " + k, "!failover " + k) for k in alts]]) if alts else None
 
 
+def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
+    """Build a structured cross-agent handoff packet (.nightmux/HANDOFF.md) so a
+    receiving agent continues mid-thought without re-exploring the codebase.
+    """
+    st = (state.get(sess) or {}) if sess else {}
+    was = was or (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+    last = last if last is not None else (st.get("last") or "")
+    cwd = (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess and has_session(sess) else None)
+    tools, notes = [], []
+    tpath = (st.get("snap") or {}).get("transcript")
+    if tpath and os.path.isfile(tpath):
+        try:
+            with open(tpath, encoding="utf-8", errors="replace") as f:
+                tail = f.readlines()[-40:]
+            for raw in tail:
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+                for b in (msg.get("content") if isinstance(msg.get("content"), list) else []):
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use":
+                        tools.append(f"- `{b.get('name', 'tool')}`: {brief(b.get('input') or {})}")
+                    elif b.get("type") == "text" and (b.get("text") or "").strip():
+                        txt = " ".join((b.get("text") or "").strip().split())
+                        if len(txt) > 20:
+                            notes.append("- " + txt[:240])
+        except OSError:
+            pass
+    scr = strip_noise(pane(sess))[-12:] if sess and has_session(sess) else []
+    gstat = tmux_git(cwd, "status", "-sb") if cwd and os.path.isdir(cwd) else ""
+    gdiff = tmux_git(cwd, "diff", "--stat", "HEAD") if cwd and os.path.isdir(cwd) else ""
+    lines = [
+        f"# 🧬 Nightmux Context Teleport ({was})",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
+        "",
+        "## Last Instruction",
+        last or "(none recorded)",
+    ]
+    if tools:
+        lines += ["", "## Recent Tool Actions", *tools[-8:]]
+    if notes:
+        lines += ["", "## Recent Agent Reasoning", *notes[-4:]]
+    if scr:
+        lines += ["", "## Terminal Tail", "```", *[plain(l) for l in scr[-10:]], "```"]
+    if gstat:
+        lines += ["", "## Git Status", "```", gstat, "```"]
+    if gdiff:
+        lines += ["", "## Git Diffstat", "```", gdiff, "```"]
+    if cwd and os.path.isfile(os.path.join(cwd, ".nightmux", "memory.md")):
+        lines += ["", "## Project Memory", "See `.nightmux/memory.md` for architecture, test commands, and decisions."]
+    body = "\n".join(lines) + "\n"
+    hpath = None
+    if cwd and os.path.isdir(cwd) and (force or os.path.isdir(os.path.join(cwd, ".git"))
+                                       or os.path.isdir(os.path.join(cwd, ".nightmux"))):
+        try:
+            os.makedirs(os.path.join(cwd, ".nightmux"), exist_ok=True)
+            mem_exclude(cwd)
+            hpath = os.path.join(cwd, ".nightmux", "HANDOFF.md")
+            with open(hpath, "w", encoding="utf-8") as f:
+                f.write(body)
+        except OSError:
+            hpath = None
+    return hpath, body
+
+
+def teleport_cmd(cfg, state, lock, topic, sess, arg):
+    """!teleport [<agent>] [prompt]: package live session state into .nightmux/HANDOFF.md
+    and optionally switch + inject into <agent> immediately.
+    """
+    cur = sess or cfg.get("topics", {}).get(topic)
+    if not cur:
+        return "no session bound in this topic"
+    was = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+    parts = arg.split(None, 1) if arg else []
+    target = parts[0].lower().lstrip("@!") if parts else ""
+    extra = parts[1].strip() if len(parts) > 1 else ""
+    if not target or target in ("show", "status", "packet"):
+        hpath, body = teleport_packet(cfg, state, topic, cur, was=was, force=True)
+        alts = [k for k in installed_agents(cfg) if k != was][:4]
+        rows = [[("🧬 -> " + k, f"!teleport {k}") for k in alts]] if alts else None
+        where = f"saved to {hpath}" if hpath else "in-memory packet"
+        preview = "\n".join(body.splitlines()[:18])
+        msg = f"🧬 context teleport ready ({where})\n\n{preview}\n\n!teleport <agent> [next instruction] hands over mid-thought"
+        if rows:
+            send(cfg, topic, msg, mode="plain", buttons=kb(rows))
+            return ""
+        return msg
+    if target == was:
+        return f"{target} is already the active agent here"
+    if target not in installed_agents(cfg):
+        return (f"no {target} installed to teleport to — installed: "
+                + ", ".join(k for k in installed_agents(cfg) if k != was))
+    st = state.get(cur) or {}
+    held, last = st.pop("queue", None) or [], st.get("last")
+    hpath, _ = teleport_packet(cfg, state, topic, cur, was=was, last=last, force=True)
+    out = switch_agent(cfg, state, lock, topic, target)
+    new = cfg.get("topics", {}).get(topic)
+    if new == cur or not has_session(new):
+        if held:
+            st["queue"] = held
+            save_queue(state)
+        return out
+    rest = [p for p in held if p != cfg.get("auto_continue", "continue")]
+    brief = (f"🧬 Context teleported from {was}. Read .nightmux/HANDOFF.md first — "
+             f"it holds {was}'s last instruction, recent tool actions, terminal state, "
+             "and git diffstat so you can continue mid-thought without re-exploring the repo."
+             + (f"\n\nNext instruction:\n{extra}" if extra else
+                (f"\n\nLast instruction was:\n{last}" if last and last not in rest else "")))
+    state.setdefault(new, {}).setdefault("queue", []).extend([brief] + rest)
+    save_queue(state)
+    sav_add("teleports")
+    return (f"{out}\n🧬 context teleported from {was} → {target} (.nightmux/HANDOFF.md)"
+            + (f" with {len(rest)} queued prompt(s)" if rest else ""))
+
+
 def failover(cfg, state, lock, topic, key):
     """!failover <agent>: hand a limit-held topic's work to another agent now,
     instead of waiting hours for the window to reset.
@@ -1458,6 +1576,7 @@ def failover(cfg, state, lock, topic, key):
         return (f"no {key or 'agent'} installed to hand to — installed: "
                 + ", ".join(k for k in installed_agents(cfg) if k != was))
     held, last = st.pop("queue", None) or [], st.get("last")
+    hpath, _ = teleport_packet(cfg, state, topic, cur, was=was, last=last)
     out = switch_agent(cfg, state, lock, topic, key)
     new = cfg.get("topics", {}).get(topic)
     if new == cur or not has_session(new):
@@ -1469,8 +1588,9 @@ def failover(cfg, state, lock, topic, key):
     # rides along as real work.
     rest = [p for p in held if p != cfg.get("auto_continue", "continue")]
     brief = (f"{was} was working in this directory and hit its usage limit "
-             "mid-task. Look at the working tree (git status, git diff) to see "
-             "how far it got, then carry on."
+             "mid-task. Look at the working tree (git status, git diff)"
+             + (" and .nightmux/HANDOFF.md" if hpath else "")
+             + " to see how far it got, then carry on."
              + (f"\n\nIts last instruction was:\n{last}" if last and last not in rest else ""))
     state.setdefault(new, {}).setdefault("queue", []).extend([brief] + rest)
     save_queue(state)
@@ -1554,6 +1674,139 @@ def warn_usage(cfg, st, topic, sess):
             send(cfg, topic, f"🔶 {label} limit {pct:.0f}% used\n"
                  f"resets {clock(cfg, at)} (in {left(at - time.time())})",
                  mode="plain")
+
+
+# ---------- !harvest: subscription quota window arbitrage ----------
+# Most 5-hour quota windows reset with 40–80% unused capacity while the user is
+# asleep or away. When a window is within `lead_mins` (default 60m) of resetting
+# and usage is below `ceiling` (default 85%), harvest_tick wakes an idle session
+# and feeds it one queued backlog prompt so paid capacity is never donated back.
+HARVEST_IDLE = 120
+
+
+def harvest_window(state, now=None):
+    """Fresh (pct, resets_at) for the 5-hour window across live snapshots, or (None, None)."""
+    now = now or time.time()
+    snaps = [(s.get("snap") or {}) for s in state.values() if isinstance(s, dict)]
+    fresh = [sn for sn in snaps if now - sn.get("ts", 0) <= USAGE_FRESH]
+    for sn in sorted(fresh, key=lambda x: -x.get("ts", 0)):
+        w = window(sn, "five_hour") or window(sn.get("rate_limits") or {}, "five_hour") or {}
+        if w.get("used_percentage") is not None and w.get("resets_at"):
+            return w["used_percentage"], w["resets_at"]
+    return None, None
+
+
+def harvest_cmd(cfg, state, lock, topic, sess, arg):
+    """!harvest [add <task> | now | ceiling <pct> | window <mins> | clear | on | off]."""
+    t = str(topic)
+    with lock:
+        h = cfg.setdefault("harvest", {}).setdefault(
+            t, {"on": True, "ceiling": 85, "lead_mins": 60, "tasks": []})
+    sub, rest = (arg.split(None, 1) + ["", ""])[:2] if arg else ("", "")
+    sub = sub.lower()
+    if sub in ("on", "off"):
+        with lock:
+            h["on"] = (sub == "on")
+            save_cfg(cfg)
+        return f"🌾 quota harvest {sub} for this topic"
+    if sub == "clear":
+        with lock:
+            n = len(h.get("tasks") or [])
+            h["tasks"] = []
+            save_cfg(cfg)
+        return f"🌾 cleared {n} harvest task(s)"
+    if sub == "ceiling" and rest.rstrip("%").isdigit():
+        val = max(10, min(99, int(rest.rstrip("%"))))
+        with lock:
+            h["ceiling"] = val
+            save_cfg(cfg)
+        return f"🌾 harvest safety ceiling set to {val}% (stops dispatching above this)"
+    if sub == "window" and rest.rstrip("m").isdigit():
+        val = max(5, min(290, int(rest.rstrip("m"))))
+        with lock:
+            h["lead_mins"] = val
+            save_cfg(cfg)
+        return f"🌾 harvest window set to ≤ {val}m before 5-hour reset"
+    if sub == "add" and rest.strip():
+        with lock:
+            h.setdefault("tasks", []).append(rest.strip())
+            h["on"] = True
+            save_cfg(cfg)
+            n = len(h["tasks"])
+        return (f"🌾 queued harvest task #{n}: {rest.strip()}\n"
+                f"runs when 5h window is ≤ {h.get('lead_mins', 60)}m from reset "
+                f"and < {h.get('ceiling', 85)}% used")
+    if sub == "now":
+        if not sess:
+            return "no session bound in this topic"
+        tasks = h.get("tasks") or []
+        if not tasks:
+            return "no harvest tasks queued — use !harvest add <task>"
+        with lock:
+            task = tasks.pop(0)
+            save_cfg(cfg)
+        state.setdefault(sess, {}).setdefault("queue", []).append(task)
+        save_queue(state)
+        sav_add("harvested")
+        return f"🌾 harvesting now: {task}"
+    pct, at = harvest_window(state)
+    wline = (f"5h window: {pct:.0f}% used · resets in {left(at - time.time())}"
+             if pct is not None and at and at > time.time()
+             else "5h window: waiting for fresh usage snapshot")
+    tasks = h.get("tasks") or []
+    tlist = "\n".join(f"  {i + 1}. {x}" for i, x in enumerate(tasks)) or "  (none queued)"
+    status = "on" if h.get("on", True) else "off"
+    msg = (f"🌾 quota harvest ({status}) · ceiling {h.get('ceiling', 85)}% · "
+           f"window ≤ {h.get('lead_mins', 60)}m before reset\n{wline}\n\n"
+           f"Queued tasks ({len(tasks)}):\n{tlist}\n\n"
+           "!harvest add <task> · !harvest now · !harvest ceiling 85 · !harvest window 60 · !harvest clear|off")
+    rows = [
+        [("🧪 + unit tests", "!harvest add Find untested code paths and add unit tests; run tests to verify."),
+         ("🧹 + lint & dead code", "!harvest add Audit for dead code, unused imports, or lint warnings and clean them up.")],
+        [("🔒 + security audit", "!harvest add Review changed files for security issues or edge-case bugs and fix them."),
+         ("▶️ run next now", "!harvest now")],
+    ]
+    send(cfg, topic, msg, mode="plain", buttons=kb(rows))
+    return ""
+
+
+def harvest_tick(cfg, state, lock):
+    """Drain one harvest backlog task when a 5-hour quota window is about to reset
+    with unused capacity below the topic's safety ceiling.
+    """
+    now = time.time()
+    pct, at = harvest_window(state, now)
+    if pct is None or not at or at <= now:
+        return
+    for topic, h in list((cfg.get("harvest") or {}).items()):
+        if not isinstance(h, dict) or not h.get("on", True) or not h.get("tasks"):
+            continue
+        lead = h.get("lead_mins", 60) * 60
+        cap = h.get("ceiling", 85)
+        if (at - now) > lead or pct >= cap:
+            continue
+        sess = (cfg.get("topics") or {}).get(str(topic))
+        st = state.get(sess) or {}
+        if (not sess or st.get("mode") != "idle" or st.get("queue") or st.get("shift")
+                or st.get("limit_until", 0) > now
+                or now - st.get("changed", 0) < HARVEST_IDLE):
+            continue
+        with lock:
+            tasks = h.get("tasks") or []
+            if not tasks:
+                continue
+            task = tasks.pop(0)
+            save_cfg(cfg)
+        st.setdefault("queue", []).append(task)
+        st["changed"] = now
+        save_queue(state)
+        sav_add("harvested")
+        send(cfg, topic,
+             f"🌾 quota harvest · 5h window is {pct:.0f}% used (< {cap}% cap) "
+             f"and resets in {left(at - now)}\nrunning queued task: {task}",
+             mode="plain")
+        break   # one harvest dispatch per tick so account usage updates before the next
+
 
 
 def ctx_trip(cfg):
@@ -2946,6 +3199,7 @@ def watcher(cfg, state, lock):
             consult_tick(cfg, state)
             auto_update_tick(cfg)
             failover_tick(cfg, state, lock)
+            harvest_tick(cfg, state, lock)
             goal_tick(cfg, state)
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
@@ -3111,7 +3365,8 @@ def press(sess, key, confirm=False):
 #               Claude Code does NOT own, so nothing shadows a real slash command.
 #   PASSTHRU  — Claude Code's commands, registered purely so they autocomplete;
 #               they are typed into the session like any other text.
-TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
+TG_SLASH = {"ctl": "!ctl", "vibe": "!vibe", "teleport": "!teleport", "harvest": "!harvest",
+            "topics": "!status", "sessions": "!sessions",
             "pane": "!pane", "git": "!git", "diff": "!diff", "get": "!get",
             "bind": "!bind", "unbind": "!unbind", "kill": "!kill",
             "verbose": "!verbose", "queue": "!queue", "keys": "!keys",
@@ -3120,7 +3375,11 @@ TG_SLASH = {"ctl": "!ctl", "topics": "!status", "sessions": "!sessions",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
             "spendcap": "!spendcap", "tmstats": "!stats"}
-TG_DESC = {"ctl": "button panel for this session", "topics": "every topic and its state",
+TG_DESC = {"ctl": "button panel for this session",
+           "vibe": "1-tap super-intent cockpit (build, goal, race, teleport, harvest, wrapped)",
+           "teleport": "package live context (.nightmux/HANDOFF.md) & switch agents mid-thought",
+           "harvest": "burn unused 5-hour quota window capacity before reset on backlog tasks",
+           "topics": "every topic and its state",
            "sessions": "list tmux sessions", "pane": "dump the pane [lines]",
            "git": "status + last commits", "diff": "unstaged diff",
            "get": "upload a file from the session's cwd", "queue": "held prompts [clear|now]",
@@ -4187,6 +4446,7 @@ WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "
               "!errors",   # can publish a port to the internet
               "!issues", "!issue",   # sets the agent to work on an issue
               "!apk", "!android",    # builds, installs on a phone
+              "!teleport", "!harvest",  # switches agent / queues backlog tasks
               "!watch")    # can merge a pull request
 
 
@@ -4243,6 +4503,7 @@ HELP = [
         "!bind <session> | !unbind | !sessions | !kill",
         "!resume [agent] / !restore = relaunch this topic's dir with --continue",
         "!failover <agent> = out of usage? hand the held work to another agent now",
+        "!teleport [<agent>] [prompt] = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought",
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
         "!update [agent] = run each agent's own updater · !version",
@@ -4254,6 +4515,7 @@ HELP = [
     ("talk", "💬 Talking to the agent", [
         "anything else, and /slash commands -> typed into the agent",
         "photo/file/voice -> saved, path typed in (voice is transcribed)",
+        "!vibe = 1-tap Super-Intent cockpit (Build, Goal, Race, Teleport, Harvest, Wrapped)",
         "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode",
         "!keys <tmux keys> | !raw <text> (types even with a menu open)",
         "!model <name> | !effort <low|medium|high>",
@@ -4301,6 +4563,7 @@ HELP = [
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
         "!autocompact park <45m|off> = compact sessions idle that long over 100k (default 45m) · !idlectx <pct|off>",
@@ -4350,6 +4613,26 @@ HELP = [
         "!version = build, python, and which hooks are wired",
     ]),
 ]
+
+
+def vibe_cmd(cfg, state, topic, sess):
+    """!vibe: 1-tap mobile Super-Intent Action Bar consolidating the 70+ commands."""
+    ag = (cfg.get("started") or {}).get(topic) or default_agent(cfg)
+    st = (state.get(sess) or {}) if sess else {}
+    u = usage_line(cfg, st.get("snap"), sep=" · ") if st.get("snap") else "no snapshot yet"
+    pct, at = harvest_window(state)
+    hw = f" · 5h reset in {left(at - time.time())}" if pct is not None and at and at > time.time() else ""
+    msg = (f"⚡ nightmux vibe cockpit · {sess or 'unbound'} ({ag})\n"
+           f"📊 {u}{hw}\n\n"
+           "Pick a super-intent below, or just type naturally:")
+    rows = [
+        [("🧬 Teleport Context", "!teleport"), ("🌾 Quota Harvest", "!harvest")],
+        [("🎯 Goal Test Loop", "!goal"), ("⚡ Agent Race", "!race")],
+        [("🎁 Wrapped Card", "!wrapped"), ("📸 App Screenshot", "!shot")],
+        [("🎛 Control Panel", "!ctl"), ("↩️ Undo Last Turn", "!undo")],
+    ]
+    send(cfg, topic, msg, mode="plain", buttons=kb(rows))
+    return ""
 
 
 def help_text(cfg, arg=""):
@@ -4553,6 +4836,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return ("usage: !failover <agent> — hand a limit-held topic to another "
                     "agent now · installed: " + ", ".join(installed_agents(cfg)))
         return failover(cfg, state, lock, topic, arg.split()[0].lower())
+    if cmd == "!teleport":
+        return teleport_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!harvest":
+        return harvest_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!vibe":
+        return vibe_cmd(cfg, state, topic, sess)
     if cmd == "!help":
         text, rows = help_text(cfg, arg)
         if rows:
@@ -6930,10 +7219,12 @@ def reel_start(cfg, topic, hours):
                 send(cfg, topic, f"🌙 no reel: {err}", mode="plain")
                 return
             cap = [f"🌙 the last {hours}h · {name}"] + reel_caption(cfg, since)
+            glink = upload_media(data, "gif")
+            rtext = "My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name]) + f" — run by nightmux {REPO_URL}"
             send_file(cfg, topic, "night.gif", data, caption="\n".join(cap),
                       kind="animation", buttons=kb([[("🐦 Share on X", tweet_url(
-                          "My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name])
-                          + f" — run by nightmux {REPO_URL} #ClaudeCode\n" + upload_media(data, "gif"))), ("👽 Reddit (attach GIF!)", reddit_url("My AI agents worked the night shift: " + "; ".join(cap[1:3] or [name]) + f" — run by nightmux {REPO_URL}"))]]))
+                          rtext + " #ClaudeCode\n" + glink)),
+                          ("👽 Reddit", reddit_url(rtext, glink))]]))
         finally:
             _reel["busy"] = False
     threading.Thread(target=go, daemon=True).start()
@@ -7023,6 +7314,9 @@ def sav_turn(cfg, st):
 def saved_report():
     d = sav_data()
     days = max(1, (time.time() - d.get("since", time.time())) / 86400)
+    extra = (f"\n• {d.get('teleports', 0)} context teleports, "
+             f"{d.get('harvested', 0)} quota windows harvested"
+             if d.get("teleports") or d.get("harvested") else "")
     return (f"💰 since {time.strftime('%b %d', time.localtime(d.get('since', time.time())))} "
             f"({days:.0f}d)\n"
             f"• {_k(d.get('tokens', 0))} tokens of context not re-read "
@@ -7034,14 +7328,21 @@ def saved_report():
             f"• {d.get('resumes', 0)} queues resumed after a usage limit, "
             f"{d.get('failovers', 0)} hand-offs\n"
             f"• {d.get('greens', 0)} !goal checks turned green, {d.get('loops', 0)} loops caught, "
-            f"{d.get('lint', 0)} vague prompts held")
+            f"{d.get('lint', 0)} vague prompts held" + extra)
 
 
 def tweet_url(text):
     return "https://x.com/intent/post?text=" + urllib.parse.quote(text)
 
-def reddit_url(text):
-    return "https://www.reddit.com/submit?title=" + urllib.parse.quote("My AI coding agents worked the night shift!") + "&text=" + urllib.parse.quote(text)
+
+def reddit_url(text, url=""):
+    if url:
+        return ("https://www.reddit.com/submit?title="
+                + urllib.parse.quote(text[:280], safe="")
+                + "&url=" + urllib.parse.quote(url, safe=""))
+    return ("https://www.reddit.com/submit?title="
+            + urllib.parse.quote("My AI coding agents worked the night shift!", safe="")
+            + "&text=" + urllib.parse.quote(text, safe=""))
 
 
 WRAPPED_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
@@ -7246,29 +7547,195 @@ def wrapped_page(days, w, share=False):
 
 
 def upload_media(data, ext="png"):
-    import urllib.request, urllib.parse, uuid, json
+    import urllib.request, uuid
     boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-    filename_png = f"image_{uuid.uuid4().hex[:8]}.{ext}"
-    body_png = (f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="files[]"; filename="{filename_png}"\r\n\r\n').encode() + data + (f"\r\n--{boundary}--\r\n").encode()
-    req_png = urllib.request.Request("https://uguu.se/upload.php", data=body_png, headers={
-        "Content-Type": f"multipart/form-data; boundary={boundary}"
+    fname = f"nightmux_{uuid.uuid4().hex[:8]}.{ext}"
+    body = (f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files[]"; filename="{fname}"\r\n\r\n').encode() + data + (f"\r\n--{boundary}--\r\n").encode()
+    req = urllib.request.Request("https://uguu.se/upload.php", data=body, headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "nightmux/1.0",
     })
     try:
-        res = urllib.request.urlopen(req_png, timeout=15).read().decode().strip()
-        png_url = json.loads(res)["files"][0]["url"]
+        res = urllib.request.urlopen(req, timeout=15).read().decode().strip()
+        url = json.loads(res)["files"][0]["url"]
+        if url:
+            return url
     except Exception:
-        return ""
-        
-    md = f"![Nightmux Wrapped]({png_url})\n\nMy AI coding agents run by [nightmux](https://github.com/mmr710/nightmux)."
-    req_html = urllib.request.Request("https://rentry.co/api/new", data=urllib.parse.urlencode({"text": md}).encode(), headers={
-        "Content-Type": "application/x-www-form-urlencoded"
-    })
+        pass
+    # Fallback to litterbox.catbox.moe (72h ephemeral image host)
+    body_cb = (f"--{boundary}\r\n"
+               'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
+               f"--{boundary}\r\n"
+               'Content-Disposition: form-data; name="time"\r\n\r\n72h\r\n'
+               f"--{boundary}\r\n"
+               f'Content-Disposition: form-data; name="fileToUpload"; filename="{fname}"\r\n\r\n').encode() + data + (f"\r\n--{boundary}--\r\n").encode()
+    req_cb = urllib.request.Request(
+        "https://litterbox.catbox.moe/resources/internals/api.php", data=body_cb,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "nightmux/1.0"})
     try:
-        url = urllib.request.urlopen(req_html, timeout=15).read().decode().strip()
-        return json.loads(url).get("url", "")
+        url = urllib.request.urlopen(req_cb, timeout=15).read().decode().strip()
+        return url if url.startswith("https://") else ""
     except Exception:
         return ""
+
+
+def share_card_svg(cfg, q=None):
+    """Dynamic 1200x630 SVG OpenGraph social card rendered in <1ms with zero browser deps."""
+    q = q or {}
+    g = lambda k, d="": (q.get(k) or [d])[0] if isinstance(q.get(k), list) else (q.get(k) or d)
+    days = int(g("days", "30")) if str(g("days", "30")).isdigit() else 30
+    if not g("tokens"):
+        w = wrapped_data(cfg, days)
+        cells = w.get("cells") or []
+        ag_str = " · ".join(w.get("agents") or ["claude", "codex", "agy"])
+    else:
+        cells = [(g("tokens", "0"), "TOKENS CRUNCHED"),
+                 (g("saved", "0%"), "SAVED FROM ABYSS"),
+                 (g("lighter", "0"), "SMART ROUTING"),
+                 (g("prompts", "0"), "VIBE DIRECTIVES"),
+                 (g("repos", "1"), "REPOS DOMINATED"),
+                 (g("night", "0"), "GHOST CODING TURNS")]
+        ag_str = g("agents", "claude · codex · agy")
+    e = html.escape
+    boxes = []
+    for idx, (val, lbl) in enumerate((cells or [("0", "TURNS")])[:6]):
+        col, row = idx % 3, idx // 3
+        x, y = 60 + col * 368, 175 + row * 170
+        boxes.append(
+            f'<g transform="translate({x},{y})">'
+            '<rect width="344" height="145" rx="20" fill="#121624" stroke="#28324e" stroke-width="1.5"/>'
+            f'<text x="28" y="72" fill="#3fb950" font-family="ui-monospace,Menlo,monospace" font-size="44" font-weight="800">{e(str(val))}</text>'
+            f'<text x="28" y="114" fill="#8b949e" font-family="system-ui,sans-serif" font-size="16" font-weight="700" letter-spacing="1.5">{e(str(lbl)[:26])}</text>'
+            '</g>'
+        )
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">'
+        '<defs>'
+        '<linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">'
+        '<stop offset="0%" stop-color="#090c15"/><stop offset="55%" stop-color="#0d111d"/><stop offset="100%" stop-color="#130f24"/>'
+        '</linearGradient>'
+        '<linearGradient id="acc" x1="0%" y1="0%" x2="100%" y2="0%">'
+        '<stop offset="0%" stop-color="#a371f7"/><stop offset="100%" stop-color="#388bfd"/>'
+        '</linearGradient>'
+        '</defs>'
+        '<rect width="1200" height="630" fill="url(#bg)"/>'
+        '<circle cx="1060" cy="90" r="240" fill="#a371f7" opacity="0.12"/>'
+        '<circle cx="140" cy="560" r="220" fill="#3fb950" opacity="0.10"/>'
+        '<rect x="36" y="28" width="1128" height="574" rx="28" fill="none" stroke="url(#acc)" stroke-width="2" opacity="0.45"/>'
+        '<text x="64" y="96" fill="#ffffff" font-family="system-ui,sans-serif" font-size="40" font-weight="900" letter-spacing="-1">🌙 NIGHTMUX VIBE RECAP</text>'
+        f'<text x="64" y="134" fill="#a371f7" font-family="ui-monospace,Menlo,monospace" font-size="19" font-weight="700" letter-spacing="2">LAST {days} DAYS · {e(ag_str.upper())}</text>'
+        + "".join(boxes) +
+        '<text x="64" y="566" fill="#c9d1d9" font-family="system-ui,sans-serif" font-size="20" font-weight="700">Your AI coding agents keep working while you sleep</text>'
+        '<text x="1136" y="566" text-anchor="end" fill="#58a6ff" font-family="ui-monospace,Menlo,monospace" font-size="20" font-weight="700">github.com/mmr710/nightmux</text>'
+        '</svg>'
+    )
+
+
+def share_page_html(cfg, q=None, base=""):
+    """Interactive OpenGraph Share Studio with Twitter/Reddit unfurling + 1-tap Web Share API."""
+    q = q or {}
+    g = lambda k, d="": (q.get(k) or [d])[0] if isinstance(q.get(k), list) else (q.get(k) or d)
+    days = int(g("days", "30")) if str(g("days", "30")).isdigit() else 30
+    w = wrapped_data(cfg, days)
+    cells = w.get("cells") or [("0", "TURNS")]
+    top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+    qs = urllib.parse.urlencode({
+        "days": days,
+        "tokens": cells[0][0] if len(cells) > 0 else "0",
+        "saved": cells[1][0] if len(cells) > 1 else "0%",
+        "lighter": cells[2][0] if len(cells) > 2 else "0",
+        "prompts": cells[3][0] if len(cells) > 3 else "0",
+        "repos": len(w.get("projects") or []),
+        "agents": " · ".join(w.get("agents") or ["claude"]),
+    })
+    e = html.escape
+    card_url = (base.rstrip("/") + f"/share/card.svg?{qs}") if base else f"/share/card.svg?{qs}"
+    page_url = (base.rstrip("/") + f"/share?{qs}") if base else REPO_URL
+    title = f"My AI Coding Crew ({days}d Recap) · nightmux"
+    desc = f"{top} — autonomous overnight vibe coding with nightmux."
+    tweet = f"My AI coding agents, last {days} days: {top}. Run by nightmux {page_url} #ClaudeCode #vibecoding"
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(title)}</title>
+<meta property="og:type" content="website">
+<meta property="og:title" content="{e(title)}">
+<meta property="og:description" content="{e(desc)}">
+<meta property="og:image" content="{e(card_url)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{e(title)}">
+<meta name="twitter:description" content="{e(desc)}">
+<meta name="twitter:image" content="{e(card_url)}">
+<style>
+:root{{--bg:#07090f;--card:#111625;--fg:#e6edf3;--mut:#8b949e;--acc:#a371f7;--grn:#3fb950}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;background:radial-gradient(circle at 80% 0%,rgba(163,113,247,.18),transparent 55%),var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;align-items:center;padding:28px 16px}}
+main{{max-width:860px;width:100%;display:flex;flex-direction:column;gap:20px}}
+.top{{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}}
+.top h1{{margin:0;font-size:22px;font-weight:800}}
+.nav a{{color:var(--mut);text-decoration:none;margin-left:14px;font-weight:600}}
+.preview{{background:var(--card);border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.5)}}
+.preview img{{width:100%;height:auto;border-radius:12px;display:block}}
+.actions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}}
+button,a.btn{{appearance:none;border:1px solid rgba(255,255,255,.12);background:#182036;color:#fff;font:600 15px/1.2 system-ui,sans-serif;padding:14px 18px;border-radius:12px;cursor:pointer;text-align:center;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:transform .12s,background .15s}}
+button:hover,a.btn:hover{{transform:translateY(-1px);background:#222d4a}}
+button.pri{{background:linear-gradient(135deg,#a371f7,#388bfd);border:none;font-weight:700}}
+.status{{color:var(--grn);font-family:ui-monospace,monospace;font-size:13px;min-height:20px;text-align:center}}
+</style></head><body>
+<main>
+  <div class="top">
+    <h1>🎁 Nightmux Social Share Studio</h1>
+    <nav class="nav"><a href="/">Dashboard</a><a href="/office">Office</a><a href="/chat">Chat</a></nav>
+  </div>
+  <div class="preview"><img id="cardImg" src="{e(card_url)}" alt="Nightmux Recap Card" crossorigin="anonymous"></div>
+  <div class="actions">
+    <button class="pri" onclick="nativeShare()">📱 1-Tap Share (with Photo)</button>
+    <button onclick="copyImage()">📋 Copy Image + Open X</button>
+    <a class="btn" id="xBtn" href="{e(tweet_url(tweet))}" target="_blank" rel="noopener">🐦 Share on X</a>
+    <a class="btn" id="rdBtn" href="{e(reddit_url(desc, page_url))}" target="_blank" rel="noopener">👽 Share on Reddit</a>
+  </div>
+  <div class="status" id="st">Tip: "1-Tap Share" attaches the high-res PNG directly on mobile &amp; modern browsers.</div>
+</main>
+<script>
+const TWEET = {json.dumps(tweet)};
+const X_URL = {json.dumps(tweet_url(tweet))};
+async function svgToPngBlob() {{
+  const img = document.getElementById('cardImg');
+  const c = document.createElement('canvas');
+  c.width = 1200; c.height = 630;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0, 1200, 630);
+  return new Promise(res => c.toBlob(res, 'image/png'));
+}}
+async function nativeShare() {{
+  const st = document.getElementById('st');
+  try {{
+    const blob = await svgToPngBlob();
+    const file = new File([blob], 'nightmux-wrapped.png', {{ type: 'image/png' }});
+    if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
+      await navigator.share({{ title: 'Nightmux Vibe Recap', text: TWEET, files: [file] }});
+      st.textContent = '✅ Shared with image attached!';
+      return;
+    }}
+  }} catch (e) {{
+    if (e && e.name === 'AbortError') return;
+  }}
+  await copyImage();
+}}
+async function copyImage() {{
+  const st = document.getElementById('st');
+  try {{
+    const blob = await svgToPngBlob();
+    await navigator.clipboard.write([new ClipboardItem({{ 'image/png': blob }})]);
+    st.textContent = '✅ Card PNG copied to clipboard! Press Ctrl+V / Paste in X or Reddit.';
+    setTimeout(() => window.open(X_URL, '_blank'), 450);
+  }} catch (e) {{
+    window.open(X_URL, '_blank');
+  }}
+}}
+</script></body></html>"""
 
 
 def wrapped_cmd(cfg, topic, arg):
@@ -7289,16 +7756,15 @@ def wrapped_cmd(cfg, topic, arg):
         cells = w["cells"]
         top = ", ".join(f"{n} {l}" for n, l in cells[:4])
         if share:
-            # Only now, on a tap: the card goes to uguu.se + rentry.co so the
-            # post can carry it. Never on a plain !wrapped — that is private.
+            # Only now, on a tap: the card goes to uguu.se (or catbox fallback) so
+            # the post carries the actual image URL. Never on a plain !wrapped.
             link = upload_media(pub, "png")
+            rtext = f"My AI coding agents, last {days} days: {top}. Run by nightmux {REPO_URL}"
             send(cfg, topic, "📤 card uploaded" + (f": {link}" if link else
                  " — failed, attach wrapped-share.png yourself"), mode="plain",
                  buttons=kb([[("🐦 Share on X", tweet_url(
-                     f"My AI coding agents, last {days} days: {top}. Run by nightmux "
-                     f"{REPO_URL} #ClaudeCode #vibecoding\n" + link)),
-                     ("👽 Reddit", reddit_url(f"My AI coding agents, last {days} days: "
-                                              f"{top}. Run by nightmux {REPO_URL}"))]]))
+                     f"{rtext} #ClaudeCode #vibecoding" + (f"\n{link}" if link else ""))),
+                     ("👽 Reddit", reddit_url(rtext, link))]]))
             return
         send_file(cfg, topic, "wrapped.png", mine, kind="photo",
                   caption=f"🔒 your last {days} days with nightmux (project names: keep this one)\n"
@@ -7306,7 +7772,7 @@ def wrapped_cmd(cfg, topic, arg):
                   + "\n• tokens by agent: " + ", ".join(f"{a} {_k(n)}" for a, n, _ in w["split"] if n))
         send_file(cfg, topic, "wrapped-share.png", pub, kind="photo",
                   caption="📤 to share: projects shown as counts only — "
-                  "tapping share uploads this card (uguu.se + rentry.co) for the link",
+                  "tapping share uploads this card for X and Reddit",
                   buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
     return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
@@ -11509,7 +11975,7 @@ h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: 
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
-<nav class="top"><a href="/office">🏢 office</a><a href="/app">📱 app</a></nav>
+<nav class="top"><a href="/office">🏢 office</a><a href="/share">🎁 share</a><a href="/app">📱 app</a></nav>
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div><div id="toast"></div>
@@ -12010,7 +12476,9 @@ form button { background: #1f6feb; border: 0; color: #fff; border-radius: 8px; p
 .empty { color: #6b7280; text-align: center; margin-top: 30vh; }
 </style></head><body>
 <header><a href="/">←</a><span class="dot" id="dot"></span><b id="name">…</b><span class="meta" id="meta"></span>
-<a href="#" id="notify" style="margin-left:auto">🔔</a></header>
+<a href="#" onclick="post('!vibe');setTimeout(poll,400);return false" title="Vibe Cockpit" style="margin-left:auto">⚡ vibe</a>
+<a href="/share" title="Share Studio">🎁</a>
+<a href="#" id="notify">🔔</a></header>
 <div id="log"><p class="empty">nothing here yet — what nightmux says in this topic shows up here</p></div>
 <div id="typing"></div>
 <form id="f"><textarea id="box" rows="1" placeholder="message the agent…" enterkeyhint="send"></textarea><button>send</button></form>
@@ -13493,6 +13961,16 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
         if self.path in ("/", ""):
             return self.reply(inject_telemetry(self.server.cfg, DASHBOARD_HTML), "text/html; charset=utf-8")
+        if self.path.startswith("/share/card.svg"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            return self.reply(share_card_svg(self.server.cfg, q), "image/svg+xml")
+        if self.path == "/share" or self.path.startswith("/share?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            host = self.headers.get("Host") or ""
+            proto = self.headers.get("X-Forwarded-Proto") or "http"
+            base = (public_base(self.server.cfg) or (f"{proto}://{host}" if host else ""))
+            return self.reply(inject_telemetry(self.server.cfg, share_page_html(self.server.cfg, q, base)),
+                              "text/html; charset=utf-8")
         if self.path == "/api/metrics":
             cfg = self.server.cfg
             with self.server.lock:
@@ -18475,6 +18953,51 @@ def selfcheck():
         raise AssertionError("woke a remote topic locally")
     except ValueError as e_:
         assert "vps2" in str(e_), e_
+
+    # !teleport, !harvest, !vibe, and OpenGraph Share Studio (/share, /share/card.svg)
+    with tempfile.TemporaryDirectory() as tdir:
+        os.makedirs(os.path.join(tdir, ".git"), exist_ok=True)
+        tcfg = {"topics": {"11": "tp"}, "started": {"11": "claude"}, "dirs": {"11": tdir},
+                "agents": {"claude": ["/bin/sh", ""], "codex": ["/bin/sh", ""]}}
+        tstate = {"tp": {"last": "refactor auth middleware", "mode": "idle",
+                         "changed": time.time() - 300,
+                         "snap": {"ts": time.time(),
+                                  "five_hour": {"used_percentage": 52,
+                                                "resets_at": time.time() + 1800}}}}
+        tlk = threading.Lock()
+        tsent = []
+        with stubbed(switch_agent=lambda c, s, l, t, k: (c["topics"].__setitem__(t, "tp-" + k)
+                                                         or c["started"].__setitem__(t, k)
+                                                         or f"→ {k}"),
+                     has_session=lambda s: True, pane=lambda s: ["✓ tests pass"],
+                     save_queue=lambda s: None, save_cfg=lambda c: None,
+                     sav_add=lambda k, n=1: None,
+                     send=lambda c, t, x, mode="mono", buttons=None, quiet=False: tsent.append((x, buttons))):
+            hpath, hbody = teleport_packet(tcfg, tstate, "11", "tp")
+            assert hpath and os.path.isfile(hpath) and "refactor auth middleware" in hbody, hbody
+            out_tp = teleport_cmd(tcfg, tstate, tlk, "11", "tp", "codex finish edge cases")
+            assert "context teleported from claude → codex" in out_tp, out_tp
+            assert "finish edge cases" in tstate["tp-codex"]["queue"][0], tstate["tp-codex"]
+            # !harvest add, status, and harvest_tick
+            h_add = harvest_cmd(tcfg, tstate, tlk, "11", "tp-codex", "add write missing auth tests")
+            assert "queued harvest task #1" in h_add, h_add
+            h_cap = harvest_cmd(tcfg, tstate, tlk, "11", "tp-codex", "ceiling 80")
+            assert "80%" in h_cap, h_cap
+            tstate["tp-codex"] = {"mode": "idle", "changed": time.time() - 300, "queue": []}
+            harvest_tick(tcfg, tstate, tlk)
+            assert tstate["tp-codex"]["queue"] == ["write missing auth tests"], tstate["tp-codex"]
+            assert any("quota harvest" in m for m, _ in tsent), tsent
+            vibe_cmd(tcfg, tstate, "11", "tp-codex")
+            assert any("vibe cockpit" in m for m, _ in tsent), tsent
+        svg_ = share_card_svg(tcfg, {"tokens": ["14.2M"], "saved": ["41%"], "prompts": ["128"]})
+        assert "<svg" in svg_ and "14.2M" in svg_ and "41%" in svg_, svg_[:200]
+        with stubbed(wrapped_data=lambda c, d: {"cells": [("14.2M", "TOKENS CRUNCHED")],
+                                                "agents": ["claude"], "projects": [("a", 1)],
+                                                "split": [], "hours": [0] * 24, "insights": []}):
+            sp_ = share_page_html(tcfg, {"days": ["30"]}, "https://demo.example.com")
+            assert 'property="og:image"' in sp_ and 'name="twitter:card"' in sp_, sp_[:400]
+            assert "navigator.canShare" in sp_ and "demo.example.com/share/card.svg" in sp_, sp_[:600]
+        assert "url=https%3A%2F%2Fd.uguu.se%2Fx.png" in reddit_url("my recap", "https://d.uguu.se/x.png")
     print("selfcheck ok")
 
 

@@ -190,14 +190,26 @@ have" is higher here than any library would buy. CI enforces it.
 hand-editable — `!reload` exists precisely so you can fix the config with an
 editor over SSH.
 
-**No web UI.** It would be a second surface to secure, and Telegram already
-provides auth, push notification, file transfer, and a client on every platform.
+**Local/Tailnet Web UI, not a hosted relay.** The built-in `http.server` serves
+the dashboard (`/`), mobile chat PWA (`/chat`), pixel-art office (`/office`),
+live terminal (`/term/<topic>`), and OpenGraph social share cards (`/share`,
+`/share/card.svg`) directly from `127.0.0.1` or the user's tailnet. Only
+`/public/<token>` and `/share` are safe for public exposure (`!public expose`).
 
-**Rejected:** a relay server (adds a machine that can read everything), an
-`asyncio` rewrite (three threads and a queue are smaller than the reasons to),
-per-image cost warnings (`!ctx` already surfaces them), and systemd sandboxing
-(it breaks access to the user's tmux socket for marginal gain — the daemon can
-type into Claude anyway, so confining it is theatre).
+**Context Teleportation (`!teleport`) & Quota Arbitrage (`!harvest`).** When a
+session hits its rate limit and fails over (or when a user invokes `!teleport`),
+nightmux synthesises a `.nightmux/HANDOFF.md` packet (recent turns, tool calls,
+`git status/diff`, and `.nightmux/memory.md`) so the next agent continues
+mid-thought without re-reading the repository. Conversely, when a 5-hour quota
+window is approaching reset with unused capacity below the safety ceiling,
+`harvest_tick` drains queued low-priority maintenance prompts (`!harvest`) so
+paid subscription windows are never wasted.
+
+**Rejected:** a central relay server (adds a third-party machine that can read
+everything), an `asyncio` rewrite (threads and a queue are smaller than the
+reasons to), per-image cost warnings (`!ctx` already surfaces them), and systemd
+sandboxing (it breaks access to the user's tmux socket for marginal gain — the
+daemon can type into Claude anyway, so confining it is theatre).
 
 **No timezone library.** Python 3.8 has no `zoneinfo`, so nightmux scopes `TZ` and
 calls `time.tzset()`. A fixed UTC offset would silently go an hour wrong for half

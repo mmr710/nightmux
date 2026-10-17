@@ -15,6 +15,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!bind <session>` | `!unbind` | `!sessions` | `!kill`
 - `!resume [agent]` / `!restore` = relaunch this topic's dir with --continue
 - `!failover <agent>` = out of usage? hand the held work to another agent now
+- `!teleport [<agent>] [prompt]` = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought
 - `!server [peer|local]` = which machine runs this topic, or move it
 - `!worktrees` = git worktrees of this repo, and who is in each
 - `!update [agent]` = run each agent's own updater · `!version`
@@ -27,6 +28,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 
 - anything else, and `/slash` commands -> typed into the agent
 - photo/file/voice -> saved, path typed in (voice is transcribed)
+- `!vibe` = 1-tap Super-Intent cockpit (Build, Goal, Race, Teleport, Harvest, Wrapped)
 - `!1`..`!9` menu pick | `!y` `!n` `!esc` `!int` `!enter` `!up` `!down` `!tab` `!mode`
 - `!keys <tmux keys>` | `!raw <text>` (types even with a menu open)
 - `!model <name>` | `!effort <low|medium|high>`
@@ -71,6 +73,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 `!help tokens`
 
 - `!usage` | `!ctx` | `!cost [days]` | `!forecast` = when each window fills
+- `!harvest [add <task>|now|ceiling 85|window 60|clear|on|off]` = burn unused 5-hour quota window capacity before reset
 - `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k; Claude also compacts mid-turn there) · `!autocompact` park &lt;45m|off> = compact sessions idle that long over 100k (default 45m) · `!idlectx <pct|off>`
 - `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
