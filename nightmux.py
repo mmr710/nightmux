@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3192,7 +3193,9 @@ def watcher(cfg, state, lock):
                         try:
                             fut.result()
                         except Exception as e:
-                            print(f"watch {futures[fut]}: {e}", file=sys.stderr)
+                            tb = traceback.extract_tb(e.__traceback__)[-1]
+                            print(f"watch {futures[fut]}: {e} "
+                                  f"({tb.name}:{tb.lineno})", file=sys.stderr)
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
