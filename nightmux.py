@@ -2630,6 +2630,54 @@ def at_epoch(cfg, when, now=None):
     return (at + 86400 if at <= local else at) - shift
 
 
+def cron_field(f, lo, hi):
+    """One cron field -> set of ints. *, */n, a-b, a-b/n, a,b. ValueError if malformed."""
+    out = set()
+    for part in f.split(","):
+        rng, _, step = part.partition("/")
+        step = int(step) if step else 1
+        if rng == "*":
+            a, b = lo, hi
+        elif "-" in rng:
+            a, b = (int(x) for x in rng.split("-"))
+        else:
+            a = b = int(rng)
+            if step > 1 and "/" in part:
+                b = hi
+        if step < 1 or a < lo or b > hi or a > b:
+            raise ValueError(part)
+        out.update(range(a, b + 1, step))
+    return out
+
+
+def cron_parse(expr):
+    """'m h dom mon dow' -> (minutes, hours, doms, months, dows) sets; dow 0 or 7 is Sunday."""
+    f = expr.split()
+    if len(f) != 5:
+        raise ValueError("need 5 fields")
+    m, h, dom, mon, dow = (cron_field(x, lo, hi) for x, (lo, hi) in
+                           zip(f, ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))))
+    return m, h, dom, mon, {d % 7 for d in dow}, f[2] == "*", f[4] == "*"
+
+
+def cron_next(cfg, expr, now=None):
+    """The next minute after `now` that matches, in the config's timezone; None if none within 40 days."""
+    m, h, dom, mon, dow, dom_any, dow_any = cron_parse(expr)
+    now = now or time.time()
+    off = cfg.get("tz_offset")
+    shift = tz_shift(off, now) if isinstance(off, str) else (off or 0) * 3600
+    t = int(now) + shift
+    t += 60 - t % 60
+    for _ in range(40 * 24 * 60):
+        g = time.gmtime(t)
+        d1, d2 = g.tm_mday in dom, (g.tm_wday + 1) % 7 in dow
+        day_ok = (d1 or d2) if not dom_any and not dow_any else (d1 and d2)   # cron: either, when both given
+        if g.tm_min in m and g.tm_hour in h and g.tm_mon in mon and day_ok:
+            return t - shift
+        t += 60
+    return None
+
+
 def due(cfg, state, topic, sess):
     """Move scheduled prompts onto the queue when their time comes.
 
@@ -2673,7 +2721,12 @@ def due(cfg, state, topic, sess):
             st.setdefault("queue", []).append(text)
             if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
                 fired.append(job)
-        if job.get("every"):
+        if job.get("cron"):
+            nxt = cron_next(cfg, job["cron"], now)
+            if nxt:
+                job["at"] = nxt
+                keep.append(job)
+        elif job.get("every"):
             # From now, not from when it was due: a daemon that was off overnight
             # must not wake up and fire six hours of backlog in one go.
             job["at"] = now + job["every"]
@@ -4462,7 +4515,7 @@ WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover",
+              "!failover", "!cron",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
@@ -4561,6 +4614,7 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!cron <m h dom mon dow> <prompt> = recurring prompt on a crontab schedule (see !sched)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -5355,6 +5409,20 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return (f"⏰ {'every ' + when if secs else 'at ' + clock(cfg, at)}"
                 f" (first in {left(at - now)})\n{prompt.splitlines()[0][:70]}\n"
                 "!sched to list, !sched clear to drop")
+    if cmd == "!cron":
+        expr, prompt = " ".join(arg.split()[:5]), " ".join(arg.split()[5:])
+        try:
+            at = cron_next(cfg, expr, time.time())
+        except ValueError:
+            at = None
+        if not prompt or at is None:
+            return ("usage: !cron <min hour dom mon dow> <prompt>\n"
+                    "e.g.  !cron 0 9 * * 1-5 run the tests and summarize")
+        st = state.setdefault(sess, {})
+        st.setdefault("sched", []).append({"at": at, "cron": expr, "text": prompt})
+        save_queue(state)
+        return (f"\u23f0 cron '{expr}' (first {clock(cfg, at)}, in {left(at - time.time())})\n"
+                f"{prompt.splitlines()[0][:70]}\n!sched to list, !sched clear to drop")
     if cmd == "!sched":
         jobs = st.get("sched") or []
         if arg == "clear":
@@ -5365,7 +5433,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "nothing scheduled · !at 03:00 <prompt> | !every 4h <prompt>"
         return "\n".join(
             f"{i + 1}. {clock(cfg, j['at'])} (in {left(j['at'] - now)})"
-            + (f" every {left(j['every'])}" if j.get("every") else "")
+            + (f" every {left(j['every'])}" if j.get("every") else f" cron {j['cron']}" if j.get("cron") else "")
             + f" · {j['text'].splitlines()[0][:50]}" for i, j in enumerate(jobs))
     if cmd == "!raw":  # deliberate override of the menu guard below
         inject(sess, arg)
@@ -17103,6 +17171,18 @@ def selfcheck():
     # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
     # and a busy pane exactly as a typed one does.
     assert parse_every("4h") == 14400 and parse_every("1d 6h") == 108000
+    _c0 = 1700000000 - 1700000000 % 86400   # a UTC midnight (a Tuesday)
+    assert cron_next({}, "30 9 * * *", _c0) == _c0 + 9 * 3600 + 1800
+    assert cron_next({}, "0 9 * * 1", _c0) == _c0 + 6 * 86400 + 9 * 3600        # next Monday
+    assert cron_next({}, "*/15 * * * *", _c0 + 60) == _c0 + 900
+    assert cron_next({}, "0 0 31 2 *", _c0) is None
+    assert cron_next({"tz_offset": 2}, "0 9 * * *", _c0) == _c0 + 7 * 3600     # 09:00 at +2h
+    for _bad in ("* * * *", "61 * * * *", "a b c d e"):
+        try:
+            cron_next({}, _bad, _c0)
+            raise AssertionError(_bad)
+        except ValueError:
+            pass
     assert parse_every("no duration here") == 0
 
     # !update: each installed agent's own updater, versions before and after.

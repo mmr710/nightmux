@@ -34,6 +34,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!model <name>` | `!effort <low|medium|high>`
 - `!p [name] [args]` = saved prompts as buttons (review, fix-tests, spec, explain, tidy, ship); `!p` save &lt;name> &lt;text>
 - `!autoyes <agent|off>` = answer that agent's permission menus for it
+- `!cron <m h dom mon dow> <prompt>` = recurring prompt on a crontab schedule (see `!sched`)
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
