@@ -1,0 +1,14 @@
+[Unit]
+Description=nightmux claim relay (hands managed-bot tokens over once)
+After=network-online.target
+
+[Service]
+# Put the manager bot's token in ~/.nightmux-relay.env (chmod 600):
+#   NIGHTMUX_MANAGER_TOKEN=<token of the manager bot from @BotFather>
+EnvironmentFile=%h/.nightmux-relay.env
+ExecStart=/usr/bin/python3 %h/nightmux-deploy/nightmux.py --relay
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

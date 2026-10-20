@@ -11949,6 +11949,81 @@ def migrate(paths=None):
                 print(f"migrated {old} -> {new}", flush=True)
 
 
+MANAGER_BOT = "Nightmux_bot"
+RELAY_URL = os.environ.get("NIGHTMUX_RELAY", "")   # public URL of `nightmux --relay`
+RELAY_TTL = 600
+
+
+def relay_serve(port=9191):
+    """The one hosted piece of the scan-to-create flow: `nightmux --relay`.
+
+    The manager bot's token can read every bot made through it, so it lives only
+    here (NIGHTMUX_MANAGER_TOKEN), never in the client. A user's new bot token
+    is held in memory for RELAY_TTL, handed over once to whoever names its
+    random username, and forgotten. Nothing is logged or written to disk.
+    """
+    mgr = {"token": os.environ.get("NIGHTMUX_MANAGER_TOKEN") or sys.exit("set NIGHTMUX_MANAGER_TOKEN")}
+    held, lock = {}, threading.Lock()      # username -> (token, expires)
+
+    def poll():
+        offset = None
+        while True:
+            r = api(mgr, "getUpdates", offset=offset, timeout=30,
+                    allowed_updates=json.dumps(["managed_bot"]))
+            if not r.get("ok"):
+                time.sleep(5)
+                continue
+            for upd in r.get("result") or []:
+                offset = upd["update_id"] + 1
+                bot = (upd.get("managed_bot") or {}).get("bot") or {}
+                tok = api(mgr, "getManagedBotToken", user_id=bot.get("id")).get("result")
+                if bot.get("username") and isinstance(tok, str):
+                    with lock:
+                        held[bot["username"].lower()] = (tok, time.time() + RELAY_TTL)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            name = (urllib.parse.parse_qs(u.query).get("u") or [""])[0].lower()
+            with lock:
+                for k in [k for k, v in held.items() if v[1] < time.time()]:
+                    del held[k]
+                hit = held.pop(name, None) if u.path == "/claim" else None
+            body = json.dumps({"token": hit[0]}).encode() if hit else b"{}"
+            self.send_response(200 if hit else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    threading.Thread(target=poll, daemon=True).start()
+    print(f"relay on :{port}", flush=True)
+    http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+
+
+def claim_managed_bot(relay, uname, timeout=300):
+    """Wait for the relay to hold the bot made through the QR; '' on timeout or Enter."""
+    import select
+    url = "%s/claim?u=%s" % (relay.rstrip("/"), uname)
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                return json.load(r).get("token") or ""
+        except (OSError, ValueError):
+            pass                     # 404 until the bot exists; a blip is just another try
+        try:
+            if select.select([sys.stdin], [], [], 3)[0]:
+                sys.stdin.readline()
+                return ""
+        except (OSError, ValueError):
+            time.sleep(3)
+    return ""
+
+
 def setup():
     """Interactive first run: token, group, allowlist, hooks, service."""
     migrate()
@@ -11958,13 +12033,22 @@ def setup():
         cfg = load_cfg()
     except (OSError, ValueError):
         cfg = {}
-    print("nightmux setup\n\n"
-          "1. Scan this with your phone (or open https://t.me/BotFather) -> /newbot, pick\n"
-          "   any name, and paste the token it gives you here. No Telegram? Press Enter:\n"
-          "   nightmux runs dashboard-only, and you can add a bot later.\n\n"
-          + qr_text("https://t.me/BotFather"))
-    token = input("   token%s: " % (" [enter to keep the saved one]"
-                                    if cfg.get("token") else "")).strip()
+    print("nightmux setup\n")
+    token = ""
+    if RELAY_URL and not cfg.get("token"):
+        uname = "nm" + secrets.token_hex(6) + "_bot"
+        link = f"https://t.me/newbot/{MANAGER_BOT}/{uname}?name=nightmux"
+        print("1. Scan this with your phone and tap Create: nightmux makes the bot and\n"
+              "   picks it up itself. Press Enter instead to paste a BotFather token.\n\n"
+              f"{qr_text(link)}\n   {link}\n   Waiting...")
+        token = claim_managed_bot(RELAY_URL, uname)
+    if not token:
+        print("1. Scan this with your phone (or open https://t.me/BotFather) -> /newbot, pick\n"
+              "   any name, and paste the token it gives you here. No Telegram? Press Enter:\n"
+              "   nightmux runs dashboard-only, and you can add a bot later.\n\n"
+              + qr_text("https://t.me/BotFather"))
+        token = input("   token%s: " % (" [enter to keep the saved one]"
+                                        if cfg.get("token") else "")).strip()
     cfg["token"] = token or cfg.get("token")
     if not cfg["token"]:
         if input("   no token — run dashboard-only, without Telegram? [Y/n] ").strip().lower() \
@@ -20252,6 +20336,8 @@ def cli():
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
+    elif "--relay" in sys.argv:
+        relay_serve()
     elif "--join" in sys.argv:
         i = sys.argv.index("--join")
         if i + 1 >= len(sys.argv):
