@@ -490,10 +490,11 @@ def sess_cwd(sess):
 
 
 SNAP_KEEP = 20  # nightmux/pre-* branches kept per repo; older ones are pruned here
+REDO_KEEP = 5    # nightmux/redo-* branches kept per repo
 
 
 def snapshot_repo(sess):
-    """Branch off whatever the worktree holds, right before every prompt.
+    """Branch off whatever the worktree holds, right before any prompt.
 
     `git stash create` builds a commit from the worktree without touching it —
     unlike `git stash`, nothing is popped off, so the session never sees its own
@@ -504,20 +505,27 @@ def snapshot_repo(sess):
     cwd = sess_cwd(sess)
     try:
         if not cwd or not os.path.isdir(cwd):
-            return
+            return None
         if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
-            return
+            return None
         sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
+        if not sha:
+            return None
         newest = tmux_git(cwd, "for-each-ref", "--sort=-creatordate", "--count=1",
                           "--format=%(refname:short)", "refs/heads/nightmux/pre-*")
-        if not sha or (newest and tmux_git(cwd, "rev-parse", sha + "^{tree}")
-                       == tmux_git(cwd, "rev-parse", newest + "^{tree}")):
-            return          # nothing changed since the last one: keep the history deep
-        name = "nightmux/pre-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        if newest and tmux_git(cwd, "rev-parse", sha + "^{tree}") \
+                == tmux_git(cwd, "rev-parse", newest + "^{tree}"):
+            return None     # nothing changed since the last one: keep the history deep
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        name = "nightmux/pre-" + ts
+        if tmux_git(cwd, "rev-parse", "--verify", f"refs/heads/{name}"):
+            name += f"-{secrets.token_hex(2)}"
         tmux_git(cwd, "branch", name, sha)
         prune_snapshots(cwd)
+        return name
     except Exception as e:
         print(f"snapshot {sess}: {e}", file=sys.stderr)
+        return None
 
 
 def prune_snapshots(cwd):
@@ -527,6 +535,109 @@ def prune_snapshots(cwd):
         "refs/heads/nightmux/pre-*").split("\n") if n.strip()]
     for old in names[SNAP_KEEP:]:
         tmux_git(cwd, "branch", "-D", old)
+
+
+def prune_redos(cwd):
+    """Keep only the last REDO_KEEP nightmux/redo-* branches for this repo."""
+    names = [n for n in tmux_git(
+        cwd, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
+        "refs/heads/nightmux/redo-*").split("\n") if n.strip()]
+    for old in names[REDO_KEEP:]:
+        tmux_git(cwd, "branch", "-D", old)
+
+
+def list_snapshots(sess):
+    """List available checkpoints for sess: ([(index, branch, date, summary), ...], has_redo)."""
+    cwd = sess_cwd(sess)
+    if not cwd or not os.path.isdir(cwd):
+        return [], False
+    if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+        return [], False
+    lines = [l for l in tmux_git(
+        cwd, "for-each-ref", "--sort=-creatordate",
+        "--format=%(refname:short)|%(creatordate:iso-strict)|%(subject)",
+        "refs/heads/nightmux/pre-*").split("\n") if l.strip()]
+    snapshots = []
+    for i, line in enumerate(lines, 1):
+        parts = line.split("|", 2)
+        bname = parts[0]
+        cdate = parts[1] if len(parts) > 1 else ""
+        csubj = parts[2] if len(parts) > 2 else ""
+        snapshots.append({
+            "index": i,
+            "branch": bname,
+            "date": cdate,
+            "summary": csubj or bname
+        })
+    redos = [l for l in tmux_git(
+        cwd, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
+        "refs/heads/nightmux/redo-*").split("\n") if l.strip()]
+    return snapshots, bool(redos)
+
+
+def undo_repo(sess, target="1"):
+    """Roll back worktree to a checkpoint, saving current state to redo-* first.
+
+    target can be:
+    - 'redo': restore to newest nightmux/redo-* branch
+    - '1', '2', etc.: 1-indexed checkpoint (1 = newest pre-*)
+    - branch name directly: 'nightmux/pre-...'
+    """
+    cwd = sess_cwd(sess)
+    if not cwd or not os.path.isdir(cwd):
+        return False, f"cannot find working directory for {sess}"
+    if tmux_git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
+        return False, f"{cwd} is not a git repository"
+
+    if str(target).strip().lower() == "redo":
+        redos = [l for l in tmux_git(
+            cwd, "for-each-ref", "--sort=-creatordate", "--format=%(refname:short)",
+            "refs/heads/nightmux/redo-*").split("\n") if l.strip()]
+        if not redos:
+            return False, "no redo checkpoints available"
+        target_ref = redos[0]
+        sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
+        if sha:
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            tmux_git(cwd, "branch", f"nightmux/pre-{ts}", sha)
+            prune_snapshots(cwd)
+        tmux_git(cwd, "checkout", target_ref, "--", ".")
+        return True, f"↺ redone to {target_ref}"
+
+    snapshots, has_redo = list_snapshots(sess)
+    if not snapshots:
+        return False, f"no snapshots in {cwd} · one is taken before every turn"
+
+    target_ref = None
+    target_str = str(target).strip()
+    if target_str.isdigit():
+        idx = int(target_str) - 1
+        if 0 <= idx < len(snapshots):
+            target_ref = snapshots[idx]["branch"]
+        else:
+            return False, f"checkpoint {target_str} out of range (1..{len(snapshots)})"
+    else:
+        for s in snapshots:
+            if s["branch"] == target_str or s["branch"] == f"nightmux/pre-{target_str}":
+                target_ref = s["branch"]
+                break
+        if not target_ref:
+            return False, f"unknown checkpoint: {target_str}"
+
+    sha = tmux_git(cwd, "stash", "create") or tmux_git(cwd, "rev-parse", "HEAD")
+    redo_name = None
+    if sha:
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        redo_name = f"nightmux/redo-{ts}"
+        tmux_git(cwd, "branch", redo_name, sha)
+        prune_redos(cwd)
+
+    tmux_git(cwd, "checkout", target_ref, "--", ".")
+
+    msg = f"↺ restored worktree to {target_ref}"
+    if redo_name:
+        msg += f" (saved current state to {redo_name} · '!undo redo' to revert)"
+    return True, msg
 
 
 def snapped():
@@ -4329,7 +4440,7 @@ HELP = [
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
-        "!undo [n] = snapshots taken before every prompt; n restores one (undoable)",
+        "!undo [N|redo] = snapshot checkpoints, rollback to turn N, or redo",
         "!watch pr [n] | merge | off = feed CI failures and review comments "
         "to the agent; merge button when green",
         "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
@@ -4876,31 +4987,38 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return "\n".join(l + (f"   [{', '.join(who[l.split()[0]])}]"
                               if who.get(l.split()[0]) else "") for l in rows)
     if cmd == "!undo":
-        cwd = sess_cwd(sess)
-        rows = [l for l in tmux_git(
-            cwd, "for-each-ref", "--sort=-creatordate",
-            "--format=%(refname:short)  %(creatordate:iso-strict)",
-            "refs/heads/nightmux/pre-*").split("\n") if l.strip()]
-        if not rows:
-            return f"no snapshots in {cwd} · one is taken before every prompt"
-        if arg.isdigit():
-            if not 0 < int(arg) <= len(rows):
-                return f"no snapshot {arg} — !undo lists them"
+        if arg:
             if pane_state(visible(sess)) == "busy":
                 return f"{sess} is working — !esc it first, then undo"
-            ref = rows[int(arg) - 1].split()[0]
-            snapshot_repo(sess)     # the state being thrown away: undo is undoable
-            tmux_git(cwd, "restore", "--source", ref, "--", ".")
-            return (f"↩️ {cwd} is back to {ref}\n"
-                    "untracked new files are left alone · !undo 1 returns to "
-                    "what was there before this undo · tell the agent what you changed")
-        newest = rows[0].split()[0]
-        return ("snapshots in " + cwd + " (newest first, change vs now):\n"
-                + "\n".join(f"{i + 1}. {r.split()[1][5:16].replace('T', ' ')}  "
-                             f"{tmux_git(cwd, 'diff', '--shortstat', r.split()[0]) or 'same as now'}"
-                             for i, r in enumerate(rows[:10]))
-                + "\n\n!undo N restores one (the current state is snapshotted first)\n"
-                f"look first: git diff {newest}")
+            ok, msg = undo_repo(sess, arg)
+            return msg
+        cwd = sess_cwd(sess)
+        snapshots, has_redo = list_snapshots(sess)
+        if not snapshots:
+            return f"no snapshots in {cwd} · one is taken before every turn"
+        newest = snapshots[0]["branch"]
+        rows = [f"{s['index']}. {s['branch']}  {s['date']}" for s in snapshots]
+        out = ("snapshots in " + cwd + " (newest first):\n"
+               + "\n".join(rows)
+               + "\n\nnightmux never restores automatically — run this yourself:\n"
+               f"  git restore --source {newest} -- .   # overwrite the worktree\n"
+               f"  git diff {newest}                    # or just look first\n"
+               "(swap in an older branch name to go further back)")
+        if has_redo:
+            out += "\n\nRevert previous undo with: !undo redo"
+        btns = []
+        row1 = []
+        if len(snapshots) >= 1:
+            row1.append(("↺ undo 1 (newest)", "!undo 1"))
+        if len(snapshots) >= 2:
+            row1.append(("↺ undo 2", "!undo 2"))
+        if row1:
+            btns.append(row1)
+        if has_redo:
+            btns.append([("↷ redo", "!undo redo")])
+        if btns:
+            send(cfg, topic, out, mode="plain", buttons=kb(btns))
+        return out
     if cmd == "!ctl":
         send(cfg, topic, f"controls · {sess}", mode="plain", buttons=kb([
             [("esc", "!esc"), ("⇧⇥ mode", "!mode"), ("⏎", "!enter"), ("↑", "!up")],
@@ -5052,6 +5170,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             + (f" every {left(j['every'])}" if j.get("every") else "")
             + f" · {j['text'].splitlines()[0][:50]}" for i, j in enumerate(jobs))
     if cmd == "!raw":  # deliberate override of the menu guard below
+        snapshot_repo(sess)
         inject(sess, arg)
         remember(state, sess, arg)
         started(cfg, state, topic, sess, mid)
@@ -9585,6 +9704,7 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
         return msg
     snapshot_repo(sess)     # typed from a phone is still unattended for what follows
     text = spill(sess, text)
+    snapshot_repo(sess)
     if not inject(sess, text):
         # No agent under the pane. Holding it is the whole point: typed into a
         # shell it would have run as a command and been gone.
@@ -11876,12 +11996,18 @@ function topics(rows) {
     r => {
       const c = div('card', '<div class="row"><span class="dot"></span><span class="sess"></span>' +
         '<span class="meta tid"></span><a class="chatlnk" href="/chat?t=' + encodeURIComponent(r.topic) + '">💬</a>' +
-        '<a class="chatlnk" title="terminal" href="/term/' + encodeURIComponent(r.topic) + '">⌨️</a></div>' +
+        '<a class="chatlnk" title="terminal" href="/term/' + encodeURIComponent(r.topic) + '">⌨️</a>' +
+        '<a class="chatlnk" title="preview screenshot" target="_blank" href="/api/shot/' + encodeURIComponent(r.topic) + '">📸</a>' +
+        '<button type="button" class="chatlnk undo-btn" title="undo turn" style="background:none;border:none;cursor:pointer;padding:0;color:inherit;font:inherit">↺</button></div>' +
         '<div class="meta info"></div><div class="bench"></div>' +
         '<div class="chipsrow agents"></div>' +
         '<form><input placeholder="send a prompt…" autocomplete="off" enterkeyhint="send">' +
         '<button type="submit">send</button></form><div class="ok"></div>');
       c.querySelector('form').addEventListener('submit', ev => send(ev, r.topic, c));
+      c.querySelector('.undo-btn').onclick = async () => {
+        const res = await act('/api/undo/' + encodeURIComponent(r.topic), {target: '1'});
+        toast(res.msg || (res.ok ? 'restored' : 'undo failed'));
+      };
       return c;
     },
     (el, r) => {
@@ -12272,7 +12398,9 @@ form button { background: #1f6feb; border: 0; color: #fff; border-radius: 8px; p
 .empty { color: #6b7280; text-align: center; margin-top: 30vh; }
 </style></head><body>
 <header><a href="/">←</a><span class="dot" id="dot"></span><b id="name">…</b><span class="meta" id="meta"></span>
-<a href="#" id="notify" style="margin-left:auto">🔔</a></header>
+<a href="#" id="btn-undo" title="undo turn" style="text-decoration:none;font-size:15px;margin-left:auto;padding:0 4px">↺</a>
+<a href="#" id="btn-shot" title="preview screenshot" style="text-decoration:none;font-size:15px;padding:0 4px">📸</a>
+<a href="#" id="notify" style="padding:0 4px">🔔</a></header>
 <div id="log"><p class="empty">nothing here yet — what nightmux says in this topic shows up here</p></div>
 <div id="typing"></div>
 <form id="f"><textarea id="box" rows="1" placeholder="message the agent…" enterkeyhint="send"></textarea><button>send</button></form>
@@ -12326,6 +12454,12 @@ document.getElementById('f').onsubmit = async e => {
 };
 document.getElementById('notify').onclick = e => { e.preventDefault();
   if (window.Notification) Notification.requestPermission().then(p => document.getElementById('notify').textContent = p === 'granted' ? '🔔✓' : '🔕'); };
+document.getElementById('btn-undo').onclick = async e => {
+  e.preventDefault(); await post('!undo'); setTimeout(poll, 600);
+};
+document.getElementById('btn-shot').onclick = e => {
+  e.preventDefault(); window.open('/api/shot/' + encodeURIComponent(T), '_blank');
+};
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 poll(); setInterval(poll, 2000);
 </script></body></html>"""
@@ -14387,6 +14521,67 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             if not self.peer:
                 data = with_peers(self.server.cfg, self.path, data)
             return self.reply(json.dumps(data), "application/json")
+        if self.path.startswith("/api/snapshots/"):
+            parts = self.path.strip("/").split("/")
+            if len(parts) >= 3:
+                topic = self.resolve_topic(parts[2])
+                sess = self.server.cfg.get("topics", {}).get(topic)
+                if not sess:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "topic not bound"}\n')
+                    return
+                snapshots, has_redo = list_snapshots(sess)
+                return self.reply(json.dumps({
+                    "topic": topic, "session": sess,
+                    "snapshots": snapshots, "has_redo": has_redo
+                }), "application/json")
+        if self.path.startswith("/api/preview/"):
+            parts = self.path.strip("/").split("/")
+            if len(parts) >= 3:
+                topic = self.resolve_topic(parts[2])
+                sess = self.server.cfg.get("topics", {}).get(topic)
+                if not sess:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "topic not bound"}\n')
+                    return
+                ports = dev_ports(sess)
+                items = []
+                for port, loop, proc in ports:
+                    link, err = preview_link(self.server.cfg, port, loop)
+                    items.append({"port": port, "loopback": loop, "process": proc, "url": link, "error": err})
+                return self.reply(json.dumps({"session": sess, "ports": items}), "application/json")
+        if self.path.startswith("/api/shot/"):
+            parts = self.path.strip("/").split("/")
+            if len(parts) >= 3:
+                topic = self.resolve_topic(parts[2])
+                sess = self.server.cfg.get("topics", {}).get(topic)
+                if not sess:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'topic not bound\n')
+                    return
+                ports = dev_ports(sess)
+                if not ports:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'No active dev server in session\n')
+                    return
+                url = f"http://127.0.0.1:{ports[0][0]}/"
+                png, err = screenshot(self.server.cfg, url)
+                if not png:
+                    self.send_response(502)
+                    self.end_headers()
+                    self.wfile.write((err or "screenshot failed").encode() + b"\n")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(png)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(png)
+                return
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
@@ -14445,6 +14640,27 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             c = new_pairing_code()
             purl = pairing_url(self.server.cfg, c)
             return self.reply(json.dumps({"ok": True, "code": c, "url": purl}), "application/json")
+        if self.path.startswith("/api/undo/"):
+            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            parts = self.path.strip("/").split("/")
+            if len(parts) >= 3:
+                topic = self.resolve_topic(parts[2])
+                sess = self.server.cfg.get("topics", {}).get(topic)
+                if not sess:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "topic not bound"}\n')
+                    return
+                try:
+                    data = json.loads(body or "{}")
+                except ValueError:
+                    data = {}
+                target = data.get("target") or "1"
+                ok, msg = undo_repo(sess, target)
+                return self.reply(json.dumps({"ok": ok, "msg": msg}), "application/json")
         if self.peer and self.path == "/upgrade":       # the primary's !upgrade
             with _upgrading:
                 changed, msg = self_upgrade()
@@ -17539,6 +17755,17 @@ def selfcheck():
     assert rev_res_["ok"] is True
     assert not is_paired_token(tok_)
 
+    # M3 endpoints
+    snap_res_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/snapshots/5").read().decode())
+    assert "snapshots" in snap_res_ and "has_redo" in snap_res_
+    prev_res_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/preview/5").read().decode())
+    assert "ports" in prev_res_ and prev_res_["session"] == "o"
+    undo_req_ = urllib.request.Request(f"http://127.0.0.1:{port_}/api/undo/5",
+                                       data=b'{"target": "1"}',
+                                       headers={"X-Nightmux": "1"}, method="POST")
+    undo_res_ = json.loads(urllib.request.urlopen(undo_req_).read().decode())
+    assert "ok" in undo_res_
+
     class DummyHandler(WebhookHandler):
         def __init__(self, ip, headers=None, path="/"):
             self.client_address = (ip, 12345)
@@ -18956,24 +19183,35 @@ def selfcheck():
     with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True):
         undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo")
         wt_out = handle(cfg4, {}, threading.Lock(), "1", "!worktrees")
-    assert f"nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
-    assert "1. 01-01 00:00  same as now" in undo_out, undo_out
-    assert f"git diff nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
-    with open(os.path.join(repo, "f"), "w") as f:      # the agent wrecks the file
-        f.write("wrecked")
-    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
-                 visible=lambda s: ["❯ "]):
-        undo_out = handle(cfg4, {}, threading.Lock(), "1", "!undo 2")
-        assert f"back to nightmux/pre-fake{SNAP_KEEP}" in undo_out, undo_out
+        assert f"nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+        assert f"git restore --source nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out
+        assert f"git diff nightmux/pre-fake{SNAP_KEEP + 1}" in undo_out, undo_out
+        assert repo in wt_out and "feature-a" in wt_out, wt_out
+
+        # Test M3: list_snapshots, undo_repo rollback, and redo capability
+        snaps_list, has_redo = list_snapshots("s4")
+        assert len(snaps_list) == SNAP_KEEP
+        assert snaps_list[0]["branch"] == f"nightmux/pre-fake{SNAP_KEEP + 1}"
+
+        # Undo to checkpoint 2 (which holds "10")
+        u_ok, u_msg = undo_repo("s4", "2")
+        assert u_ok is True
         with open(os.path.join(repo, "f")) as f:
-            assert f.read() == str(SNAP_KEEP)
-        handle(cfg4, {}, threading.Lock(), "1", "!undo 1")   # undo the undo
+            assert f.read() == str(SNAP_KEEP), "undo 2 should restore content to fake10"
+
+        # Verify redo branch was created
+        redos = [n_ for n_ in tmux_git(repo, "for-each-ref", "--format=%(refname:short)",
+                                       "refs/heads/nightmux/redo-*").split("\n") if n_.strip()]
+        assert len(redos) == 1, redos
+
+        # Revert the undo via redo
+        r_ok, r_msg = undo_repo("s4", "redo")
+        assert r_ok is True
         with open(os.path.join(repo, "f")) as f:
-            assert f.read() == "wrecked"
-    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
-                 visible=lambda s: ["esc to interrupt"]):
-        assert "is working" in handle(cfg4, {}, threading.Lock(), "1", "!undo 1")
-    assert repo in wt_out and "feature-a" in wt_out, wt_out
+            assert f.read() == str(SNAP_KEEP + 1), "undo redo should restore content to fake11"
+        with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True,
+                     visible=lambda s: ["esc to interrupt"]):
+            assert "is working" in handle(cfg4, {}, threading.Lock(), "1", "!undo 1")
 
     shutil.rmtree(repo, ignore_errors=True)
     shutil.rmtree(f"{repo}-wt", ignore_errors=True)
