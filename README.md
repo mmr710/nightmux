@@ -29,8 +29,10 @@ window resets — or hands the work to another agent.
 ## Quickstart
 
 1. `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh`
-2. Paste a bot token from [@BotFather](https://t.me/BotFather) — or press Enter to run dashboard-only.
+2. Scan the QR it prints to create your bot — no token to copy. (Or paste one from [@BotFather](https://t.me/BotFather), or press Enter for dashboard-only.)
 3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type.
+
+No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup` (or `pipx run --spec git+https://github.com/mmr710/nightmux nightmux --setup`).
 
 Just looking? `python3 nightmux.py --demo` and open http://127.0.0.1:8099/office — no bot, no keys.
 Docker, a fresh VPS and the rest: [Install →](#install)
@@ -229,6 +231,15 @@ the terminal scrape.
 **The bot token is a shell on your machine, and `allow_users` is the only thing
 between a stranger and your sessions.** Read [SECURITY.md](SECURITY.md) before
 you add a second person or a second machine. It is short.
+
+What that means in practice:
+
+- **Nothing is exposed by default.** The dashboard binds `127.0.0.1`; phones reach it through your tailnet or a pairing QR.
+- **Only you can drive it.** Telegram messages from anyone not in `allow_users` are ignored.
+- **Risky approvals stay human.** `!autoyes` is opt-in per topic and never presses yes on `rm -rf`, `sudo`, `git push`, `curl | sh`, `--force` or publish dialogs (`!policy` tunes this).
+- **Spend is capped.** `!budget` and `!spendcap` stop runaway loops; `!cost top` shows where it went.
+- **The QR onboarding relay holds nothing.** It passes your new bot's token to your terminal once, in memory, and keeps no logs and no disk copy.
+- **Zero dependencies.** One stdlib-only Python file you can read in an afternoon.
 
 ## License
 
