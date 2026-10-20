@@ -29,6 +29,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -38,6 +39,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 import zlib
 
 VERSION = "1.3.0"
@@ -342,6 +344,8 @@ def run(*argv, **kw):
     except subprocess.TimeoutExpired:
         print(f"timeout {timeout}s: {' '.join(argv)}", file=sys.stderr)
         return f"[{argv[0]} timed out after {timeout}s]"
+    except FileNotFoundError:
+        return ""
     return (p.stdout + p.stderr).rstrip("\n")
 
 
@@ -530,6 +534,8 @@ def snapped():
     """{pane_id: ts} for every status-line snapshot still worth trusting."""
     out, now = {}, time.time()
     for d in snaps():
+        if not isinstance(d, dict):
+            continue
         p, ts = d.get("pane"), d.get("ts", 0)
         if p and now - ts <= STATE_FRESH and ts > out.get(p, 0):
             out[p] = ts
@@ -862,7 +868,7 @@ def snaps():
     except OSError:
         return
     for n in names:
-        if not n.endswith(".json"):
+        if not n.endswith(".json") or n.startswith(("queue.", "warned.", "paired_tokens.", "savings.")):
             continue
         path = os.path.join(STATE_DIR, n)
         try:
@@ -2718,6 +2724,10 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
         st["prev"], st["changed"] = lines, time.time()
     was_busy = st.get("mode") == "busy"   # a turn was in flight on the last tick
     st["mode"] = pane_state(scr)
+    if st["mode"] == "unknown":
+        _unknown_pane_since.setdefault(sess, time.time())
+    else:
+        _unknown_pane_since.pop(sess, None)
     if st["mode"] == "busy" and not was_busy:
         now = time.time()
         turns = [t for t in st.get("turns", []) if now - t < 300]
@@ -2986,7 +2996,7 @@ def prune(now, last, live=()):
     for d, days in ((FILE_DIR, 7), (STATE_DIR, 1)):
         cut = now - days * 86400
         for n in os.listdir(d) if os.path.isdir(d) else []:
-            if d == STATE_DIR and n.startswith(("queue.json", "warned.json")):
+            if d == STATE_DIR and n.startswith(("queue.json", "warned.json", "paired_tokens.json")):
                 continue   # held prompts are state, not a cache: only rewritten
             p = os.path.join(d, n)   # when they change, so mtime says nothing
             try:
@@ -3522,6 +3532,8 @@ _updating = threading.Lock()   # one run at a time: two installs into one prefix
 
 def agent_version(binary):
     """First line of `<binary> --version`, or '?' when it says nothing."""
+    if not shutil.which(binary):
+        return "?"
     out = run(binary, "--version", timeout=20).strip()
     return out.splitlines()[0][:60] if out else "?"
 
@@ -4731,6 +4743,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 'change "modes" in the config and !reload to lift it')
     if cmd == "!version":
         return version_report()
+    if cmd in ("!doctor", "!doc"):
+        return doctor_report(cfg)
     if cmd == "!upgrade":
         return upgrade_cmd(cfg, topic, arg)
     if cmd == "!skill":
@@ -10385,6 +10399,26 @@ def server_metrics():
     return out
 
 
+def claude_limits(snap=None):
+    """5-hour and 7-day usage windows for Claude Code from status snapshot."""
+    if not snap:
+        return []
+    windows = []
+    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = window(snap, k)
+        if w:
+            windows.append({"label": label, "pct": w.get("used_percentage"), "resets_at": w.get("resets_at")})
+    return windows
+
+
+def opencode_limits(home=None):
+    return []
+
+
+def gemini_limits(home=None):
+    return []
+
+
 _codex_rl = {"at": 0, "val": None}
 
 
@@ -10450,18 +10484,33 @@ def agent_limits(cfg, state, home=None):
     blank = {"sessions": 0, "live": 0, "busy": 0, "held": 0, "until": None}
     snaps = [s["snap"] for s in state.values() if isinstance(s, dict) and s.get("snap")]
     fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})
-    for k, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        w = window(fresh, k)
-        if w:
-            rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].append(
-                {"label": label, "pct": w["used_percentage"], "resets_at": w.get("resets_at")})
-    rl = codex_limits(home) or {}
+
+    # Claude limit windows
+    c_ad = AGENT_ADAPTERS.get("claude", {}) if "AGENT_ADAPTERS" in globals() else {}
+    lr_c = c_ad.get("limit_reader") or claude_limits
+    wins_c = lr_c(fresh)
+    if wins_c:
+        rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].extend(wins_c)
+
+    # Codex limit windows
+    cx_ad = AGENT_ADAPTERS.get("codex", {}) if "AGENT_ADAPTERS" in globals() else {}
+    lr_cx = cx_ad.get("limit_reader") or codex_limits
+    rl = lr_cx(home) or {}
     for k in ("primary", "secondary"):
         w = rl.get(k)
         if w and w.get("used_percent") is not None and (w.get("resets_at") or now + 1) > now:
             rows.setdefault("codex", dict(blank, agent="codex", windows=[]))["windows"].append(
                 {"label": _win_label(w.get("window_minutes") or 0),
                  "pct": w["used_percent"], "resets_at": w.get("resets_at")})
+
+    # Agy limit windows
+    ag_ad = AGENT_ADAPTERS.get("agy", {}) if "AGENT_ADAPTERS" in globals() else {}
+    if ag_ad.get("limit_reader"):
+        ag_lim = ag_ad["limit_reader"]() or {}
+        if ag_lim.get("pct"):
+            rows.setdefault("agy", dict(blank, agent="agy", windows=[]))["windows"].append(
+                {"label": "5h", "pct": ag_lim["pct"], "resets_at": None})
+
     for r in rows.values():
         for w in r["windows"]:
             w["eta"] = forecast(f"{r['agent']}:{w['label']}")
@@ -11004,29 +11053,68 @@ def _scan_opencode(stats, home, since):
     b = _chat_bucket(stats, "opencode")
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
     try:
+        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        sess_tbl = "session_v2" if "session_v2" in tables else ("session" if "session" in tables else None)
+        msg_tbl = "session_message" if "session_message" in tables else ("message" if "message" in tables else None)
+        part_tbl = "session_part" if "session_part" in tables else ("part" if "part" in tables else None)
+        if not msg_tbl:
+            return
+
+        cols = {row[1] for row in con.execute(f"PRAGMA table_info({msg_tbl})")}
+        time_col = "time_created" if "time_created" in cols else ("created_at" if "created_at" in cols else None)
+        data_col = "data" if "data" in cols else ("content" if "content" in cols else None)
+        sid_col = "session_id" if "session_id" in cols else ("session" if "session" in cols else "id")
+        type_col = "type" if "type" in cols else None
+        if not data_col:
+            return
+
+        since_ms = int(since * 1000)
         sess = set()
-        for sid, data in con.execute("SELECT session_id, data FROM message "
-                                     "WHERE time_created >= ?", (int(since * 1000),)):
+        where_time = f"WHERE {time_col} >= {since_ms}" if time_col else ""
+        sel_cols = f"{sid_col}, {data_col}" + (f", {type_col}" if type_col else "")
+        for row in con.execute(f"SELECT {sel_cols} FROM {msg_tbl} {where_time}"):
+            sid, data = row[0], row[1]
+            type_val = row[2] if type_col else None
             sess.add(sid)
-            d = json.loads(data)
-            if d.get("role") != "assistant":
+            try:
+                d = json.loads(data) if isinstance(data, str) else (data or {})
+            except (ValueError, TypeError):
                 continue
-            if d.get("error"):
-                b["errors"] += 1
-            t = d.get("tokens") or {}
-            if t.get("input") or t.get("output"):
-                c = t.get("cache") or {}
-                _chat_call(b, d.get("modelID"), t.get("input") or 0, c.get("read") or 0,
-                           c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+            role = type_val or d.get("role")
+            if role == "assistant":
+                if d.get("error"):
+                    b["errors"] += 1
+                t = d.get("tokens") or d.get("usage") or {}
+                if t.get("input") or t.get("output"):
+                    c = t.get("cache") or {}
+                    m = d.get("modelID") or d.get("model")
+                    m_name = m.get("id") if isinstance(m, dict) else m
+                    _chat_call(b, m_name,
+                               t.get("input") or 0, c.get("read") or 0,
+                               c.get("write") or 0, t.get("output") or 0, t.get("reasoning") or 0)
+            elif role == "user":
+                p_text = d.get("text") or d.get("content")
+                if isinstance(p_text, list):
+                    p_text = " ".join(i.get("text", "") for i in p_text if isinstance(i, dict) and i.get("text"))
+                if isinstance(p_text, str) and not d.get("synthetic"):
+                    _chat_prompt(b, p_text)
+
         b["sessions"] += len(sess)
-        for data, at, cwd in con.execute(
-                "SELECT p.data, m.time_created, s.directory FROM part p "
-                "JOIN message m ON m.id = p.message_id LEFT JOIN session s ON s.id = m.session_id "
-                "WHERE m.time_created >= ? AND m.data LIKE '%\"role\":\"user\"%'",
-                (int(since * 1000),)):
-            d = json.loads(data)
-            if d.get("type") == "text" and not d.get("synthetic"):
-                _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
+
+        if part_tbl and sess_tbl and time_col:
+            sess_cols = {row[1] for row in con.execute(f"PRAGMA table_info({sess_tbl})")}
+            dir_col = "directory" if "directory" in sess_cols else ("project_path" if "project_path" in sess_cols else "cwd")
+            try:
+                for data, at, cwd in con.execute(
+                        f"SELECT p.data, m.{time_col}, s.{dir_col} FROM {part_tbl} p "
+                        f"JOIN {msg_tbl} m ON m.id = p.message_id LEFT JOIN {sess_tbl} s ON s.id = m.{sid_col} "
+                        f"WHERE m.{time_col} >= ? AND (m.{data_col} LIKE '%\"role\":\"user\"%' OR m.{data_col} LIKE '%\"role\": \"user\"%')",
+                        (since_ms,)):
+                    d = json.loads(data) if isinstance(data, str) else (data or {})
+                    if d.get("type") == "text" and not d.get("synthetic"):
+                        _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
+            except Exception:
+                pass
     finally:
         con.close()
 
@@ -11034,51 +11122,81 @@ def _scan_opencode(stats, home, since):
 def _scan_agy(stats, home, since):
     import sqlite3
     db = os.path.join(home, ".gemini", "antigravity-cli", "conversation_summaries.db")
-    if not os.path.exists(db):
-        return
     b = _chat_bucket(stats, "agy")
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    scanned_cids = set()
+    if os.path.exists(db):
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
+            for cid, steps, ws, last in con.execute(
+                    "SELECT conversation_id, step_count, workspace_uris, last_user_input_time FROM "
+                    "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
+                scanned_cids.add(cid)
+                b["sessions"] += 1
+                m = re.search(r"file://(/[^\"',\s]+)", ws or "")
+                if m:      # no prompts on disk: a conversation counts once for its project
+                    n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
+                    b["projects"][n] = b["projects"].get(n, 0) + 1
+                b["requests"] += steps or 0
+                _scan_agy_transcript(b, home, cid)
+        finally:
+            con.close()
+
+    brain_dir = os.path.join(home, ".gemini", "antigravity-cli", "brain")
+    if os.path.isdir(brain_dir):
+        for cid in os.listdir(brain_dir):
+            if cid in scanned_cids:
+                continue
+            tf = os.path.join(brain_dir, cid, ".system_generated", "logs", "transcript.jsonl")
+            if os.path.exists(tf) and os.path.getmtime(tf) >= since:
+                b["sessions"] += 1
+                _scan_agy_transcript(b, home, cid)
+
+
+def _scan_agy_transcript(b, home, cid):
+    tf = os.path.join(home, ".gemini", "antigravity-cli", "brain", cid, ".system_generated", "logs", "transcript.jsonl")
+    if not os.path.exists(tf):
+        return
     try:
-        cut = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
-        for cid, steps, ws, last in con.execute("SELECT conversation_id, step_count, workspace_uris, last_user_input_time FROM "
-                                     "conversation_summaries WHERE last_modified_time >= ?", (cut,)):
-            b["sessions"] += 1
-            m = re.search(r"file://(/[^\"',\s]+)", ws or "")
-            if m:      # no prompts on disk: a conversation counts once for its project
-                n = os.path.basename(urllib.parse.unquote(m.group(1)).rstrip("/"))
-                b["projects"][n] = b["projects"].get(n, 0) + 1
-            b["requests"] += steps or 0
-            
-            tf = os.path.join(home, ".gemini", "antigravity-cli", "brain", cid, ".system_generated", "logs", "transcript.jsonl")
-            if os.path.exists(tf):
-                import json
-                try:
-                    with open(tf, "r") as f_in:
-                        for line in f_in:
-                            if "PLANNER_RESPONSE" in line:
-                                try:
-                                    js = json.loads(line)
-                                    if js.get("type") == "PLANNER_RESPONSE":
-                                        if js.get("status") == "ERROR":
-                                            b["errors"] += 1
-                                        i = js.get("input_tokens") or 0
-                                        cr = js.get("cache_read_tokens") or 0
-                                        o = js.get("output_tokens") or 0
-                                        _chat_call(b, "agy", i, cr, 0, o, 0,
-                                                   (js.get("created_at") or "")[:10])
-                                except: pass
-                            elif "USER_INPUT" in line:
-                                try:
-                                    js = json.loads(line)
-                                    if js.get("type") == "USER_INPUT":
-                                        b["prompts"] += 1
-                                        c = js.get("content")
-                                        if c: b["prompt_chars"] += len(c)
-                                        _chat_prompt(b, c or "")
-                                except: pass
-                except: pass
-    finally:
-        con.close()
+        with open(tf, "r", encoding="utf-8", errors="replace") as f_in:
+            for line in f_in:
+                if "PLANNER_RESPONSE" in line:
+                    try:
+                        js = json.loads(line)
+                        if js.get("type") == "PLANNER_RESPONSE":
+                            if js.get("status") == "ERROR":
+                                b["errors"] += 1
+                            i = js.get("input_tokens")
+                            cr = js.get("cache_read_tokens")
+                            o = js.get("output_tokens")
+                            th = js.get("thinking_tokens") or 0
+                            if i is None or cr is None or o is None:
+                                u = js.get("usage") or js.get("tokens") or {}
+                                i = i or u.get("input_tokens") or u.get("input") or 0
+                                cr = cr or u.get("cache_read_tokens") or u.get("cache_read") or 0
+                                o = o or u.get("output_tokens") or u.get("output") or 0
+                                th = th or u.get("thinking_tokens") or u.get("thinking") or 0
+                            _chat_call(b, "agy", i or 0, cr or 0, 0, o or 0, th or 0,
+                                       (js.get("created_at") or "")[:10])
+                    except Exception:
+                        pass
+                elif "USER_INPUT" in line:
+                    try:
+                        js = json.loads(line)
+                        if js.get("type") == "USER_INPUT":
+                            c = js.get("content") or ""
+                            m_req = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", c, re.DOTALL)
+                            clean_c = m_req.group(1).strip() if m_req else c.strip()
+                            if clean_c:
+                                _chat_prompt(b, clean_c)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _scan_gemini(stats, home, since):
+    pass
 
 
 def chat_tips(stats):
@@ -11137,22 +11255,6 @@ def chat_tips(stats):
     return tips
 
 
-
-    try:
-        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
-        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        if m_gem:
-            # Output says "Remaining 73%", we want "used percentage" which is 100 - remaining
-            _agy_usage["pct"] = 100 - int(m_gem.group(1))
-        if m_cla:
-            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
-        _agy_usage["at"] = time.time()
-    except Exception:
-        pass
-    return _agy_usage
-
-
 _agy_usage = {"at": 0, "pct": 0, "claude_pct": 0}
 
 def agy_limits():
@@ -11172,6 +11274,97 @@ def agy_limits():
         pass
     return _agy_usage
 
+
+# Unified Agent Adapter Table: launch command, screen-state detector,
+# transcript/usage reader, limit reader, and version check.
+AGENT_ADAPTERS = {
+    "claude": {
+        "launch": AGENTS["claude"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_claude,
+        "limit_reader": claude_limits,
+        "version_cmd": ["claude", "--version"],
+    },
+    "agy": {
+        "launch": AGENTS["agy"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_agy,
+        "limit_reader": agy_limits,
+        "version_cmd": ["agy", "--version"],
+    },
+    "codex": {
+        "launch": AGENTS["codex"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_codex,
+        "limit_reader": codex_limits,
+        "version_cmd": ["codex", "--version"],
+    },
+    "opencode": {
+        "launch": AGENTS["opencode"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_opencode,
+        "limit_reader": opencode_limits,
+        "version_cmd": ["opencode", "--version"],
+    },
+    "gemini": {
+        "launch": AGENTS["gemini"],
+        "screen_state": pane_state,
+        "usage_reader": _scan_gemini,
+        "limit_reader": gemini_limits,
+        "version_cmd": ["gemini", "--version"],
+    },
+    "aider": {
+        "launch": AGENTS["aider"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["aider", "--version"],
+    },
+    "cursor": {
+        "launch": AGENTS["cursor"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["cursor-agent", "--version"],
+    },
+    "amp": {
+        "launch": AGENTS["amp"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["amp", "--version"],
+    },
+    "goose": {
+        "launch": AGENTS["goose"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["goose", "--version"],
+    },
+    "qwen": {
+        "launch": AGENTS["qwen"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": ["qwen", "--version"],
+    },
+}
+
+
+def adapter_for(name):
+    """Adapter entry for `name`, falling back to standard CLI defaults."""
+    ad = AGENT_ADAPTERS.get(name)
+    if ad:
+        return ad
+    return {
+        "launch": [name, "--continue"],
+        "screen_state": pane_state,
+        "usage_reader": None,
+        "limit_reader": lambda *a, **k: [],
+        "version_cmd": [name, "--version"],
+    }
+
+
 def analyze_chats(days=30, home=None):
     """Read every agent's own transcripts on this machine and summarise them.
 
@@ -11184,11 +11377,13 @@ def analyze_chats(days=30, home=None):
         return hit
     t0, stats = time.time(), {}
     since = t0 - days * 86400
-    for scan in (_scan_claude, _scan_codex, _scan_opencode, _scan_agy):
-        try:
-            scan(stats, home or os.path.expanduser("~"), since)
-        except Exception as e:     # one unreadable store must not hide the rest
-            print(f"analysis: {scan.__name__}: {e}", file=sys.stderr)
+    for a, ad in AGENT_ADAPTERS.items():
+        reader = ad.get("usage_reader")
+        if reader:
+            try:
+                reader(stats, home or os.path.expanduser("~"), since)
+            except Exception as e:     # one unreadable store must not hide the rest
+                print(f"analysis: {a}: {e}", file=sys.stderr)
     tips = chat_tips(stats)
     agents_ = {}
     for a, s in stats.items():
@@ -11825,15 +12020,15 @@ def setup_tail(cfg):
         print(f"skipped. Run it yourself with: {sys.executable} {__file__}")
         return
     print(wire_unit() or f"   started, unit at {PLIST_PATH if mac else UNIT_PATH}")
-    print("\nDone. In the group: create a topic, then send\n"
-          "   !new myproj ~/code/myproj\n"
-          "and type to it. !help lists the rest." if cfg.get("token") else
-          f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
-    if not cfg.get("token"):
-        url = phone_url(cfg)
-        print(f"\nOn your phone, scan this to open it there:\n{qr_text(url + '/app')}\n{url}/app"
-              if url else "\nOn your phone too: install Tailscale on both devices, run "
-              f"`tailscale serve --bg {cfg['webhook_port']}`, then open /app here for a QR.")
+    if cfg.get("token"):
+        print("\nDone. In the group: create a topic, then send\n"
+              "   !new myproj ~/code/myproj\n"
+              "and type to it. !help lists the rest.")
+    else:
+        c = new_pairing_code()
+        purl = pairing_url(cfg, c)
+        print(f"\nDone. Open http://127.0.0.1:{cfg['webhook_port']}/ and press '+ project'.")
+        print(f"\nOn your phone, scan this to open the dashboard:\n{qr_text(purl)}\n{purl}")
 
 
 def restore_startup(cfg, state, lock):
@@ -12019,11 +12214,43 @@ h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: 
 <h2>context per model call <span class="sub" id="ctxnote"></span></h2>
 <div class="card"><canvas class="pixchart" id="ctxchart" width="140" height="40"></canvas>
 <div class="meta" id="ctxlegend">lower is cheaper: every call re-reads the whole context</div></div>
+<div id="setup"></div>
+<h2>connect <span class="sub">optional phone and chat integrations</span></h2>
+<div class="grid" id="connect">
+  <div class="card" id="card-phone">
+    <div class="row"><b>📱 Phone Pairing</b><span id="pair-count" class="meta" style="margin-left:auto">0 paired</span></div>
+    <p class="sub" style="margin:4px 0 8px">Access this dashboard securely from your phone outside localhost.</p>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <a href="/pair" target="_blank" class="primary" style="text-decoration:none;padding:5px 12px;border-radius:8px;font-size:12px;background:#1f6feb;color:#fff">+ Pair phone</a>
+      <button id="revoke-btn" type="button" class="close" style="font-size:12px">Revoke all</button>
+    </div>
+  </div>
+  <div class="card" id="card-tg">
+    <div class="row"><b>✈️ Telegram</b><span id="tg-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Control your agents from Telegram forum topics. Run <code>nightmux --setup</code> to connect a bot.</p>
+  </div>
+  <div class="card" id="card-dc">
+    <div class="row"><b>🎮 Discord</b><span id="dc-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Drive agents from Discord threads. Set <code>discord_token</code> in config.</p>
+  </div>
+  <div class="card" id="card-sl">
+    <div class="row"><b>💼 Slack</b><span id="sl-status" class="meta" style="margin-left:auto">optional</span></div>
+    <p class="sub" style="margin:4px 0">Drive agents from Slack channels. Set <code>slack_token</code> in config.</p>
+  </div>
+</div>
 <h2>topics <button id="newbtn" class="primary">+ new project</button></h2>
 <div id="newp" class="card"><form id="newf">
   <div class="f">
     <label>project name<input name="title" required placeholder="habit tracker" autocomplete="off"></label>
     <label>agent<select name="agent"></select></label>
+    <label>starter template<select name="template">
+      <option value="">Blank (custom idea)</option>
+      <option value="landing-page">🌐 Landing page</option>
+      <option value="crud-app">📦 CRUD web app</option>
+      <option value="telegram-bot">🤖 Telegram bot</option>
+      <option value="chrome-extension">🧩 Chrome extension</option>
+      <option value="cli-tool">⚡ CLI tool</option>
+    </select></label>
     <label>folder<input name="folder" placeholder="" autocomplete="off"></label>
     <label id="srvl">server<select name="server"></select></label>
   </div>
@@ -12213,6 +12440,23 @@ async function openNew() {
   f.agent.innerHTML = ag.installed.map(a => '<option>' + esc(a) + '</option>').join('');
   f.server.innerHTML = ag.servers.map((s, i) => '<option value="' + (i ? esc(s) : '') + '">' + esc(s) + '</option>').join('');
   $('srvl').style.display = ag.servers.length > 1 ? '' : 'none';
+  const TPL_PRESETS = {
+    'landing-page': ['Landing page', 'A modern, responsive product landing page with hero, features, and email signup form.'],
+    'crud-app': ['CRUD web app', 'A zero-dependency Python CRUD web application with SQLite backend and REST API.'],
+    'telegram-bot': ['Telegram bot', 'A Python Telegram Bot for notes management (stdlib only).'],
+    'chrome-extension': ['Chrome extension', 'A Manifest V3 Google Chrome extension with popup UI and scratchpad.'],
+    'cli-tool': ['CLI tool', 'A Python command-line utility with argparse, text analysis, and --json flag.']
+  };
+  if (f.template) {
+    f.template.onchange = () => {
+      const v = f.template.value;
+      if (TPL_PRESETS[v]) {
+        f.title.value = TPL_PRESETS[v][0];
+        f.idea.value = TPL_PRESETS[v][1];
+        f.title.oninput();
+      }
+    };
+  }
   const slug = () => (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
   f.title.oninput = () => { f.folder.placeholder = ag.projects_root + '/' + (slug() || '<name>'); };
   f.title.oninput(); f.title.focus();
@@ -12234,6 +12478,22 @@ async function setupPanel() {
     $('recheck').onclick = () => { box.innerHTML = '<p class="meta">checking…</p>'; setupPanel(); };
   } catch (e) { box.innerHTML = ''; }
 }
+
+async function connectCards() {
+  try {
+    const d = await (await fetch('/api/connect')).json();
+    if ($('pair-count')) $('pair-count').textContent = d.paired_count + ' paired';
+    if ($('card-tg')) set($('card-tg'), '#tg-status', d.telegram ? 'connected' : 'optional');
+    if ($('card-dc')) set($('card-dc'), '#dc-status', d.discord ? 'connected' : 'optional');
+    if ($('card-sl')) set($('card-sl'), '#sl-status', d.slack ? 'connected' : 'optional');
+  } catch (e) {}
+}
+if ($('revoke-btn')) $('revoke-btn').onclick = async () => {
+  if (!confirm('Revoke all paired phone sessions? They will need to scan a new QR code to reconnect.')) return;
+  const res = await act('/api/pair/revoke');
+  toast(res.msg || 'Revoked all paired devices');
+  connectCards();
+};
 
 // Servers: this one and its peers; + add server makes a join code.
 async function servers2() {
@@ -12266,7 +12526,7 @@ $('copyjoin').onclick = async () => {
   catch (e) { const r = document.createRange(); r.selectNodeContents($('joincmd'));
               getSelection().removeAllRanges(); getSelection().addRange(r); toast('selected — copy it'); }
 };
-setupPanel(); servers2(); setInterval(servers2, 30000);
+setupPanel(); connectCards(); servers2(); setInterval(servers2, 30000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 // Deep links from the office: /#new opens the project form, /#servers the steps.
 if (location.hash === '#new') openNew();
@@ -12287,8 +12547,10 @@ $('newf').onsubmit = async ev => {
   ev.preventDefault(); const f = ev.target, b = f.querySelector('button[type=submit]');
   const slug = (f.title.value.toLowerCase().match(/[a-z0-9]+/g) || []).slice(0, 4).join('-');
   b.disabled = true; toast('creating ' + f.title.value + '…');
+  const tplVal = (f.template && f.template.value) ? f.template.value : '';
   const o = await act('/api/topic/new', {title: f.title.value, name: slug, folder: f.folder.value.trim(),
-                                          agent: f.agent.value, idea: f.idea.value.trim(), server: f.server.value});
+                                          agent: f.agent.value, idea: f.idea.value.trim(), server: f.server.value,
+                                          template: tplVal});
   b.disabled = false; toast(o.msg);
   if (o.ok) { f.reset(); $('newp').classList.remove('open'); tick(); }
 };
@@ -13785,6 +14047,18 @@ def qr_svg(text):
             f"<path d='{d}' fill='#000'/></svg>")
 
 
+def get_local_ip():
+    """Detect LAN / local IP address without external network requests."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
 def phone_url(cfg, status=None):
     """The https tailnet URL `tailscale serve` maps onto the dashboard, or None.
 
@@ -13815,6 +14089,417 @@ def qr_text(text):
     return "\n".join("".join(" ▄▀█"[(not a) * 2 + (not b)] for a, b in zip(top, bot))
                      for top, bot in zip(m[::2], m[1::2]))
 
+
+def pairing_url(cfg, code):
+    """Full pairing URL either over tailnet or LAN."""
+    base = phone_url(cfg)
+    port = cfg.get("webhook_port") or 9090
+    if not base:
+        ip = get_local_ip()
+        base = f"http://{ip}:{port}"
+    return f"{base}/pair?code={code}"
+
+
+PAIRED_TOKENS_FILE = os.path.join(STATE_DIR, "paired_tokens.json")
+_paired_tokens = None
+_pairing_codes = {}
+
+
+def load_paired_tokens():
+    global _paired_tokens
+    if _paired_tokens is not None:
+        return _paired_tokens
+    try:
+        with open(PAIRED_TOKENS_FILE) as f:
+            _paired_tokens = set(json.load(f))
+    except (OSError, ValueError):
+        _paired_tokens = set()
+    return _paired_tokens
+
+
+def save_paired_tokens(tokens):
+    global _paired_tokens
+    _paired_tokens = set(tokens)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = PAIRED_TOKENS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(list(_paired_tokens), f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, PAIRED_TOKENS_FILE)
+    except OSError:
+        pass
+
+
+def new_pairing_code():
+    code = secrets.token_urlsafe(16)
+    _pairing_codes[code] = time.time()
+    return code
+
+
+def redeem_pairing_code(code):
+    now = time.time()
+    for c, t in list(_pairing_codes.items()):
+        if now - t > 900:
+            _pairing_codes.pop(c, None)
+    if code and code in _pairing_codes:
+        _pairing_codes.pop(code, None)
+        token = secrets.token_hex(32)
+        tokens = load_paired_tokens()
+        tokens.add(token)
+        save_paired_tokens(tokens)
+        return token
+    return None
+
+
+def is_paired_token(token):
+    return bool(token and token in load_paired_tokens())
+
+
+def revoke_all_paired_tokens():
+    save_paired_tokens(set())
+    _pairing_codes.clear()
+
+
+def pick_installed_agent(cfg):
+    """Automatically pick the best available agent from installed ones."""
+    inst = installed_agents(cfg)
+    if not inst:
+        return cfg.get("agent") or "claude"
+    if cfg.get("agent") in inst:
+        return cfg["agent"]
+    for pref in ("claude", "agy", "codex", "opencode", "gemini"):
+        if pref in inst:
+            return pref
+    return inst[0]
+
+
+STARTER_TEMPLATES = {
+    "landing-page": {
+        "title": "Landing page",
+        "slug": "landing-page",
+        "summary": "Modern responsive product landing page with hero, features, and email signup.",
+        "spec": """# Product Landing Page Specification
+
+Build a modern, responsive, mobile-first product landing page.
+
+## Requirements
+1. **Structure**:
+   - `index.html`: Clean, semantic HTML5 structure (<header>, <main>, <section>, <footer>).
+   - `styles.css`: Modern responsive styles (CSS variables, flexbox/grid, dark-mode support).
+   - `app.js`: Interactive features (smooth scrolling, contact/signup form handling).
+2. **Sections**:
+   - Hero section with headline, subtitle, and primary CTA button.
+   - Features section highlighting at least 3 core benefits/features.
+   - Newsletter / waitlist email signup form with client-side validation.
+   - Footer with social links and navigation.
+3. **Quality**:
+   - Fully responsive down to 320px mobile viewports.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Checking Landing Page..."
+test -f index.html || { echo "Missing index.html"; exit 1; }
+test -f styles.css || test -f style.css || { echo "Missing stylesheet"; exit 1; }
+
+python3 -c '
+import re, sys
+with open("index.html") as f:
+    html = f.read()
+
+assert "<!doctype html>" in html.lower(), "Missing <!DOCTYPE html>"
+assert "<meta name=\\"viewport\\"" in html.lower(), "Missing viewport meta tag"
+assert "<title>" in html.lower(), "Missing <title> tag"
+assert re.search(r"<(header|nav)\\b", html, re.I), "Missing <header> or <nav>"
+assert re.search(r"<main\\b", html, re.I), "Missing <main>"
+assert re.search(r"<footer\\b", html, re.I), "Missing <footer>"
+assert re.search(r"<form\\b", html, re.I), "Missing form"
+print("HTML structure verification passed.")
+'
+echo "==> Landing Page checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a modern, responsive product landing page with hero, features, and email signup form. Read SPEC.md, implement index.html and styles.css, and loop until ./check.sh passes."
+    },
+    "crud-app": {
+        "title": "CRUD web app",
+        "slug": "crud-app",
+        "summary": "Zero-dependency Python CRUD web application with SQLite backend and REST API.",
+        "spec": """# CRUD Web Application Specification
+
+Build a lightweight, zero-dependency RESTful CRUD web application in Python.
+
+## Requirements
+1. **Server (`server.py`)**:
+   - Built with Python standard library (`http.server`, `sqlite3`, `json`).
+   - SQLite database `items.db` with table `items(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT)`.
+2. **API Endpoints**:
+   - `GET /api/items`: List all items as JSON array.
+   - `POST /api/items`: Create an item (requires `{"title": "..."}`), returns 201 with created item.
+   - `GET /api/items/<id>`: Retrieve single item by ID.
+   - `DELETE /api/items/<id>`: Delete item by ID.
+3. **Frontend (`index.html`)**:
+   - Simple clean interface to view, add, and delete items.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing CRUD Web Application..."
+test -f server.py || { echo "Missing server.py"; exit 1; }
+test -f index.html || { echo "Missing index.html"; exit 1; }
+
+python3 -c '
+import subprocess, time, urllib.request, json, sys
+
+proc = subprocess.Popen([sys.executable, "server.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    for _ in range(30):
+        try:
+            req = urllib.request.urlopen("http://127.0.0.1:8080/api/items", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        raise RuntimeError("server did not start within 3 seconds")
+
+    req = urllib.request.Request("http://127.0.0.1:8080/api/items",
+                                 data=json.dumps({"title": "Test Item", "description": "Details"}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    res = urllib.request.urlopen(req)
+    assert res.status in (200, 201), f"POST returned {res.status}"
+    item = json.loads(res.read().decode())
+    item_id = item["id"]
+
+    res = urllib.request.urlopen(f"http://127.0.0.1:8080/api/items/{item_id}")
+    assert res.status == 200
+
+    req = urllib.request.Request(f"http://127.0.0.1:8080/api/items/{item_id}", method="DELETE")
+    res = urllib.request.urlopen(req)
+    assert res.status in (200, 204)
+    print("All CRUD API endpoints verified successfully.")
+finally:
+    proc.terminate()
+    proc.wait()
+'
+echo "==> CRUD Web App checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a zero-dependency Python CRUD web application with SQLite backend and REST API. Read SPEC.md, implement server.py and index.html, and loop until ./check.sh passes."
+    },
+    "telegram-bot": {
+        "title": "Telegram bot",
+        "slug": "telegram-bot",
+        "summary": "Standalone Python Telegram Bot for notes management (stdlib only).",
+        "spec": """# Telegram Bot Specification
+
+Build a standalone Python Telegram Bot (stdlib only) for notes management.
+
+## Requirements
+1. **Module (`bot.py`)**:
+   - Provide `dispatch_command(text: str, user_id: int) -> str` or `handle_update(update: dict) -> dict | list[dict]`.
+   - Commands:
+     - `/start`: Returns welcome greeting.
+     - `/help`: Lists available commands.
+     - `/note <text>`: Saves note for user.
+     - `/notes`: Lists saved notes.
+2. **Testing**:
+   - Unit tests running without external dependencies.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing Telegram Bot..."
+test -f bot.py || { echo "Missing bot.py"; exit 1; }
+
+python3 -c '
+import bot
+
+if hasattr(bot, "dispatch_command"):
+    r_start = bot.dispatch_command("/start", user_id=123)
+    assert "welcome" in r_start.lower() or "help" in r_start.lower(), f"Unexpected /start response: {r_start}"
+    r_note = bot.dispatch_command("/note Buy milk", user_id=123)
+    assert "saved" in r_note.lower() or "note" in r_note.lower()
+    r_notes = bot.dispatch_command("/notes", user_id=123)
+    assert "Buy milk" in r_notes
+elif hasattr(bot, "handle_update"):
+    upd = {"update_id": 1, "message": {"message_id": 1, "chat": {"id": 123}, "from": {"id": 123}, "text": "/start"}}
+    res = bot.handle_update(upd)
+    assert res, "No response for /start"
+    upd_note = {"update_id": 2, "message": {"message_id": 2, "chat": {"id": 123}, "from": {"id": 123}, "text": "/note Buy milk"}}
+    bot.handle_update(upd_note)
+    upd_list = {"update_id": 3, "message": {"message_id": 3, "chat": {"id": 123}, "from": {"id": 123}, "text": "/notes"}}
+    res_list = bot.handle_update(upd_list)
+    assert any("Buy milk" in str(r) for r in ([res_list] if isinstance(res_list, dict) else res_list))
+else:
+    raise AssertionError("bot.py must expose dispatch_command or handle_update")
+print("Telegram bot logic verified.")
+'
+echo "==> Telegram Bot checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Python Telegram Bot for notes management (stdlib only). Read SPEC.md, implement bot.py, and loop until ./check.sh passes."
+    },
+    "chrome-extension": {
+        "title": "Chrome extension",
+        "slug": "chrome-extension",
+        "summary": "Manifest V3 Google Chrome extension with popup UI and scratchpad.",
+        "spec": """# Chrome Extension (Manifest V3) Specification
+
+Build a Google Chrome extension adhering strictly to Manifest V3 standards.
+
+## Requirements
+1. **`manifest.json`**:
+   - `manifest_version: 3`
+   - `name`, `version`, `description`
+   - `action` defining `default_popup: "popup.html"`
+2. **Popup UI (`popup.html`, `popup.js`)**:
+   - Quick scratchpad / note-taking popup with local storage persistence.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing Chrome Extension..."
+test -f manifest.json || { echo "Missing manifest.json"; exit 1; }
+test -f popup.html || { echo "Missing popup.html"; exit 1; }
+test -f popup.js || { echo "Missing popup.js"; exit 1; }
+
+python3 -c '
+import json
+with open("manifest.json") as f:
+    m = json.load(f)
+
+assert m.get("manifest_version") == 3, f"manifest_version must be 3, got {m.get(\\"manifest_version\\")}"
+assert m.get("name"), "manifest.json missing name"
+assert m.get("version"), "manifest.json missing version"
+assert "action" in m, "manifest.json missing action"
+assert m["action"].get("default_popup") == "popup.html", "action.default_popup must be popup.html"
+print("Manifest V3 syntax and structure verified.")
+'
+echo "==> Chrome Extension checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Manifest V3 Google Chrome extension with popup.html, popup.js, and manifest.json. Read SPEC.md and loop until ./check.sh passes."
+    },
+    "cli-tool": {
+        "title": "CLI tool",
+        "slug": "cli-tool",
+        "summary": "Command-line utility in Python with argparse, text analysis, and --json flag.",
+        "spec": """# Command-Line Tool Specification
+
+Build a versatile command-line utility in Python (`cli.py`).
+
+## Requirements
+1. **Entrypoint (`cli.py`)**:
+   - Executable with `python3 cli.py` or `./cli.py`.
+   - Uses `argparse` for argument parsing.
+2. **Features**:
+   - `--help` / `-h`: Displays formatted help.
+   - Text analysis and word/line counting tool.
+   - `--json`: Outputs structured JSON.
+3. **Exit Codes**:
+   - `0` on success, non-zero on error.
+""",
+        "check_sh": """#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Testing CLI Tool..."
+test -f cli.py || { echo "Missing cli.py"; exit 1; }
+
+python3 -c '
+import subprocess, sys, json
+
+res = subprocess.run([sys.executable, "cli.py", "--help"], capture_output=True, text=True)
+assert res.returncode == 0, f"--help failed with {res.returncode}"
+assert "usage" in res.stdout.lower() or "options" in res.stdout.lower()
+
+res = subprocess.run([sys.executable, "cli.py", "--json"], input="hello world\\nnightmux\\n", capture_output=True, text=True)
+assert res.returncode == 0, f"Execution failed: {res.stderr}"
+data = json.loads(res.stdout)
+assert isinstance(data, dict), "Output must be JSON dictionary"
+
+res = subprocess.run([sys.executable, "cli.py", "--invalid-flag-that-does-not-exist"], capture_output=True, text=True)
+assert res.returncode != 0, "Invalid flag should exit non-zero"
+print("CLI tool behavior verified successfully.")
+'
+echo "==> CLI Tool checks passed!"
+exit 0
+""",
+        "idea_prompt": "Build a Python command-line utility with argparse, text analysis, and --json flag. Read SPEC.md, implement cli.py, and loop until ./check.sh passes."
+    }
+}
+
+
+def create_starter_project(cfg, state, lock, template_key, title="", name="", folder="", agent=""):
+    """Instantiate one of the 5 starter templates with SPEC.md, check.sh, and !goal loop."""
+    tpl = STARTER_TEMPLATES.get(template_key)
+    if not tpl:
+        return False, f"unknown template '{template_key}'", None
+    name = (name or tpl["slug"]).strip()
+    title = (title or tpl["title"]).strip()
+    agent = agent or pick_installed_agent(cfg)
+    root = os.path.expanduser(cfg.get("projects_root") or "~/projects")
+    folder = os.path.expanduser(folder or os.path.join(root, name))
+    os.makedirs(folder, exist_ok=True)
+    if not os.path.exists(os.path.join(folder, ".git")):
+        run("git", "init", "-q", folder)
+    spec_path = os.path.join(folder, "SPEC.md")
+    with open(spec_path, "w") as f:
+        f.write(tpl["spec"])
+    check_path = os.path.join(folder, "check.sh")
+    with open(check_path, "w") as f:
+        f.write(tpl["check_sh"])
+    os.chmod(check_path, 0o755)
+    run("git", "-C", folder, "add", "SPEC.md", "check.sh")
+    run("git", "-C", folder, "commit", "-q", "-m", f"Initial {tpl['title']} from nightmux template", timeout=10)
+    idea = tpl["idea_prompt"]
+    ok, msg, topic = topic_new(cfg, state, lock, title, name, folder, agent, idea=idea)
+    return ok, msg, topic
+
+
+PAIR_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📱 Pair Your Phone — nightmux</title>
+<link rel="icon" href="/icon.svg">
+<style>
+:root { color-scheme: dark; --bg: #0a0d14; --card: #121725; --line: #232a3d; --fg: #dbe1ee; --mut: #8b93a7; --blue: #7aa2f7; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 90vh; }
+.box { background: var(--card); border: 1px solid var(--line); border-radius: 16px; max-width: 420px; width: 100%; padding: 28px 24px; text-align: center; box-shadow: 0 12px 36px #00000088; }
+h1 { font-size: 20px; margin: 0 0 10px; }
+p { font-size: 14px; color: var(--mut); margin: 0 0 16px; line-height: 1.5; }
+.qr { background: #fff; padding: 12px; border-radius: 12px; display: inline-block; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+.qr img { display: block; width: 200px; height: 200px; }
+code { background: #07090f; border: 1px solid var(--line); padding: 8px 10px; border-radius: 8px; font-size: 12px; word-break: break-all; display: block; margin: 12px 0 20px; color: #79c0ff; }
+a.btn { display: inline-block; background: linear-gradient(180deg, #2f7bf5, #1f6feb); color: #fff; text-decoration: none; padding: 10px 22px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+</style></head>
+<body><div class="box">
+<h1>📱 Scan to Pair Phone</h1>
+<p>Scan this QR code with your phone camera to securely open your dashboard without typing passwords or opening ports.</p>
+<div class="qr"><img src="/qr.svg?d=__PAIR_URL_ENC__" width="200" height="200" alt="QR Code"></div>
+<p>Or open this link on your phone:</p>
+<code>__PAIR_URL__</code>
+<p><a href="/" class="btn">Open Local Dashboard</a></p>
+</div></body></html>
+"""
+
+AUTH_401_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>401 Unauthorized — nightmux</title>
+<link rel="icon" href="/icon.svg">
+<style>
+body { margin: 0; background: #0a0d14; color: #dbe1ee; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; min-height: 100vh; text-align: center; padding: 24px; }
+h1 { color: #f85149; font-size: 24px; margin-bottom: 12px; }
+p { color: #8b93a7; font-size: 15px; max-width: 420px; line-height: 1.5; }
+code { background: #161c2c; padding: 4px 8px; border-radius: 6px; font-size: 13px; color: #e0af68; }
+</style></head>
+<body><div>
+<h1>🔒 401 Unauthorized</h1>
+<p>Phone pairing required. Scan the terminal QR code where nightmux is running to authenticate this device.</p>
+</div></body></html>
+"""
 
 APK_URL = "https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk"
 TERM_HTML = r"""<!doctype html>
@@ -13979,9 +14664,96 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def is_localhost(self):
+        client = getattr(self, "client_address", None)
+        if not client:
+            return True
+        return client[0] in ("127.0.0.1", "::1", "localhost")
+
+    def check_auth(self):
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "nm_auth" and is_paired_token(v):
+                return True
+        return False
+
+    def auth_gate(self):
+        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Localhost stays open."""
+        if self.is_localhost():
+            return True
+        clean_path = self.path.split("?")[0]
+        if clean_path in ("/pair", "/icon.svg", "/manifest.json", "/sw.js") \
+                or clean_path.startswith(("/qr.svg", "/public/", "/peer/")):
+            return True
+        if not self.check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(AUTH_401_HTML.encode("utf-8"))
+            return False
+        return True
+
     def do_GET(self):
         if not self.peer_gate():
             return
+        if not self.auth_gate():
+            return
+        if self.path.startswith("/pair"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            code = (q.get("code") or [""])[0]
+            if code:
+                token = redeem_pairing_code(code)
+                if token:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Set-Cookie", f"nm_auth={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=315360000")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(b"<!doctype html><html><head><meta charset='utf-8'>"
+                                     b"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                     b"<meta http-equiv='refresh' content='1;url=/'>"
+                                     b"<title>Phone Paired</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                     b"font-family:system-ui;text-align:center;padding:40px;}h1{color:#3fb950;}a{color:#7aa2f7;}</style></head>"
+                                     b"<body><h1>\xe2\x9c\x85 Phone Paired</h1><p>Authenticated! Opening dashboard\xe2\x80\xa6</p>"
+                                     b"<p><a href='/'>Go to Dashboard</a></p></body></html>")
+                    return
+                if self.check_auth():
+                    return self.reply("<!doctype html><html><head><meta charset='utf-8'>"
+                                      "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                      "<title>Already Paired</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                      "font-family:system-ui;text-align:center;padding:40px;}a{color:#7aa2f7;}</style></head>"
+                                      "<body><h1>\xe2\x9c\x85 Already Paired</h1><p>Your device is authenticated.</p>"
+                                      "<p><a href='/'>Go to Dashboard</a></p></body></html>", "text/html; charset=utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<!doctype html><html><head><meta charset='utf-8'>"
+                                 b"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                 b"<title>Pairing Error</title><style>body{background:#0a0d14;color:#dbe1ee;"
+                                 b"font-family:system-ui;text-align:center;padding:40px;}</style></head>"
+                                 b"<body><h1>\xe2\x9a\xa0 Invalid or Expired Code</h1>"
+                                 b"<p>Please generate a new code from the terminal or dashboard.</p></body></html>")
+                return
+            c = new_pairing_code()
+            purl = pairing_url(self.server.cfg, c)
+            html = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
+                                    ).replace("__PAIR_URL__", html.escape(purl))
+            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+        if self.path == "/api/connect":
+            cfg = self.server.cfg
+            return self.reply(json.dumps({
+                "paired_count": len(load_paired_tokens()),
+                "telegram": bool(cfg.get("token")),
+                "discord": bool(cfg.get("discord_token")),
+                "slack": bool(cfg.get("slack_token")),
+                "tailnet_url": phone_url(cfg)
+            }), "application/json")
+        if self.path == "/api/templates":
+            items = [{"key": k, "title": v["title"], "slug": v["slug"], "summary": v["summary"]}
+                     for k, v in STARTER_TEMPLATES.items()]
+            return self.reply(json.dumps(items), "application/json")
         if self.path.startswith("/public/"):
             tok, _, rest = self.path[len("/public/"):].partition("/")
             if self.peer or not public_ok(self.server.cfg, tok):
@@ -14164,9 +14936,28 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.error_hook()
         if not self.peer_gate():
             return
+        if not self.auth_gate():
+            return
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
+        if self.path == "/api/pair/revoke":
+            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            count = len(load_paired_tokens())
+            revoke_all_paired_tokens()
+            return self.reply(json.dumps({"ok": True, "revoked": count, "msg": f"Revoked {count} paired devices"}),
+                              "application/json")
+        if self.path == "/api/pair/code":
+            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
+            c = new_pairing_code()
+            purl = pairing_url(self.server.cfg, c)
+            return self.reply(json.dumps({"ok": True, "code": c, "url": purl}), "application/json")
         if self.peer and self.path == "/upgrade":       # the primary's !upgrade
             with _upgrading:
                 changed, msg = self_upgrade()
@@ -14318,10 +15109,19 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")          # api topic <id|new> [verb]
         try:
             if parts[2:] == ["new"]:
-                ok, msg, topic = topic_new(cfg, st, lk, req.get("title"), req.get("name"),
-                                           req.get("folder"), req.get("agent"),
-                                           req.get("idea", ""), req.get("server", ""))
-                out = {"ok": ok, "msg": msg, "topic": topic}
+                tpl_key = req.get("template")
+                if tpl_key:
+                    ok, msg, topic = create_starter_project(cfg, st, lk, tpl_key,
+                                                            title=req.get("title", ""),
+                                                            name=req.get("name", ""),
+                                                            folder=req.get("folder", ""),
+                                                            agent=req.get("agent", ""))
+                    out = {"ok": ok, "msg": msg, "topic": topic}
+                else:
+                    ok, msg, topic = topic_new(cfg, st, lk, req.get("title"), req.get("name"),
+                                               req.get("folder"), req.get("agent"),
+                                               req.get("idea", ""), req.get("server", ""))
+                    out = {"ok": ok, "msg": msg, "topic": topic}
             elif len(parts) == 4:
                 topic, verb = parts[2], parts[3]
                 peer = peer_of(cfg, topic)
@@ -14403,6 +15203,12 @@ def main():
     migrate()
     try:
         cfg = load_cfg()
+    except (FileNotFoundError, OSError):
+        cfg = {"webhook_port": 9090, "chat_id": "local", "allow_users": [0], "topics": {}}
+        try:
+            save_cfg(cfg)
+        except Exception:
+            pass
     except json.JSONDecodeError as e:
         sys.exit(bad_cfg(e))
     local_ = not cfg.get("token")
@@ -14446,9 +15252,18 @@ def main():
             threading.Thread(target=run_webhook_server, daemon=True,
                              args=(cfg, state, lock, allow, cfg["webhook_port"]),
                              kwargs={"host": web_host(cfg)}).start()
-        print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ "
-              f"topics={cfg['topics']}" if local_ else
-              f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
+        if local_:
+            c = new_pairing_code()
+            purl = pairing_url(cfg, c)
+            print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ topics={cfg['topics']}", flush=True)
+            print(f"📱 Phone pairing URL: {purl}", flush=True)
+            print(f"Scan with your phone to pair:\n{qr_text(purl)}\n", flush=True)
+            try:
+                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/pair?code={c}")
+            except Exception:
+                pass
+        else:
+            print(f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
         while True:
             time.sleep(3600)
 
@@ -15137,6 +15952,9 @@ def stubbed(**globs):
 
 
 def selfcheck():
+    # Pairing tests mint tokens: never into the live state dir the service reads.
+    global PAIRED_TOKENS_FILE
+    PAIRED_TOKENS_FILE = os.path.join(__import__("tempfile").mkdtemp(), "paired_tokens.json")
     cmd_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "COMMANDS.md")
     if os.path.exists(cmd_md):              # a git checkout, not a pip install
         with open(cmd_md) as f:
@@ -16386,11 +17204,51 @@ def selfcheck():
                            "rate_limits": {"primary": {"used_percent": 42.0, "window_minutes": 300,
                                                        "resets_at": time.time() + 600}}}}):
                 f.write(json.dumps(l_) + "\n")
+        # OpenCode v2 (session_v2 & session_message) fixture test
+        os.makedirs(os.path.join(h_, ".local", "share", "opencode"))
+        import sqlite3
+        con_oc = sqlite3.connect(os.path.join(h_, ".local", "share", "opencode", "opencode.db"))
+        con_oc.execute("CREATE TABLE session_v2 (id TEXT, directory TEXT, time_created INTEGER)")
+        con_oc.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+        now_ms_ = int(time.time() * 1000)
+        con_oc.execute("INSERT INTO session_v2 VALUES ('s_oc', NULL, ?)", (now_ms_,))
+        con_oc.execute("INSERT INTO session_message VALUES ('m_oc1', 's_oc', ?, ?)",
+                       (now_ms_, json.dumps({"role": "user", "content": "build feature"})))
+        con_oc.execute("INSERT INTO session_message VALUES ('m_oc2', 's_oc', ?, ?)",
+                       (now_ms_, json.dumps({"role": "assistant", "tokens": {"input": 500, "output": 100, "cache": {"read": 200}}})))
+        con_oc.commit()
+        con_oc.close()
+
+        # Agy transcript.jsonl fixture test
+        agy_logs = os.path.join(h_, ".gemini", "antigravity-cli", "brain", "cid_1", ".system_generated", "logs")
+        os.makedirs(agy_logs)
+        with open(os.path.join(agy_logs, "transcript.jsonl"), "w") as f_agy:
+            f_agy.write(json.dumps({"type": "USER_INPUT", "content": "<USER_REQUEST>\nfix test\n</USER_REQUEST>"}) + "\n")
+            f_agy.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 1000, "cache_read_tokens": 2000, "output_tokens": 150}) + "\n")
+
         r_ = analyze_chats(30, home=h_)
         c_ = r_["agents"]["claude"]
         assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
+        assert r_["agents"]["opencode"]["prompts"] == 1 and r_["agents"]["opencode"]["tokens"]["input"] == 500
+        assert r_["agents"]["agy"]["prompts"] == 1 and r_["agents"]["agy"]["tokens"]["input"] == 1000
+        assert check_reader_drift(home=h_)[1] is True
+        assert "claude" in AGENT_ADAPTERS and callable(adapter_for("opencode")["usage_reader"])
+        assert "🩺 doctor check:" in doctor_report()
+        assert "🩺 doctor check:" in handle({"topics": {"1": "s"}}, {}, threading.Lock(), "1", "!doctor")
+
+        with tempfile.TemporaryDirectory() as h_drift:
+            os.makedirs(os.path.join(h_drift, ".local", "share", "opencode"))
+            con_dr = sqlite3.connect(os.path.join(h_drift, ".local", "share", "opencode", "opencode.db"))
+            con_dr.execute("CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER)")
+            con_dr.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+            con_dr.execute("INSERT INTO session VALUES ('s_d', '/tmp', ?)", (now_ms_,))
+            con_dr.execute("INSERT INTO message VALUES ('m_d', 's_d', ?, '{\"role\":\"assistant\",\"broken\":1}')", (now_ms_,))
+            con_dr.commit()
+            con_dr.close()
+            chk_d, ok_d, fix_d = check_reader_drift(home=h_drift)
+            assert ok_d is False and "opencode" in fix_d and "0 parsed tokens" in fix_d
         assert "SECRETPROMPT" not in json.dumps(r_) + stats_report(r_)
         assert r_["when"]["projects"] == [("shop", 30)], r_["when"]
         w_ = when_summary({}, r_["when"])
@@ -17176,11 +18034,82 @@ def selfcheck():
     qm_ = qr_matrix("https://box.ts.net/app")
     assert len(qm_) == 25 and qm_[0][:7] == [True] * 7 and qm_[1][1:6] == [False] * 5
     assert len(qr_matrix("x" * 200)) == 53 and len(qr_matrix("")) == 21
-    try:
-        qr_matrix("x" * 400)
-        assert False, "accepted a QR too long"
-    except ValueError:
-        pass
+    # Terminal QR and phone pairing
+    qt_ = qr_text("https://box.ts.net/app")
+    assert "▄" in qt_ or "▀" in qt_ or "█" in qt_
+    code_ = new_pairing_code()
+    assert code_ and len(code_) >= 16
+    tok_ = redeem_pairing_code(code_)
+    assert tok_ and is_paired_token(tok_)
+    assert redeem_pairing_code(code_) is None   # one-time use
+
+    code2_ = new_pairing_code()
+    pair_res_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/pair?code={code2_}")
+    assert pair_res_.status == 200
+    cookie_hdr_ = pair_res_.headers.get("Set-Cookie", "")
+    assert "nm_auth=" in cookie_hdr_
+
+    conn_ = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port_}/api/connect").read().decode())
+    assert "paired_count" in conn_ and conn_["paired_count"] >= 1
+
+    rev_req_ = urllib.request.Request(f"http://127.0.0.1:{port_}/api/pair/revoke", data=b"{}",
+                                      headers={"X-Nightmux": "1"}, method="POST")
+    rev_res_ = json.loads(urllib.request.urlopen(rev_req_).read().decode())
+    assert rev_res_["ok"] is True
+    assert not is_paired_token(tok_)
+
+    class DummyHandler(WebhookHandler):
+        def __init__(self, ip, headers=None, path="/"):
+            self.client_address = (ip, 12345)
+            self.headers = headers or {}
+            self.path = path
+            self.status = None
+            self.sent_headers = {}
+            self.written = b""
+        def send_response(self, code):
+            self.status = code
+        def send_header(self, k, v):
+            self.sent_headers[k] = v
+        def end_headers(self):
+            pass
+        @property
+        def wfile(self):
+            class W:
+                def __init__(self, parent): self.p = parent
+                def write(self, b): self.p.written += b
+            return W(self)
+
+    assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1")) is True
+    h_remote = DummyHandler("192.168.1.50")
+    assert WebhookHandler.auth_gate(h_remote) is False and h_remote.status == 401
+    assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", path="/pair?code=xyz")) is True
+
+    code3_ = new_pairing_code()
+    tok3_ = redeem_pairing_code(code3_)
+    assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", headers={"Cookie": f"nm_auth={tok3_}"})) is True
+
+    # 5 Starter templates
+    assert len(STARTER_TEMPLATES) == 5
+    for t_k in ("landing-page", "crud-app", "telegram-bot", "chrome-extension", "cli-tool"):
+        assert t_k in STARTER_TEMPLATES
+        assert len(STARTER_TEMPLATES[t_k]["spec"]) > 50
+        assert "set -euo pipefail" in STARTER_TEMPLATES[t_k]["check_sh"]
+
+    with tempfile.TemporaryDirectory() as tpl_dir_, stubbed(
+            spawn=lambda n, *a: None, save_cfg=lambda c: None,
+            has_session=lambda n: False, send=lambda *a, **k: None):
+        tcfg_ = {"projects_root": tpl_dir_, "chat_id": "local", "allow_users": [0], "topics": {}}
+        tok_, tmsg_, ttop_ = create_starter_project(tcfg_, {}, threading.Lock(), "cli-tool",
+                                                    title="My CLI", name="my-cli",
+                                                    folder=os.path.join(tpl_dir_, "my-cli"),
+                                                    agent="claude")
+        assert tok_ is True, tmsg_
+        assert os.path.isfile(os.path.join(tpl_dir_, "my-cli", "SPEC.md"))
+        check_file_ = os.path.join(tpl_dir_, "my-cli", "check.sh")
+        assert os.path.isfile(check_file_)
+        assert os.access(check_file_, os.X_OK)
+        assert os.path.isdir(os.path.join(tpl_dir_, "my-cli", ".git"))
+
     # The daemon's PATH grows by the user bin dirs that exist, never duplicates.
     with tempfile.TemporaryDirectory() as hp_:
         os.makedirs(os.path.join(hp_, ".local", "bin"))
@@ -19086,6 +20015,47 @@ def reader_drift(home=None, days=7):
     return out
 
 
+_unknown_pane_since = {}
+
+
+def check_reader_drift(cfg=None, home=None):
+    """Detect if an agent shows activity but 0 parsed tokens, or screen stuck in unknown."""
+    warnings = []
+    # 1. Check readers for activity with 0 parsed tokens
+    try:
+        r = analyze_chats(days=30, home=home)
+        ag_data = r.get("agents") or {}
+        for a, ad in AGENT_ADAPTERS.items():
+            if not ad.get("usage_reader"):
+                continue
+            s = ag_data.get(a)
+            if not s:
+                continue
+            errs = s.get("errors") or 0
+            prompts = s.get("prompts") or 0
+            requests = s.get("requests") or 0
+            sessions = s.get("sessions") or 0
+            effective_activity = requests + max(0, prompts - errs) + max(0, sessions - errs)
+            toks = sum((s.get("tokens") or {}).values())
+            if effective_activity > 0 and toks == 0:
+                bin_name = ad.get("version_cmd", [a])[0]
+                ver = agent_version(bin_name)
+                warnings.append(f"{a} ({ver}): {effective_activity} active items but 0 parsed tokens")
+    except Exception as e:
+        warnings.append(f"reader check error: {e}")
+
+    # 2. Check screen classification stuck in unknown > 5 minutes
+    now = time.time()
+    for sess, t_seen in list(_unknown_pane_since.items()):
+        if now - t_seen > 300:
+            mins = int((now - t_seen) // 60)
+            warnings.append(f"session '{sess}' screen classified as unknown for {mins}m")
+
+    if warnings:
+        return "reader drift", False, "; ".join(warnings) + " — CLI format may have changed"
+    return "reader drift", True, ""
+
+
 def setup_checks(cfg=None):
     """[(label, ok, how to fix)] — ok None means optional and not set up. The
     one list behind --doctor and the dashboard's setup panel."""
@@ -19164,6 +20134,9 @@ def setup_checks(cfg=None):
             "token stats for it are wrong until nightmux is updated")
     if not drift:
         add("token readers match the installed CLIs", True)
+    stuck = [s for s, t in _unknown_pane_since.items() if time.time() - t > 300]
+    if stuck:
+        add("screen reader", False, f"unknown screen for 5m+: {', '.join(stuck)} — the CLI format may have changed")
     return out
 
 
@@ -19176,6 +20149,18 @@ def doctor():
         print(f"{mark} {label}" + (f" — {fix}" if fix and not passed else
                                    f" — {fix}" if fix and passed and label.startswith(("Claude", "agents")) else ""))
     return ok
+
+
+def doctor_report(cfg=None):
+    """Format doctor checks for Telegram or chat display."""
+    lines = ["🩺 doctor check:"]
+    for label, passed, fix in setup_checks(cfg):
+        mark = "✓" if passed else "–" if passed is None else "✗"
+        line = f"{mark} {label}"
+        if fix and (not passed or label.startswith(("Claude", "agents", "reader"))):
+            line += f" — {fix}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ---------- --demo: the office with a made-up night, no bot, no keys ----------

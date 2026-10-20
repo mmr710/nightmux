@@ -7,6 +7,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- Unified `AGENT_ADAPTERS` registry: launch commands, screen detectors, multi-schema transcript/usage readers, and limit readers for claude, agy, codex, opencode, gemini, and other agent CLIs.
+- Dual-schema OpenCode reader: parses both `session_message`/`session_v2` and legacy `message`/`session` schemas directly.
+- Antigravity transcript reader: extracts token usage (input, cache read, output, thinking) and clean user requests from `brain/<id>/.system_generated/logs/transcript.jsonl`.
+- Doctor reader drift diagnostic (`!doctor`, `--doctor`, `/api/setup`): flags agents with active sessions/prompts/steps when reader yields 0 parsed tokens or when a screen classifies as unknown for >5m, reporting the CLI version seen.
+- Scheduled CI drift guard workflow (`.github/workflows/drift-guard.yml`): daily cron job installing headless agent CLIs, testing pane classifiers and reader fixtures, and publishing version summary.
 - `!wrapped` shows tokens by agent: a bar split by each agent's share, with a legend. Agents that keep no token counts (agy) show their step counts instead of a misleading 0%. The private card's caption lists the split too.
 - Dashboard redesign: a sticky header with live counts (working / asking / idle / queued / at a limit), topics first, cards edged in their status colour, a pulsing dot on busy and asking agents, and limits and servers below.
 - Office motion: drawing runs at ~30 fps between story frames, so walks move a pixel at a time. Walks ease in and out at each agent's own pace after a beat to stand up, with a four-beat stride, arm swing, facing direction and a shadow. Seated agents blink and glance at the keyboard. Dust drifts in the lamp light.
