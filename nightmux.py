@@ -4072,6 +4072,33 @@ def consult_tick(cfg, state):
 
 AUTOYES_GAP = 4       # never answer the same pane twice inside one tick storm
 AUTOYES_MAX = 25      # ...and this many in an hour, then stop and say so
+# Dialogs auto-yes will not answer, even where it is on: things that destroy,
+# publish or run downloaded code. The human gets the usual buttons instead.
+RISKY = re.compile(
+    r"\brm\s+-\w*[rf]|\bsudo\b|git\s+push|git\s+reset\s+--hard|git\s+clean\s+-\w*f"
+    r"|curl[^|\n]*\|\s*(?:sh|bash)|\bchmod\s+(?:-R\s+)?777|drop\s+(?:table|database)"
+    r"|\bmkfs|\bdd\s+if=|--force\b|\bnpm\s+publish|\bkubectl\s+delete|docker\s+(?:rm|system\s+prune)",
+    re.I)
+
+
+def policy_hit(cfg, topic, text):
+    """The first risky thing `text` mentions under this topic's policy, else None.
+
+    cfg["policy"][topic] = {"off": bool, "deny": [regex, ...]}: the built-in
+    RISKY list plus the topic's own patterns; "off" drops the built-in list.
+    """
+    pol = (cfg.get("policy") or {}).get(str(topic)) or {}
+    pats = [] if pol.get("off") else [RISKY]
+    for p in pol.get("deny") or []:
+        try:
+            pats.append(re.compile(p, re.I))
+        except re.error:
+            pass
+    for rx in pats:
+        m = rx.search(text)
+        if m:
+            return m.group(0).strip()
+    return None
 
 
 def agent_key(cfg, topic, sess):
@@ -4140,6 +4167,13 @@ def autoyes(cfg, state, topic, sess):
             digit = "y"
         else:
             return          # nothing here reads as "yes": a human decides this one
+    hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+    if hit:
+        if st.get("policy_held") != dialog_id(lines):   # say it once per dialog
+            st["policy_held"] = dialog_id(lines)
+            send(cfg, topic, f"\U0001f6d1 policy: {sess} wants '{hit[:60]}' \u2014 your call\n"
+                 "!y / !n  (!policy to change the rules)", mode="plain")
+        return
     st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
@@ -4153,6 +4187,33 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def policy_cmd(cfg, lock, topic, arg):
+    """!policy [off|on|deny <regex>|clear]: what auto-yes must leave to you."""
+    t = str(topic)
+    a = arg.split(None, 1)
+    with lock:
+        pol = cfg.setdefault("policy", {}).setdefault(t, {})
+        if a and a[0] == "off":
+            pol["off"] = True
+        elif a and a[0] == "on":
+            pol.pop("off", None)
+        elif a and a[0] == "clear":
+            pol.clear()
+        elif a and a[0] == "deny" and len(a) == 2:
+            try:
+                re.compile(a[1])
+            except re.error as e:
+                return f"bad regex: {e}"
+            pol.setdefault("deny", []).append(a[1])
+        elif a:
+            return "usage: !policy [on|off|deny <regex>|clear]"
+        save_cfg(cfg)
+    return ("policy: built-in risky list %s, extra patterns: %s\n"
+            "auto-yes never presses yes on a dialog matching these; you get !y/!n instead"
+            % ("OFF" if pol.get("off") else "on (rm -rf, sudo, git push, curl|sh, force, publish...)",
+               ", ".join(pol.get("deny") or []) or "none"))
 
 
 def bench_of(cfg, topic):
@@ -4458,7 +4519,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
@@ -4561,6 +4622,7 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -4996,6 +5058,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("auto-yes on for: " + ", ".join(cur)
                 + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
                   "\n!autoyes off to stop")
+    if cmd == "!policy":
+        return policy_cmd(cfg, lock, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -19469,6 +19533,11 @@ def selfcheck():
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
+    assert policy_hit({}, 7, "Run: rm -rf build/") and policy_hit({}, 7, "git push origin main")
+    assert not policy_hit({}, 7, "Run: ls -la")
+    assert policy_hit({"policy": {"7": {"off": True, "deny": ["deploy"]}}}, 7, "deploy now") == "deploy"
+    assert not policy_hit({"policy": {"7": {"off": True}}}, 7, "sudo ls")
+    assert "usage" in policy_cmd({"chat_id": -1}, threading.Lock(), 7, "bogus")
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
