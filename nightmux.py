@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3198,7 +3199,9 @@ def watcher(cfg, state, lock):
                         try:
                             fut.result()
                         except Exception as e:
-                            print(f"watch {futures[fut]}: {e}", file=sys.stderr)
+                            tb = traceback.extract_tb(e.__traceback__)[-1]
+                            print(f"watch {futures[fut]}: {e} "
+                                  f"({tb.name}:{tb.lineno})", file=sys.stderr)
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
@@ -11817,6 +11820,9 @@ def setup_chat(upd):
     single thread with no way to tell their output apart.
     """
     msg = upd.get("message") or {}
+    mcm = upd.get("my_chat_member") or {}
+    if mcm and (mcm.get("new_chat_member") or {}).get("status") in ("administrator", "member"):
+        msg = mcm              # the bot was just added: bind without waiting for a message
     chat = msg.get("chat") or {}
     if chat.get("type") != "supergroup" or not chat.get("is_forum"):
         return None
@@ -11832,7 +11838,7 @@ def await_group(cfg, timeout=300):
     deadline, nagged = time.time() + timeout, False
     while time.time() < deadline:
         r = api(cfg, "getUpdates", offset=offset, timeout=20,
-                allowed_updates=json.dumps(["message"]))
+                allowed_updates=json.dumps(["message", "my_chat_member"]))
         for upd in r.get("result") or []:
             offset = upd["update_id"] + 1
             found = setup_chat(upd)
@@ -11953,9 +11959,10 @@ def setup():
     except (OSError, ValueError):
         cfg = {}
     print("nightmux setup\n\n"
-          "1. On your phone, open https://t.me/BotFather -> /newbot, pick any name,\n"
-          "   and paste the token it gives you here. No Telegram? Press Enter: nightmux\n"
-          "   runs dashboard-only, and you can add a bot later.")
+          "1. Scan this with your phone (or open https://t.me/BotFather) -> /newbot, pick\n"
+          "   any name, and paste the token it gives you here. No Telegram? Press Enter:\n"
+          "   nightmux runs dashboard-only, and you can add a bot later.\n\n"
+          + qr_text("https://t.me/BotFather"))
     token = input("   token%s: " % (" [enter to keep the saved one]"
                                     if cfg.get("token") else "")).strip()
     cfg["token"] = token or cfg.get("token")
@@ -11974,12 +11981,14 @@ def setup():
     if not me.get("ok"):
         sys.exit(f"telegram rejected that token: {me.get('description')}")
     bot = me["result"]["username"]
+    add = f"https://t.me/{bot}?startgroup=nightmux&admin=manage_topics+delete_messages+pin_messages"
     print(f"   ok, @{bot}\n\n"
-          "2. Create a Telegram group, open its settings and turn on Topics.\n"
-          f"3. Add @{bot} to it as an admin. Admin is required: without it the\n"
-          "   bot only sees messages addressed to it, so most of what you type\n"
-          "   would never arrive.\n"
-          "4. Post any message in the group. Waiting...")
+          "2. Create a Telegram group and turn on Topics in its settings.\n"
+          f"3. Scan this to add @{bot} to it as an admin (or open {add}).\n"
+          "   Admin is required: without it the bot only sees messages addressed\n"
+          "   to it, so most of what you type would never arrive.\n\n"
+          f"{qr_text(add)}\n"
+          "   Waiting for the bot to join...")
     found = await_group(cfg)
     if not found:
         sys.exit("nothing arrived. Check the bot is in the group, and is an admin.")
@@ -11988,6 +11997,8 @@ def setup():
     cfg["allow_users"] = [user_id]
     cfg.setdefault("topics", {})
     save_cfg(cfg)   # 0600: this file is a shell on this machine, see SECURITY.md
+    api(cfg, "sendMessage", chat_id=chat_id, text="✅ nightmux connected. Create a topic and "
+        "send  !new myproj ~/code/myproj  — only you can drive it.")
     print(f"   bound to '{title}' ({chat_id})\n"
           f"   allow_users = [{user_id}] — only you. Anyone you add here gets a\n"
           f"   shell on this machine; read SECURITY.md before you add a second.\n"
@@ -18948,6 +18959,9 @@ def selfcheck():
                                   "is_forum": True, "title": "work"},
                          "from": {"id": 7}}}
     assert setup_chat(forum) == (-100, 7, "work")
+    added = {"my_chat_member": {"chat": forum["message"]["chat"], "from": {"id": 7},
+                                 "new_chat_member": {"status": "administrator"}}}
+    assert setup_chat(added) == (-100, 7, "work")      # bot added: bound before anyone types
     for bad in ({"message": {"chat": {"id": 5, "type": "private"}}},   # DM: no topics
                 {"message": {"chat": {"id": -1, "type": "supergroup"}}},  # topics off
                 {"edited_message": {"chat": {"id": -1, "type": "supergroup"}}}):
