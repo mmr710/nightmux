@@ -35,6 +35,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!p [name] [args]` = saved prompts as buttons (review, fix-tests, spec, explain, tidy, ship); `!p` save &lt;name> &lt;text>
 - `!autoyes <agent|off>` = answer that agent's permission menus for it
 - `!ship [notes]` = commit, push, open a PR, then watch CI and fix red checks until green (never merges)
+- `!policy [on|off|deny <regex>]` = dialogs auto-yes must leave to you (rm -rf, push, sudo...)
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
