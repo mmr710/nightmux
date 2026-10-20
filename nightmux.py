@@ -4468,6 +4468,7 @@ WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
+              "!template",
               "!loopguard",  # interrupts or switches the agent
               "!memory",   # types a prompt
               "!deps",     # runs the package managers, types a prompt
@@ -4572,6 +4573,7 @@ HELP = [
         "!queue [clear|now] = prompts waiting for the agent",
         "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
         "./check.sh, looped until green",
+        "!template <api|cli|site|react|bot|scraper|mcp> <what for> = !idea with a stack picked",
         "!qa 03:00 [url] | now | off = the agent clicks through the app at night "
         "and files bugs as issues",
         "!loopguard [ping|auto|off] = notice an agent going in circles",
@@ -5004,6 +5006,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return routed          # not addressed to anyone: falls through as text
     if cmd == "!idea":
         return idea_cmd(cfg, state, lock, topic, arg)
+    if cmd == "!template":
+        return template_cmd(cfg, state, lock, topic, arg)
     if cmd == "!new" or cmd[1:] in agents(cfg):
         # Bare !<agent> in a topic that already knows its directory means "switch
         # this topic to that agent" -- same project, different agent, and the one
@@ -6135,6 +6139,36 @@ def idea_cmd(cfg, state, lock, topic, arg):
     return (f"💡 {name}: {cwd}\n{key} is starting with the spec → build → check prompt "
             "queued.\n🎯 goal: sh ./check.sh after every turn — failures go back until "
             "green.\n!preview once it serves something · !goal off to stop the loop")
+
+
+# ---------- !template: !idea with a head start ----------
+TEMPLATES = {
+    "api": "a FastAPI JSON service with SQLite storage, CRUD routes for {what}, pydantic models, "
+           "pytest tests and a Dockerfile",
+    "cli": "a Python command-line tool using only argparse for {what}, with subcommands, "
+           "--json output, pytest tests and a pyproject.toml entry point",
+    "site": "a static, responsive website for {what}: plain HTML/CSS, no build step, "
+            "accessible, dark-mode aware, with a small Lighthouse-friendly footprint",
+    "react": "a Vite + React + TypeScript single-page app for {what}, with a component test "
+             "setup (vitest) and a production build that passes",
+    "bot": "a Telegram bot in plain Python (urllib only, long polling) for {what}, with "
+           "a command table, graceful errors and a systemd unit",
+    "scraper": "a polite web scraper in Python for {what}: robots.txt respected, rate "
+               "limited, results to CSV and SQLite, with a fixture-based test",
+    "mcp": "a Model Context Protocol server in Python exposing tools for {what}, with "
+           "a README showing how to register it in Claude Code",
+}
+
+
+def template_cmd(cfg, state, lock, topic, arg):
+    name, _, what = arg.strip().partition(" ")
+    if name not in TEMPLATES:
+        return ("usage: !template <name> <what it is for>\n"
+                + "\n".join(f"  {k:<8}{v.split(' for {what}')[0][:60]}" for k, v in TEMPLATES.items())
+                + "\ne.g. !template api a recipe box")
+    if not what.strip():
+        return f"!template {name} what? e.g. !template {name} a recipe box"
+    return idea_cmd(cfg, state, lock, topic, TEMPLATES[name].format(what=what.strip()))
 
 
 # ---------- smart router: each new task to the agent that fits it ----------
@@ -19469,6 +19503,8 @@ def selfcheck():
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
+    assert "usage" in template_cmd({}, {}, None, "1", "") and "what?" in template_cmd({}, {}, None, "1", "api")
+    assert all("{what}" in v for v in TEMPLATES.values())
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None

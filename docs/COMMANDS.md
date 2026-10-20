@@ -46,6 +46,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!at` 03:00 &lt;prompt> | `!at` +90m … | `!every` 4h … | `!sched [clear]`
 - `!queue [clear|now]` = prompts waiting for the agent
 - `!idea [@agent] <what to build>` = new folder + git + SPEC.md, MVP and .`/check`.sh, looped until green
+- `!template <api|cli|site|react|bot|scraper|mcp> <what for>` = `!idea` with a stack picked
 - `!qa` 03:00 [url] | now | off = the agent clicks through the app at night and files bugs as issues
 - `!loopguard [ping|auto|off]` = notice an agent going in circles
 - `!briefing [HH:MM|now|voice|off]` = one morning message: done, waiting, limits (voice: also read aloud)
