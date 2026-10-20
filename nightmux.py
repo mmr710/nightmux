@@ -1136,18 +1136,14 @@ def menu_buttons(lines, sess=None):
     command center mirrors this same message into a topic bound to nothing, so
     topic-binding alone cannot resolve it there.
     """
-    opts = {}
-    for l in menu_rows(lines):
-        m = MENU.match(plain(l))
-        if m.group(1):
-            label = m.group(2)
-            opts[m.group(1)] = label[:28] + ("…" if len(label) > 28 else "")
+    opts = {d: label[:28] + ("…" if len(label) > 28 else "")
+            for d, label in menu_items(lines) if d.isdigit()}
     bar = bar_opts(lines)
     for i, label in enumerate(bar[0] if bar else []):
         opts[str(i + 1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
-    # No numbers means an arrow-driven selector (agy's trust prompt, /model):
-    # the nav row alone drives it, exactly as you would in the terminal.
+    # A bare arrow menu (the trust prompts) gets its rows by position, and the
+    # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
     rows.append([("esc", f"!esc{suffix}"), ("←", f"!left{suffix}"),
                  ("→", f"!right{suffix}"), ("⏎", f"!enter{suffix}")] if bar else
@@ -3258,11 +3254,7 @@ def menu_digit(lines, want):
     bar = bar_opts(lines)
     if bar:
         return next((str(i + 1) for i, l in enumerate(bar[0]) if want.match(l)), None)
-    for l in menu_rows(lines):
-        m = MENU.match(plain(l))
-        if want.match(m.group(2).strip()):
-            return m.group(1) or m.group(2).strip()
-    return None
+    return next((d for d, label in menu_items(lines) if want.match(label)), None)
 
 
 def plain(l):
@@ -3278,9 +3270,41 @@ def menu_rows(lines):
     bare ones is the prose, and dropping the rest would offer two options where
     the pane is showing four.
     """
-    rows = [l for l in lines[-25:] if MENU.match(plain(l))]
+    tail = lines[-25:]
+    rows = [l for l in tail if MENU.match(plain(l))]
     boxed = [l for l in rows if BOXED.match(plain(l))]
-    return boxed if len(boxed) * 2 > len(rows) else rows
+    if len(boxed) * 2 > len(rows):
+        return boxed
+    # Claude Code's trust prompt numbers nothing: "❯ No, exit" and, indented to
+    # the same column with no pointer, "Yes, I trust this folder". Only the
+    # pointed row matched, so the only button was ⏎ — on "No, exit". The rest
+    # of a bare arrow menu is the rows flush with the pointed one's label.
+    m = len(rows) == 1 and not MENU.match(plain(rows[0])).group(1) \
+        and ARROWED.search(plain("\n".join(tail))) and MENU.match(plain(rows[0]))
+    if not m:
+        return rows
+    col, i = m.start(2), tail.index(rows[0])
+    def sib(l):
+        l = plain(l)
+        return (len(l) > col and not l[:col].strip() and l[col] != " "
+                and not ARROWED.search(l))
+    lo, hi = i, i + 1
+    while lo and sib(tail[lo - 1]):
+        lo -= 1
+    while hi < len(tail) and sib(tail[hi]):
+        hi += 1
+    return tail[lo:hi]
+
+
+def menu_items(lines):
+    """[(digit, label)] for the menu on screen. A bare arrow menu has no digits,
+    so its rows go by position — which is what pick() moves the highlight by.
+    """
+    ms = [MENU.match(plain(l)) for l in menu_rows(lines)]
+    if any(m and m.group(1) for m in ms):
+        return [(m.group(1) or m.group(2).strip(), m.group(2).strip()) for m in ms]
+    return [(str(i + 1), (m.group(2) if m else plain(l)).strip())
+            for i, (m, l) in enumerate(zip(ms, menu_rows(lines)))]
 
 
 def menu_opts(lines):
@@ -3291,15 +3315,15 @@ def menu_opts(lines):
     on a guess.
     """
     rows = menu_rows(lines)
-    marked = [i for i, l in enumerate(rows) if PICKED.search(plain(l))]
+    marked = [i for i, l in enumerate(rows)
+              if PICKED.search(plain(l)) or re.match(r"\s*[│┃]?\s*>\s", plain(l))]
     if len(marked) != 1:
         # No glyph anywhere: fall back to colour, which needs a -e capture and
         # is why pick() takes one. On plain lines every code is "" and this
         # finds nothing, which is the honest answer there.
         codes = [(DIGIT_SGR.search(l) or [""])[0] for l in rows]
         marked = [i for i, c in enumerate(codes) if c and codes.count(c) == 1]
-    return ([MENU.match(plain(l)).group(1) or MENU.match(plain(l)).group(2).strip() for l in rows],
-            marked[0] if len(marked) == 1 else None)
+    return ([d for d, _ in menu_items(lines)], marked[0] if len(marked) == 1 else None)
 
 
 def pick(sess, want):
@@ -15644,11 +15668,17 @@ def selfcheck():
     agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                  "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
     assert pane_state(agy_trust) == "waiting"
-    assert json.loads(menu_buttons(agy_trust))["inline_keyboard"] == [
-        [{"text": "esc", "callback_data": "!esc"},
-         {"text": "↑", "callback_data": "!up"},
-         {"text": "↓", "callback_data": "!down"},
-         {"text": "⏎", "callback_data": "!enter"}]]  # arrows drive it, no numbers
+    assert [r[0]["callback_data"] for r in json.loads(menu_buttons(agy_trust))
+            ["inline_keyboard"][:2]] == ["!1", "!2"]   # no numbers: by position
+    assert menu_opts(agy_trust) == (["1", "2"], 0)
+    # Claude Code's: only the pointed row is marked, and it is "No, exit"
+    cc_trust = [" Claude Code'll be able to read, edit, and execute files here.", "",
+                " ❯ No, exit", "   Yes, I trust this folder", "",
+                " Enter to confirm · Esc to cancel"]
+    assert pane_state(cc_trust) == "waiting"
+    assert menu_items(cc_trust) == [("1", "No, exit"), ("2", "Yes, I trust this folder")]
+    assert menu_opts(cc_trust) == (["1", "2"], 0)
+    assert menu_digit(cc_trust, YES_NO["!y"]) == "2"
     assert pane_state(["● Bash(x)", "⢿  Running...", "esc to cancel"]) == "busy"
     # a backgrounded shell is not the session being busy: the prompt is free
     assert pane_state(["● Bash(npm test) &", "  ⎿ \xa0Running… (7m 53s · timeout 10m)",
