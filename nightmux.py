@@ -2841,6 +2841,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                 and not mem_reply_capture(cfg, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
             event(cfg, "done", topic, sess, body)
+            speak_turn(cfg, topic, body)
             sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
@@ -4462,7 +4463,7 @@ WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover",
+              "!failover", "!voice",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
@@ -4561,6 +4562,7 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -4996,6 +4998,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("auto-yes on for: " + ", ".join(cur)
                 + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
                   "\n!autoyes off to stop")
+    if cmd == "!voice":
+        return voice_cmd(cfg, lock, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -10783,6 +10787,38 @@ def briefing_send(cfg, state, topic, since):
         finally:
             _brief["busy"] = False
     threading.Thread(target=go, daemon=True).start()
+
+
+def speak_turn(cfg, topic, body):
+    """!voice on: read the end of a finished turn aloud, as a voice note."""
+    if str(topic) not in (cfg.get("voice") or []):
+        return
+
+    def go():
+        ogg = tts_ogg(cfg, spoken(body[:700]))
+        if ogg:
+            send_file(cfg, topic, "reply.ogg", ogg, kind="voice")
+        elif not getattr(speak_turn, "warned", False):
+            speak_turn.warned = True
+            send(cfg, topic, "\U0001f507 !voice is on but nothing here can speak: install espeak-ng "
+                 '(or ffmpeg with flite), or set "tts" in the config', mode="plain")
+    threading.Thread(target=go, daemon=True).start()
+
+
+def voice_cmd(cfg, lock, topic, arg):
+    t = str(topic)
+    with lock:
+        on = cfg.setdefault("voice", [])
+        if arg == "on" and t not in on:
+            on.append(t)
+        elif arg == "off" and t in on:
+            on.remove(t)
+        elif arg not in ("", "on", "off"):
+            return "usage: !voice [on|off]"
+        save_cfg(cfg)
+    return ("\U0001f50a voice replies on: each finished turn is also sent as a voice note\n"
+            "send a voice note back and it is transcribed" if t in on else
+            "voice replies off · !voice on speaks each finished turn")
 
 
 def briefing_tick(cfg, state, lock):
@@ -19469,6 +19505,10 @@ def selfcheck():
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
+    _vc = {}
+    assert "on" in voice_cmd(_vc, threading.Lock(), 7, "on") and _vc["voice"] == ["7"]
+    assert "off" in voice_cmd(_vc, threading.Lock(), 7, "off") and _vc["voice"] == []
+    assert "usage" in voice_cmd(_vc, threading.Lock(), 7, "x")
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
