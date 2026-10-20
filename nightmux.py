@@ -2059,6 +2059,35 @@ def cost_report(t, title):
     return "\n".join(rows)
 
 
+def spend_top(led, days, now=None):
+    """Spend table from the savings ledger {session: {hour: tokens}}.
+
+    Returns (per-session totals, per-day totals) for the last `days` days, in
+    base-equivalent tokens, biggest first / oldest first.
+    """
+    now = now if now is not None else time.time()
+    first = int(now // 3600) - days * 24
+    by_sess, by_day = {}, {}
+    for sess, hours in (led or {}).items():
+        for h, n in hours.items():
+            if int(h) >= first:
+                by_sess[sess] = by_sess.get(sess, 0) + n
+                d = time.strftime("%a %d", time.localtime(int(h) * 3600))
+                by_day[d] = by_day.get(d, 0) + n
+    return sorted(by_sess.items(), key=lambda kv: -kv[1]), by_day
+
+
+def spend_top_report(led, days):
+    rows, by_day = spend_top(led, days)
+    if not rows:
+        return f"no spend recorded in the last {days}d"
+    out = [f"spend · last {days}d (base-equiv tokens)", ""]
+    out += [f"{s[:24]:<25}{n:>14,}" for s, n in rows[:10]]
+    peak = max(by_day.values()) or 1
+    out += [""] + [f"{d:<7}{'█' * max(1, int(n / peak * 20)):<21}{n:>12,}" for d, n in by_day.items()]
+    return "\n".join(out)
+
+
 # ---------- !budget: a token allowance per project, per day/week/month ----------
 # Counted in the same base-equivalent tokens as !cost and !spendcap, from the
 # transcripts nightmux already tails — so Claude Code sessions only. Hitting it
@@ -4601,7 +4630,7 @@ HELP = [
         "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
-        "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!usage | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
         "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
@@ -5149,6 +5178,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!budget":
         return budget_cmd(cfg, state, topic, sess, arg)
     if cmd == "!cost":
+        if arg.split()[:1] == ["top"]:
+            tail = arg.split()[1:]
+            with _sav_lock:
+                led = dict(sav_data().get("spent") or {})
+            return spend_top_report(led, int(tail[0]) if tail and tail[0].isdigit() else 7)
         if arg.isdigit():   # every project, that many days back
             days = int(arg)
             return cost_report(token_tally(recent_transcripts(days)),
@@ -19469,6 +19503,10 @@ def selfcheck():
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
+    _led = {"proj": {str(int(time.time() // 3600)): 500, str(int(time.time() // 3600) - 1): 250}, "old": {"1": 9}}
+    _rows, _days = spend_top(_led, 7)
+    assert _rows == [("proj", 750)] and sum(_days.values()) == 750, (_rows, _days)
+    assert "proj" in spend_top_report(_led, 7) and "no spend" in spend_top_report({}, 7)
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
