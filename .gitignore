@@ -10,3 +10,10 @@ build/
 .nightmux.json
 nightmux.json
 *.offset
+
+# one-off scratch scripts
+/patch_*.py
+/fix_*.py
+/test_*.py
+/*.apk
+/*.png
