@@ -15034,7 +15034,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def auth_gate(self):
         """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Localhost stays open."""
-        if self.is_localhost():
+        if self.is_localhost() or self.peer:   # peer_gate already checked the secret
             return True
         clean_path = self.path.split("?")[0]
         if clean_path in ("/pair", "/icon.svg", "/manifest.json", "/sw.js") \
@@ -18449,6 +18449,16 @@ def selfcheck():
     h_remote = DummyHandler("192.168.1.50")
     assert WebhookHandler.auth_gate(h_remote) is False and h_remote.status == 401
     assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", path="/pair?code=xyz")) is True
+
+    # peer requests: secret checked in peer_gate, then auth_gate must not demand a cookie
+    class PeerHandler(DummyHandler):
+        server = type("S", (), {"cfg": {"peer_secret": "s" * 16}, "peer_only": False})()
+    h_ok = PeerHandler("100.64.0.2", headers={"X-Nightmux-Secret": "s" * 16}, path="/peer/api/x")
+    assert h_ok.peer_gate() and h_ok.peer and h_ok.auth_gate() is True and h_ok.status is None
+    h_bad = PeerHandler("100.64.0.2", headers={"X-Nightmux-Secret": "wrong"}, path="/peer/api/x")
+    assert h_bad.peer_gate() is False and h_bad.status == 403
+    h_plain = PeerHandler("100.64.0.2", path="/api/topics")
+    assert h_plain.peer_gate() and not h_plain.peer and h_plain.auth_gate() is False and h_plain.status == 401
 
     code3_ = new_pairing_code()
     tok3_ = redeem_pairing_code(code3_)
