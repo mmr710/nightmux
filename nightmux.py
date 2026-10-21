@@ -2204,14 +2204,27 @@ def budget_cmd(cfg, state, topic, sess, arg):
 EVENTS = ("needs_input", "done", "limit", "resumed", "budget", "test")
 
 
+NTFY_TAGS = {"needs_input": "raising_hand", "done": "white_check_mark", "limit": "hourglass",
+             "resumed": "arrow_forward", "budget": "moneybag", "test": "bell"}
+
+
+def ntfy_body(topic, kind, name, line):
+    return {"topic": topic, "title": f"{name}: {kind.replace('_', ' ')}",
+            "message": line or kind, "tags": [NTFY_TAGS.get(kind, "bell")],
+            "priority": 4 if kind == "needs_input" else 3}
+
+
 def event(cfg, kind, topic, sess, text=""):
     url = cfg.get("events_url")
     if not url:
         return None
-    body = json.dumps({"event": kind, "topic": str(topic), "session": sess,
-                       "name": (cfg.get("topic_names") or {}).get(str(topic)) or sess,
-                       "text": redact((text or "").strip().split("\n")[0])[:160],
-                       "ts": int(time.time())}).encode()
+    name = (cfg.get("topic_names") or {}).get(str(topic)) or sess
+    line = redact((text or "").strip().split("\n")[0])[:160]
+    if cfg.get("events_ntfy"):     # ntfy takes its topic in the JSON body of a POST to the server root
+        body = json.dumps(ntfy_body(cfg["events_ntfy"], kind, name, line)).encode()
+    else:
+        body = json.dumps({"event": kind, "topic": str(topic), "session": sess,
+                           "name": name, "text": line, "ts": int(time.time())}).encode()
 
     def go():
         try:
@@ -2225,8 +2238,20 @@ def event(cfg, kind, topic, sess, text=""):
 
 
 def events_cmd(cfg, topic, sess, arg):
+    if arg.split()[:1] == ["ntfy"]:     # phone push without Telegram open: ntfy.sh app
+        w = arg.split()
+        topic_name = w[1] if len(w) > 1 else "nightmux-" + secrets.token_hex(6)
+        if not re.match(r"^[\w-]{1,64}$", topic_name):
+            return "usage: !events ntfy [topic] [https://your.ntfy.server]"
+        cfg["events_url"] = w[2] if len(w) > 2 else "https://ntfy.sh"
+        cfg["events_ntfy"] = topic_name
+        save_cfg(cfg)
+        return (f"push on · install the ntfy app and subscribe to '{topic_name}'\n"
+                "anyone who knows the topic name can read these, so keep it random\n"
+                "!events test sends one now")
     if arg == "off":
         cfg.pop("events_url", None)
+        cfg.pop("events_ntfy", None)
         save_cfg(cfg)
         return "events off"
     if arg == "test":
@@ -2236,12 +2261,13 @@ def events_cmd(cfg, topic, sess, arg):
         return f"sent a test event to {cfg['events_url']} — the journal says if it failed"
     if arg:
         if not re.match(r"https?://\S+$", arg):
-            return "usage: !events <http(s) url> | test | off"
+            return "usage: !events <http(s) url> | ntfy [topic] | test | off"
         cfg["events_url"] = arg
+        cfg.pop("events_ntfy", None)
         save_cfg(cfg)
     return ((f"events → {cfg['events_url']}\n" if cfg.get("events_url") else "no events_url · ")
             + "POSTs JSON {event, topic, name, session, text, ts} on " + ", ".join(EVENTS[:-1])
-            + "\n!events <url> | test | off")
+            + "\n!events <url> | ntfy [topic] | test | off")
 
 
 def digest_report(cfg, state, topic, sess, since):
@@ -4726,7 +4752,7 @@ HELP = [
         "!office = the live office: a room per topic, a desk per agent · 🎨 there "
         "cycles skins",
         "!look <agent> shirt #hex hat cap | reset = dress that agent's avatar",
-        "!events <url> | test | off = POST needs_input/done/limit/resumed to a URL "
+        "!events <url> | ntfy [topic] | test | off = POST needs_input/done/limit/resumed to a URL "
         "(Home Assistant, lights)",
         "!status | !board | !log (daemon journal) | !grep <text> [days]",
         "!preview = the app this session serves, on your phone · "
@@ -19573,6 +19599,13 @@ def selfcheck():
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
+    _nb = ntfy_body("t1", "needs_input", "proj", "ok?")
+    assert _nb["topic"] == "t1" and _nb["priority"] == 4 and _nb["title"] == "proj: needs input"
+    _nc = {}
+    assert "subscribe to 'abc'" in events_cmd(_nc, 7, "s", "ntfy abc") and _nc["events_ntfy"] == "abc"
+    assert "usage" in events_cmd(_nc, 7, "s", "ntfy bad!topic")
+    events_cmd(_nc, 7, "s", "off")
+    assert "events_ntfy" not in _nc
     _led = {"proj": {str(int(time.time() // 3600)): 500, str(int(time.time() // 3600) - 1): 250}, "old": {"1": 9}}
     _rows, _days = spend_top(_led, 7)
     assert _rows == [("proj", 750)] and sum(_days.values()) == 750, (_rows, _days)
