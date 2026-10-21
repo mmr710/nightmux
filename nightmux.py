@@ -4523,7 +4523,7 @@ WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover",
+              "!failover", "!ship",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
@@ -4622,6 +4622,7 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
         "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
@@ -4878,6 +4879,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return pair_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!loopguard":
         return loopguard_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!ship":
+        return prompt_cmd(cfg, state, lock, topic, sess, ("ship " + arg).strip())
     if cmd == "!p":
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
@@ -6099,7 +6102,10 @@ PROMPTS = {
                  "cheapest one first. Then fix only what the evidence points to.",
     "ship": "Get this ready to merge: run tests and lint and fix what fails, update "
             "README/CHANGELOG if behaviour changed, commit with a clear message, push, "
-            "and open a pull request. {{args}}",
+            "and open a pull request with gh. Then watch CI (`gh pr checks --watch`): if a "
+            "check fails, read its log (`gh run view --log-failed`), fix the root cause, push, "
+            "and watch again, at most 4 rounds. Stop and tell me when everything is green, "
+            "or exactly what is still red and why. Never merge. {{args}}",
 }
 
 
