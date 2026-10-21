@@ -34,6 +34,8 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!model <name>` | `!effort <low|medium|high>`
 - `!p [name] [args]` = saved prompts as buttons (review, fix-tests, spec, explain, tidy, ship); `!p` save &lt;name> &lt;text>
 - `!autoyes <agent|off>` = answer that agent's permission menus for it
+- `!ship [notes]` = commit, push, open a PR, then watch CI and fix red checks until green (never merges)
+- `!policy [on|off|deny <regex>]` = dialogs auto-yes must leave to you (rm -rf, push, sudo...)
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
@@ -72,7 +74,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 
 `!help tokens`
 
-- `!usage` | `!ctx` | `!cost [days]` | `!forecast` = when each window fills
+- `!usage` | `!ctx` | `!cost [days|top [days]`] | `!forecast` = when each window fills
 - `!harvest [add <task>|now|ceiling 85|window 60|clear|on|off]` = burn unused 5-hour quota window capacity before reset
 - `!autocompact <pct|150k|off>` = `/compact` at a share or a token count (default 200k; Claude also compacts mid-turn there) · `!autocompact` park &lt;45m|off> = compact sessions idle that long over 100k (default 45m) · `!idlectx <pct|off>`
 - `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles

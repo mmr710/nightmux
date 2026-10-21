@@ -2059,6 +2059,35 @@ def cost_report(t, title):
     return "\n".join(rows)
 
 
+def spend_top(led, days, now=None):
+    """Spend table from the savings ledger {session: {hour: tokens}}.
+
+    Returns (per-session totals, per-day totals) for the last `days` days, in
+    base-equivalent tokens, biggest first / oldest first.
+    """
+    now = now if now is not None else time.time()
+    first = int(now // 3600) - days * 24
+    by_sess, by_day = {}, {}
+    for sess, hours in (led or {}).items():
+        for h, n in hours.items():
+            if int(h) >= first:
+                by_sess[sess] = by_sess.get(sess, 0) + n
+                d = time.strftime("%a %d", time.localtime(int(h) * 3600))
+                by_day[d] = by_day.get(d, 0) + n
+    return sorted(by_sess.items(), key=lambda kv: -kv[1]), by_day
+
+
+def spend_top_report(led, days):
+    rows, by_day = spend_top(led, days)
+    if not rows:
+        return f"no spend recorded in the last {days}d"
+    out = [f"spend · last {days}d (base-equiv tokens)", ""]
+    out += [f"{s[:24]:<25}{n:>14,}" for s, n in rows[:10]]
+    peak = max(by_day.values()) or 1
+    out += [""] + [f"{d:<7}{'█' * max(1, int(n / peak * 20)):<21}{n:>12,}" for d, n in by_day.items()]
+    return "\n".join(out)
+
+
 # ---------- !budget: a token allowance per project, per day/week/month ----------
 # Counted in the same base-equivalent tokens as !cost and !spendcap, from the
 # transcripts nightmux already tails — so Claude Code sessions only. Hitting it
@@ -4098,6 +4127,33 @@ def consult_tick(cfg, state):
 
 AUTOYES_GAP = 4       # never answer the same pane twice inside one tick storm
 AUTOYES_MAX = 25      # ...and this many in an hour, then stop and say so
+# Dialogs auto-yes will not answer, even where it is on: things that destroy,
+# publish or run downloaded code. The human gets the usual buttons instead.
+RISKY = re.compile(
+    r"\brm\s+-\w*[rf]|\bsudo\b|git\s+push|git\s+reset\s+--hard|git\s+clean\s+-\w*f"
+    r"|curl[^|\n]*\|\s*(?:sh|bash)|\bchmod\s+(?:-R\s+)?777|drop\s+(?:table|database)"
+    r"|\bmkfs|\bdd\s+if=|--force\b|\bnpm\s+publish|\bkubectl\s+delete|docker\s+(?:rm|system\s+prune)",
+    re.I)
+
+
+def policy_hit(cfg, topic, text):
+    """The first risky thing `text` mentions under this topic's policy, else None.
+
+    cfg["policy"][topic] = {"off": bool, "deny": [regex, ...]}: the built-in
+    RISKY list plus the topic's own patterns; "off" drops the built-in list.
+    """
+    pol = (cfg.get("policy") or {}).get(str(topic)) or {}
+    pats = [] if pol.get("off") else [RISKY]
+    for p in pol.get("deny") or []:
+        try:
+            pats.append(re.compile(p, re.I))
+        except re.error:
+            pass
+    for rx in pats:
+        m = rx.search(text)
+        if m:
+            return m.group(0).strip()
+    return None
 
 
 def agent_key(cfg, topic, sess):
@@ -4166,6 +4222,13 @@ def autoyes(cfg, state, topic, sess):
             digit = "y"
         else:
             return          # nothing here reads as "yes": a human decides this one
+    hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+    if hit:
+        if st.get("policy_held") != dialog_id(lines):   # say it once per dialog
+            st["policy_held"] = dialog_id(lines)
+            send(cfg, topic, f"\U0001f6d1 policy: {sess} wants '{hit[:60]}' \u2014 your call\n"
+                 "!y / !n  (!policy to change the rules)", mode="plain")
+        return
     st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
@@ -4179,6 +4242,33 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def policy_cmd(cfg, lock, topic, arg):
+    """!policy [off|on|deny <regex>|clear]: what auto-yes must leave to you."""
+    t = str(topic)
+    a = arg.split(None, 1)
+    with lock:
+        pol = cfg.setdefault("policy", {}).setdefault(t, {})
+        if a and a[0] == "off":
+            pol["off"] = True
+        elif a and a[0] == "on":
+            pol.pop("off", None)
+        elif a and a[0] == "clear":
+            pol.clear()
+        elif a and a[0] == "deny" and len(a) == 2:
+            try:
+                re.compile(a[1])
+            except re.error as e:
+                return f"bad regex: {e}"
+            pol.setdefault("deny", []).append(a[1])
+        elif a:
+            return "usage: !policy [on|off|deny <regex>|clear]"
+        save_cfg(cfg)
+    return ("policy: built-in risky list %s, extra patterns: %s\n"
+            "auto-yes never presses yes on a dialog matching these; you get !y/!n instead"
+            % ("OFF" if pol.get("off") else "on (rm -rf, sudo, git push, curl|sh, force, publish...)",
+               ", ".join(pol.get("deny") or []) or "none"))
 
 
 def bench_of(cfg, topic):
@@ -4484,11 +4574,11 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover",
+              "!failover", "!ship",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
@@ -4587,6 +4677,8 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
+        "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -4627,7 +4719,7 @@ HELP = [
         "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
-        "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!usage | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
         "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
@@ -4842,6 +4934,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return pair_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!loopguard":
         return loopguard_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!ship":
+        return prompt_cmd(cfg, state, lock, topic, sess, ("ship " + arg).strip())
     if cmd == "!p":
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
@@ -5022,6 +5116,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("auto-yes on for: " + ", ".join(cur)
                 + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
                   "\n!autoyes off to stop")
+    if cmd == "!policy":
+        return policy_cmd(cfg, lock, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -5175,6 +5271,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!budget":
         return budget_cmd(cfg, state, topic, sess, arg)
     if cmd == "!cost":
+        if arg.split()[:1] == ["top"]:
+            tail = arg.split()[1:]
+            with _sav_lock:
+                led = dict(sav_data().get("spent") or {})
+            return spend_top_report(led, int(tail[0]) if tail and tail[0].isdigit() else 7)
         if arg.isdigit():   # every project, that many days back
             days = int(arg)
             return cost_report(token_tally(recent_transcripts(days)),
@@ -6061,7 +6162,10 @@ PROMPTS = {
                  "cheapest one first. Then fix only what the evidence points to.",
     "ship": "Get this ready to merge: run tests and lint and fix what fails, update "
             "README/CHANGELOG if behaviour changed, commit with a clear message, push, "
-            "and open a pull request. {{args}}",
+            "and open a pull request with gh. Then watch CI (`gh pr checks --watch`): if a "
+            "check fails, read its log (`gh run view --log-failed`), fix the root cause, push, "
+            "and watch again, at most 4 rounds. Stop and tell me when everything is green, "
+            "or exactly what is still red and why. Never merge. {{args}}",
 }
 
 
@@ -19502,6 +19606,15 @@ def selfcheck():
     assert "usage" in events_cmd(_nc, 7, "s", "ntfy bad!topic")
     events_cmd(_nc, 7, "s", "off")
     assert "events_ntfy" not in _nc
+    _led = {"proj": {str(int(time.time() // 3600)): 500, str(int(time.time() // 3600) - 1): 250}, "old": {"1": 9}}
+    _rows, _days = spend_top(_led, 7)
+    assert _rows == [("proj", 750)] and sum(_days.values()) == 750, (_rows, _days)
+    assert "proj" in spend_top_report(_led, 7) and "no spend" in spend_top_report({}, 7)
+    assert policy_hit({}, 7, "Run: rm -rf build/") and policy_hit({}, 7, "git push origin main")
+    assert not policy_hit({}, 7, "Run: ls -la")
+    assert policy_hit({"policy": {"7": {"off": True, "deny": ["deploy"]}}}, 7, "deploy now") == "deploy"
+    assert not policy_hit({"policy": {"7": {"off": True}}}, 7, "sudo ls")
+    assert "usage" in policy_cmd({"chat_id": -1}, threading.Lock(), 7, "bogus")
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
