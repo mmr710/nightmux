@@ -2059,6 +2059,35 @@ def cost_report(t, title):
     return "\n".join(rows)
 
 
+def spend_top(led, days, now=None):
+    """Spend table from the savings ledger {session: {hour: tokens}}.
+
+    Returns (per-session totals, per-day totals) for the last `days` days, in
+    base-equivalent tokens, biggest first / oldest first.
+    """
+    now = now if now is not None else time.time()
+    first = int(now // 3600) - days * 24
+    by_sess, by_day = {}, {}
+    for sess, hours in (led or {}).items():
+        for h, n in hours.items():
+            if int(h) >= first:
+                by_sess[sess] = by_sess.get(sess, 0) + n
+                d = time.strftime("%a %d", time.localtime(int(h) * 3600))
+                by_day[d] = by_day.get(d, 0) + n
+    return sorted(by_sess.items(), key=lambda kv: -kv[1]), by_day
+
+
+def spend_top_report(led, days):
+    rows, by_day = spend_top(led, days)
+    if not rows:
+        return f"no spend recorded in the last {days}d"
+    out = [f"spend · last {days}d (base-equiv tokens)", ""]
+    out += [f"{s[:24]:<25}{n:>14,}" for s, n in rows[:10]]
+    peak = max(by_day.values()) or 1
+    out += [""] + [f"{d:<7}{'█' * max(1, int(n / peak * 20)):<21}{n:>12,}" for d, n in by_day.items()]
+    return "\n".join(out)
+
+
 # ---------- !budget: a token allowance per project, per day/week/month ----------
 # Counted in the same base-equivalent tokens as !cost and !spendcap, from the
 # transcripts nightmux already tails — so Claude Code sessions only. Hitting it
@@ -2175,14 +2204,27 @@ def budget_cmd(cfg, state, topic, sess, arg):
 EVENTS = ("needs_input", "done", "limit", "resumed", "budget", "test")
 
 
+NTFY_TAGS = {"needs_input": "raising_hand", "done": "white_check_mark", "limit": "hourglass",
+             "resumed": "arrow_forward", "budget": "moneybag", "test": "bell"}
+
+
+def ntfy_body(topic, kind, name, line):
+    return {"topic": topic, "title": f"{name}: {kind.replace('_', ' ')}",
+            "message": line or kind, "tags": [NTFY_TAGS.get(kind, "bell")],
+            "priority": 4 if kind == "needs_input" else 3}
+
+
 def event(cfg, kind, topic, sess, text=""):
     url = cfg.get("events_url")
     if not url:
         return None
-    body = json.dumps({"event": kind, "topic": str(topic), "session": sess,
-                       "name": (cfg.get("topic_names") or {}).get(str(topic)) or sess,
-                       "text": redact((text or "").strip().split("\n")[0])[:160],
-                       "ts": int(time.time())}).encode()
+    name = (cfg.get("topic_names") or {}).get(str(topic)) or sess
+    line = redact((text or "").strip().split("\n")[0])[:160]
+    if cfg.get("events_ntfy"):     # ntfy takes its topic in the JSON body of a POST to the server root
+        body = json.dumps(ntfy_body(cfg["events_ntfy"], kind, name, line)).encode()
+    else:
+        body = json.dumps({"event": kind, "topic": str(topic), "session": sess,
+                           "name": name, "text": line, "ts": int(time.time())}).encode()
 
     def go():
         try:
@@ -2196,8 +2238,20 @@ def event(cfg, kind, topic, sess, text=""):
 
 
 def events_cmd(cfg, topic, sess, arg):
+    if arg.split()[:1] == ["ntfy"]:     # phone push without Telegram open: ntfy.sh app
+        w = arg.split()
+        topic_name = w[1] if len(w) > 1 else "nightmux-" + secrets.token_hex(6)
+        if not re.match(r"^[\w-]{1,64}$", topic_name):
+            return "usage: !events ntfy [topic] [https://your.ntfy.server]"
+        cfg["events_url"] = w[2] if len(w) > 2 else "https://ntfy.sh"
+        cfg["events_ntfy"] = topic_name
+        save_cfg(cfg)
+        return (f"push on · install the ntfy app and subscribe to '{topic_name}'\n"
+                "anyone who knows the topic name can read these, so keep it random\n"
+                "!events test sends one now")
     if arg == "off":
         cfg.pop("events_url", None)
+        cfg.pop("events_ntfy", None)
         save_cfg(cfg)
         return "events off"
     if arg == "test":
@@ -2207,12 +2261,13 @@ def events_cmd(cfg, topic, sess, arg):
         return f"sent a test event to {cfg['events_url']} — the journal says if it failed"
     if arg:
         if not re.match(r"https?://\S+$", arg):
-            return "usage: !events <http(s) url> | test | off"
+            return "usage: !events <http(s) url> | ntfy [topic] | test | off"
         cfg["events_url"] = arg
+        cfg.pop("events_ntfy", None)
         save_cfg(cfg)
     return ((f"events → {cfg['events_url']}\n" if cfg.get("events_url") else "no events_url · ")
             + "POSTs JSON {event, topic, name, session, text, ts} on " + ", ".join(EVENTS[:-1])
-            + "\n!events <url> | test | off")
+            + "\n!events <url> | ntfy [topic] | test | off")
 
 
 def digest_report(cfg, state, topic, sess, since):
@@ -2630,6 +2685,54 @@ def at_epoch(cfg, when, now=None):
     return (at + 86400 if at <= local else at) - shift
 
 
+def cron_field(f, lo, hi):
+    """One cron field -> set of ints. *, */n, a-b, a-b/n, a,b. ValueError if malformed."""
+    out = set()
+    for part in f.split(","):
+        rng, _, step = part.partition("/")
+        step = int(step) if step else 1
+        if rng == "*":
+            a, b = lo, hi
+        elif "-" in rng:
+            a, b = (int(x) for x in rng.split("-"))
+        else:
+            a = b = int(rng)
+            if step > 1 and "/" in part:
+                b = hi
+        if step < 1 or a < lo or b > hi or a > b:
+            raise ValueError(part)
+        out.update(range(a, b + 1, step))
+    return out
+
+
+def cron_parse(expr):
+    """'m h dom mon dow' -> (minutes, hours, doms, months, dows) sets; dow 0 or 7 is Sunday."""
+    f = expr.split()
+    if len(f) != 5:
+        raise ValueError("need 5 fields")
+    m, h, dom, mon, dow = (cron_field(x, lo, hi) for x, (lo, hi) in
+                           zip(f, ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))))
+    return m, h, dom, mon, {d % 7 for d in dow}, f[2] == "*", f[4] == "*"
+
+
+def cron_next(cfg, expr, now=None):
+    """The next minute after `now` that matches, in the config's timezone; None if none within 40 days."""
+    m, h, dom, mon, dow, dom_any, dow_any = cron_parse(expr)
+    now = now or time.time()
+    off = cfg.get("tz_offset")
+    shift = tz_shift(off, now) if isinstance(off, str) else (off or 0) * 3600
+    t = int(now) + shift
+    t += 60 - t % 60
+    for _ in range(40 * 24 * 60):
+        g = time.gmtime(t)
+        d1, d2 = g.tm_mday in dom, (g.tm_wday + 1) % 7 in dow
+        day_ok = (d1 or d2) if not dom_any and not dow_any else (d1 and d2)   # cron: either, when both given
+        if g.tm_min in m and g.tm_hour in h and g.tm_mon in mon and day_ok:
+            return t - shift
+        t += 60
+    return None
+
+
 def due(cfg, state, topic, sess):
     """Move scheduled prompts onto the queue when their time comes.
 
@@ -2673,7 +2776,12 @@ def due(cfg, state, topic, sess):
             st.setdefault("queue", []).append(text)
             if not job.get("companion"):      # its own rounds need no ⏰ ping at 3am
                 fired.append(job)
-        if job.get("every"):
+        if job.get("cron"):
+            nxt = cron_next(cfg, job["cron"], now)
+            if nxt:
+                job["at"] = nxt
+                keep.append(job)
+        elif job.get("every"):
             # From now, not from when it was due: a daemon that was off overnight
             # must not wake up and fire six hours of backlog in one go.
             job["at"] = now + job["every"]
@@ -2841,6 +2949,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
                 and not mem_reply_capture(cfg, topic, sess, body):
             send(cfg, topic, f"✅ {sess}\n{body}", mode="md" if tpath else "mono")
             event(cfg, "done", topic, sess, body)
+            speak_turn(cfg, topic, body)
             sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
             loop_capture(cfg, topic, sess, body)
@@ -4072,6 +4181,33 @@ def consult_tick(cfg, state):
 
 AUTOYES_GAP = 4       # never answer the same pane twice inside one tick storm
 AUTOYES_MAX = 25      # ...and this many in an hour, then stop and say so
+# Dialogs auto-yes will not answer, even where it is on: things that destroy,
+# publish or run downloaded code. The human gets the usual buttons instead.
+RISKY = re.compile(
+    r"\brm\s+-\w*[rf]|\bsudo\b|git\s+push|git\s+reset\s+--hard|git\s+clean\s+-\w*f"
+    r"|curl[^|\n]*\|\s*(?:sh|bash)|\bchmod\s+(?:-R\s+)?777|drop\s+(?:table|database)"
+    r"|\bmkfs|\bdd\s+if=|--force\b|\bnpm\s+publish|\bkubectl\s+delete|docker\s+(?:rm|system\s+prune)",
+    re.I)
+
+
+def policy_hit(cfg, topic, text):
+    """The first risky thing `text` mentions under this topic's policy, else None.
+
+    cfg["policy"][topic] = {"off": bool, "deny": [regex, ...]}: the built-in
+    RISKY list plus the topic's own patterns; "off" drops the built-in list.
+    """
+    pol = (cfg.get("policy") or {}).get(str(topic)) or {}
+    pats = [] if pol.get("off") else [RISKY]
+    for p in pol.get("deny") or []:
+        try:
+            pats.append(re.compile(p, re.I))
+        except re.error:
+            pass
+    for rx in pats:
+        m = rx.search(text)
+        if m:
+            return m.group(0).strip()
+    return None
 
 
 def agent_key(cfg, topic, sess):
@@ -4140,6 +4276,13 @@ def autoyes(cfg, state, topic, sess):
             digit = "y"
         else:
             return          # nothing here reads as "yes": a human decides this one
+    hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+    if hit:
+        if st.get("policy_held") != dialog_id(lines):   # say it once per dialog
+            st["policy_held"] = dialog_id(lines)
+            send(cfg, topic, f"\U0001f6d1 policy: {sess} wants '{hit[:60]}' \u2014 your call\n"
+                 "!y / !n  (!policy to change the rules)", mode="plain")
+        return
     st["autoyes_at"], st["autoyes_hits"] = now, hits + [now]
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
@@ -4153,6 +4296,33 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def policy_cmd(cfg, lock, topic, arg):
+    """!policy [off|on|deny <regex>|clear]: what auto-yes must leave to you."""
+    t = str(topic)
+    a = arg.split(None, 1)
+    with lock:
+        pol = cfg.setdefault("policy", {}).setdefault(t, {})
+        if a and a[0] == "off":
+            pol["off"] = True
+        elif a and a[0] == "on":
+            pol.pop("off", None)
+        elif a and a[0] == "clear":
+            pol.clear()
+        elif a and a[0] == "deny" and len(a) == 2:
+            try:
+                re.compile(a[1])
+            except re.error as e:
+                return f"bad regex: {e}"
+            pol.setdefault("deny", []).append(a[1])
+        elif a:
+            return "usage: !policy [on|off|deny <regex>|clear]"
+        save_cfg(cfg)
+    return ("policy: built-in risky list %s, extra patterns: %s\n"
+            "auto-yes never presses yes on a dialog matching these; you get !y/!n instead"
+            % ("OFF" if pol.get("off") else "on (rm -rf, sudo, git push, curl|sh, force, publish...)",
+               ", ".join(pol.get("deny") or []) or "none"))
 
 
 def bench_of(cfg, topic):
@@ -4458,11 +4628,13 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes",
+              "!consult", "!use", "!plan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover",
+              "!failover", "!cron",
+              "!failover", "!voice",
+              "!failover", "!ship",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!preview",  # opens a port to the tailnet
@@ -4562,6 +4734,10 @@ HELP = [
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
+        "!cron <m h dom mon dow> <prompt> = recurring prompt on a crontab schedule (see !sched)",
+        "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
+        "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
+        "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -4603,7 +4779,7 @@ HELP = [
         "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
-        "!usage | !ctx | !cost [days] | !forecast = when each window fills",
+        "!usage | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
         "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
@@ -4636,7 +4812,7 @@ HELP = [
         "!office = the live office: a room per topic, a desk per agent · 🎨 there "
         "cycles skins",
         "!look <agent> shirt #hex hat cap | reset = dress that agent's avatar",
-        "!events <url> | test | off = POST needs_input/done/limit/resumed to a URL "
+        "!events <url> | ntfy [topic] | test | off = POST needs_input/done/limit/resumed to a URL "
         "(Home Assistant, lights)",
         "!status | !board | !log (daemon journal) | !grep <text> [days]",
         "!preview = the app this session serves, on your phone · "
@@ -4818,6 +4994,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return pair_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!loopguard":
         return loopguard_cmd(cfg, state, lock, topic, sess, arg)
+    if cmd == "!ship":
+        return prompt_cmd(cfg, state, lock, topic, sess, ("ship " + arg).strip())
     if cmd == "!p":
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!watch":
@@ -4998,6 +5176,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("auto-yes on for: " + ", ".join(cur)
                 + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
                   "\n!autoyes off to stop")
+    if cmd == "!voice":
+        return voice_cmd(cfg, lock, topic, arg)
+    if cmd == "!policy":
+        return policy_cmd(cfg, lock, topic, arg)
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -5153,6 +5335,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd == "!budget":
         return budget_cmd(cfg, state, topic, sess, arg)
     if cmd == "!cost":
+        if arg.split()[:1] == ["top"]:
+            tail = arg.split()[1:]
+            with _sav_lock:
+                led = dict(sav_data().get("spent") or {})
+            return spend_top_report(led, int(tail[0]) if tail and tail[0].isdigit() else 7)
         if arg.isdigit():   # every project, that many days back
             days = int(arg)
             return cost_report(token_tally(recent_transcripts(days)),
@@ -5359,6 +5546,20 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return (f"⏰ {'every ' + when if secs else 'at ' + clock(cfg, at)}"
                 f" (first in {left(at - now)})\n{prompt.splitlines()[0][:70]}\n"
                 "!sched to list, !sched clear to drop")
+    if cmd == "!cron":
+        expr, prompt = " ".join(arg.split()[:5]), " ".join(arg.split()[5:])
+        try:
+            at = cron_next(cfg, expr, time.time())
+        except ValueError:
+            at = None
+        if not prompt or at is None:
+            return ("usage: !cron <min hour dom mon dow> <prompt>\n"
+                    "e.g.  !cron 0 9 * * 1-5 run the tests and summarize")
+        st = state.setdefault(sess, {})
+        st.setdefault("sched", []).append({"at": at, "cron": expr, "text": prompt})
+        save_queue(state)
+        return (f"\u23f0 cron '{expr}' (first {clock(cfg, at)}, in {left(at - time.time())})\n"
+                f"{prompt.splitlines()[0][:70]}\n!sched to list, !sched clear to drop")
     if cmd == "!sched":
         jobs = st.get("sched") or []
         if arg == "clear":
@@ -5369,7 +5570,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "nothing scheduled · !at 03:00 <prompt> | !every 4h <prompt>"
         return "\n".join(
             f"{i + 1}. {clock(cfg, j['at'])} (in {left(j['at'] - now)})"
-            + (f" every {left(j['every'])}" if j.get("every") else "")
+            + (f" every {left(j['every'])}" if j.get("every") else f" cron {j['cron']}" if j.get("cron") else "")
             + f" · {j['text'].splitlines()[0][:50]}" for i, j in enumerate(jobs))
     if cmd == "!raw":  # deliberate override of the menu guard below
         inject(sess, arg)
@@ -6039,7 +6240,10 @@ PROMPTS = {
                  "cheapest one first. Then fix only what the evidence points to.",
     "ship": "Get this ready to merge: run tests and lint and fix what fails, update "
             "README/CHANGELOG if behaviour changed, commit with a clear message, push, "
-            "and open a pull request. {{args}}",
+            "and open a pull request with gh. Then watch CI (`gh pr checks --watch`): if a "
+            "check fails, read its log (`gh run view --log-failed`), fix the root cause, push, "
+            "and watch again, at most 4 rounds. Stop and tell me when everything is green, "
+            "or exactly what is still red and why. Never merge. {{args}}",
 }
 
 
@@ -10817,6 +11021,38 @@ def briefing_send(cfg, state, topic, since):
         finally:
             _brief["busy"] = False
     threading.Thread(target=go, daemon=True).start()
+
+
+def speak_turn(cfg, topic, body):
+    """!voice on: read the end of a finished turn aloud, as a voice note."""
+    if str(topic) not in (cfg.get("voice") or []):
+        return
+
+    def go():
+        ogg = tts_ogg(cfg, spoken(body[:700]))
+        if ogg:
+            send_file(cfg, topic, "reply.ogg", ogg, kind="voice")
+        elif not getattr(speak_turn, "warned", False):
+            speak_turn.warned = True
+            send(cfg, topic, "\U0001f507 !voice is on but nothing here can speak: install espeak-ng "
+                 '(or ffmpeg with flite), or set "tts" in the config', mode="plain")
+    threading.Thread(target=go, daemon=True).start()
+
+
+def voice_cmd(cfg, lock, topic, arg):
+    t = str(topic)
+    with lock:
+        on = cfg.setdefault("voice", [])
+        if arg == "on" and t not in on:
+            on.append(t)
+        elif arg == "off" and t in on:
+            on.remove(t)
+        elif arg not in ("", "on", "off"):
+            return "usage: !voice [on|off]"
+        save_cfg(cfg)
+    return ("\U0001f50a voice replies on: each finished turn is also sent as a voice note\n"
+            "send a voice note back and it is transcribed" if t in on else
+            "voice replies off · !voice on speaks each finished turn")
 
 
 def briefing_tick(cfg, state, lock):
@@ -17137,6 +17373,18 @@ def selfcheck():
     # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
     # and a busy pane exactly as a typed one does.
     assert parse_every("4h") == 14400 and parse_every("1d 6h") == 108000
+    _c0 = 1700000000 - 1700000000 % 86400   # a UTC midnight (a Tuesday)
+    assert cron_next({}, "30 9 * * *", _c0) == _c0 + 9 * 3600 + 1800
+    assert cron_next({}, "0 9 * * 1", _c0) == _c0 + 6 * 86400 + 9 * 3600        # next Monday
+    assert cron_next({}, "*/15 * * * *", _c0 + 60) == _c0 + 900
+    assert cron_next({}, "0 0 31 2 *", _c0) is None
+    assert cron_next({"tz_offset": 2}, "0 9 * * *", _c0) == _c0 + 7 * 3600     # 09:00 at +2h
+    for _bad in ("* * * *", "61 * * * *", "a b c d e"):
+        try:
+            cron_next({}, _bad, _c0)
+            raise AssertionError(_bad)
+        except ValueError:
+            pass
     assert parse_every("no duration here") == 0
 
     # !update: each installed agent's own updater, versions before and after.
@@ -19505,6 +19753,26 @@ def selfcheck():
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
     assert "usage" in template_cmd({}, {}, None, "1", "") and "what?" in template_cmd({}, {}, None, "1", "api")
     assert all("{what}" in v for v in TEMPLATES.values())
+    _vc = {}
+    assert "on" in voice_cmd(_vc, threading.Lock(), 7, "on") and _vc["voice"] == ["7"]
+    assert "off" in voice_cmd(_vc, threading.Lock(), 7, "off") and _vc["voice"] == []
+    assert "usage" in voice_cmd(_vc, threading.Lock(), 7, "x")
+    _nb = ntfy_body("t1", "needs_input", "proj", "ok?")
+    assert _nb["topic"] == "t1" and _nb["priority"] == 4 and _nb["title"] == "proj: needs input"
+    _nc = {}
+    assert "subscribe to 'abc'" in events_cmd(_nc, 7, "s", "ntfy abc") and _nc["events_ntfy"] == "abc"
+    assert "usage" in events_cmd(_nc, 7, "s", "ntfy bad!topic")
+    events_cmd(_nc, 7, "s", "off")
+    assert "events_ntfy" not in _nc
+    _led = {"proj": {str(int(time.time() // 3600)): 500, str(int(time.time() // 3600) - 1): 250}, "old": {"1": 9}}
+    _rows, _days = spend_top(_led, 7)
+    assert _rows == [("proj", 750)] and sum(_days.values()) == 750, (_rows, _days)
+    assert "proj" in spend_top_report(_led, 7) and "no spend" in spend_top_report({}, 7)
+    assert policy_hit({}, 7, "Run: rm -rf build/") and policy_hit({}, 7, "git push origin main")
+    assert not policy_hit({}, 7, "Run: ls -la")
+    assert policy_hit({"policy": {"7": {"off": True, "deny": ["deploy"]}}}, 7, "deploy now") == "deploy"
+    assert not policy_hit({"policy": {"7": {"off": True}}}, 7, "sudo ls")
+    assert "usage" in policy_cmd({"chat_id": -1}, threading.Lock(), 7, "bogus")
     assert not (cfg2.get("autoyes") or {}), "autoyes must never be on by default"
 
     assert bound_to(cfg2, "box", "9") is None
