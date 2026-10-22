@@ -12364,7 +12364,7 @@ def migrate(paths=None):
 
 
 MANAGER_BOT = "Nightmux_bot"
-RELAY_URL = os.environ.get("NIGHTMUX_RELAY", "")   # public URL of `nightmux --relay`
+RELAY_URL = os.environ.get("NIGHTMUX_RELAY", "https://instance-20220112-0826.tail9514bf.ts.net")   # public URL of `nightmux --relay`
 RELAY_TTL = 600
 
 
