@@ -47,7 +47,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!goal [n] <check>` | off = run a check (tests, build) after every turn and send failures back until it passes
 - `!shift` then one prompt per line = a sequential overnight plan
 - `!plan <big task>` = the agent splits it into steps, run one at a time
-- `!fan <big task>` = the agent splits it into independent tasks; `!fan` go opens a topic + worktree + agent for each
+- `!fan <big task>` = the agent splits it into independent tasks; `!fan` go opens a topic + worktree + agent for each, `!fan` clean closes them
 - `!at` 03:00 &lt;prompt> | `!at` +90m … | `!every` 4h … | `!sched [clear]`
 - `!queue [clear|now]` = prompts waiting for the agent
 - `!idea [@agent] <what to build>` = new folder + git + SPEC.md, MVP and .`/check`.sh, looped until green
