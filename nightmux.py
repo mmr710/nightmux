@@ -14968,6 +14968,22 @@ def pairing_url(cfg, code):
     return f"{base}/pair?code={code}"
 
 
+def phone_pairing(cfg):
+    """What the terminal says about the phone: a QR it can scan, or why there is none.
+
+    A phone cannot reach a dashboard on 127.0.0.1, and the LAN address pairing_url
+    falls back to would be a QR that refuses connections. Mapping the port with
+    `tailscale serve` or binding wider is the owner's call, so say how, don't do it.
+    """
+    port = cfg.get("webhook_port") or 9090
+    if web_host(cfg) in ("127.0.0.1", "localhost", "::1") and not phone_url(cfg):
+        return (f"📱 Phone: the dashboard listens on this machine only, so there is no QR yet.\n"
+                f"   With Tailscale on both devices, run: tailscale serve --bg {port}\n"
+                f"   then press + Pair phone on the dashboard (your tailnet, not the internet).\n")
+    purl = pairing_url(cfg, new_pairing_code())
+    return f"📱 Phone pairing URL: {purl}\nScan with your phone to pair:\n{qr_text(purl)}\n"
+
+
 PAIRED_TOKENS_FILE = os.path.join(STATE_DIR, "paired_tokens.json")
 _paired_tokens = None
 _pairing_codes = {}
@@ -16124,6 +16140,36 @@ def web_host(cfg):
     return cfg.get("webhook_host") or os.environ.get("NIGHTMUX_HOST") or "127.0.0.1"
 
 
+def up_cli(args):
+    """`nightmux up`: the first run with no bot. It checks what the dashboard needs,
+    will not start a second copy, then runs what the service runs: with no token that
+    is the dashboard on this machine, and phone_pairing says how a phone gets to it."""
+    if args:
+        print("usage: nightmux up    (no options; nightmux --setup adds a Telegram bot)", file=sys.stderr)
+        sys.exit(2)
+    if not shutil.which("tmux"):
+        sys.exit("nightmux drives your agents through tmux, and tmux is not installed:\n"
+                 "  sudo apt install tmux  (macOS: brew install tmux)")
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}                # first run: main() writes the dashboard-only one
+    port = cfg.get("webhook_port") or 9090
+    try:
+        socket.create_connection(("127.0.0.1", int(port)), timeout=1).close()
+    except (OSError, ValueError, OverflowError):
+        pass                    # nothing listens there: free to start
+    else:
+        sys.exit(f"port {port} is already in use on this machine: nightmux, if it is already "
+                 f"running (http://127.0.0.1:{port}/). Not starting a second copy.\n"
+                 f'Another program? Set "webhook_port" in {CFG_PATH}.')
+    have = installed_agents(cfg)
+    print("agents found: " + ", ".join(have) if have else
+          "no agent CLI found on PATH (claude, codex, agy, opencode...): install one before adding a project",
+          flush=True)
+    main()
+
+
 def main():
     added = widen_path()
     if added:
@@ -16181,13 +16227,10 @@ def main():
                              args=(cfg, state, lock, allow, cfg["webhook_port"]),
                              kwargs={"host": web_host(cfg)}).start()
         if local_:
-            c = new_pairing_code()
-            purl = pairing_url(cfg, c)
             print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ topics={cfg['topics']}", flush=True)
-            print(f"📱 Phone pairing URL: {purl}", flush=True)
-            print(f"Scan with your phone to pair:\n{qr_text(purl)}\n", flush=True)
-            try:
-                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/pair?code={c}")
+            print(phone_pairing(cfg), flush=True)
+            try:    # not /pair?code=: this browser would spend the code the QR carries
+                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/")
             except Exception:
                 pass
         else:
@@ -21235,6 +21278,38 @@ def selfcheck():
             assert code_ is None and "not a git repo" in out_ and not os.path.exists(os.path.join(plain_, ".nightmux")), out_
             hand_("codex", where=plain_)
             assert "## Last Instruction" in execs_[-1][1] and ".nightmux" not in execs_[-1][1], execs_[-1]
+        # `up`: tmux first, then no second copy, then the daemon
+        from types import SimpleNamespace
+        has_ = SimpleNamespace(which=lambda c: "/usr/bin/" + c)
+        with stubbed(shutil=SimpleNamespace(which=lambda c: None if c == "tmux" else "/usr/bin/" + c)):
+            code_, out_, err_ = cli_("up")
+        assert "tmux is not installed" in code_ and "brew install tmux" in code_ and not ran_, code_
+        busy_ = socket.socket()
+        busy_.bind(("127.0.0.1", 0))
+        busy_.listen(1)
+        uport_ = busy_.getsockname()[1]
+        with stubbed(shutil=has_, load_cfg=lambda: {"webhook_port": uport_}):
+            code_, out_, err_ = cli_("up")
+        assert "already in use" in code_ and "second copy" in code_ and not ran_, code_
+        busy_.close()
+        with stubbed(shutil=has_, load_cfg=lambda: {"webhook_port": uport_}):
+            code_, out_, err_ = cli_("up")
+        assert code_ is None and ran_ == ["daemon"] and "agents found:" in out_ and "claude" in out_, (code_, out_, ran_)
+        ran_.clear()
+        code_, out_, err_ = cli_("up", "now")
+        assert code_ == 2 and "usage: nightmux up" in err_ and not out_ and not ran_, (code_, err_)
+        # ...and the phone line: no route, no QR; a route, a QR whose code is still good
+        n_ = len(_pairing_codes)
+        with stubbed(phone_url=lambda cfg, status=None: None):
+            msg_ = phone_pairing({"webhook_host": "127.0.0.1", "webhook_port": 7070})
+        assert "tailscale serve --bg 7070" in msg_ and "pair?code" not in msg_ and len(_pairing_codes) == n_, msg_
+        with stubbed(phone_url=lambda cfg, status=None: "https://box.ts.net"):
+            msg_ = phone_pairing({"webhook_host": "127.0.0.1"})
+        code_ = re.search(r"https://box\.ts\.net/pair\?code=([\w-]+)", msg_).group(1)
+        assert code_ in _pairing_codes and ("▄" in msg_ or "█" in msg_), msg_
+        with stubbed(phone_url=lambda cfg, status=None: None, get_local_ip=lambda: "192.168.1.5"):
+            msg_ = phone_pairing({"webhook_host": "0.0.0.0", "webhook_port": 7070})
+        assert "http://192.168.1.5:7070/pair?code=" in msg_, msg_
         assert cli_() == (None, "", "") and ran_ == ["daemon"], ran_
     print("selfcheck ok")
 
@@ -21514,6 +21589,7 @@ def demo_serve(port=8099):
 USAGE = """usage: nightmux [command | option]
 
   (none)               run the daemon; what the service starts
+  up                   first run, no bot needed: the dashboard, and how a phone reaches it
   wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
   handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
   --setup              first run: bot token, group, hooks, service
@@ -21563,6 +21639,8 @@ def cli():
         demo_serve(int(port))
     elif sys.argv[1:2] == ["wrapped"]:
         wrapped_cli(sys.argv[2:])
+    elif sys.argv[1:2] == ["up"]:
+        up_cli(sys.argv[2:])
     elif len(sys.argv) > 1:     # a typo used to start a daemon on the live config
         print(f"nightmux: unknown option {sys.argv[1]!r}\n\n{USAGE}", end="", file=sys.stderr)
         sys.exit(2)

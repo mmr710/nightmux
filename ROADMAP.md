@@ -11,7 +11,7 @@ Want one of these sooner, or have a better idea? Open an [issue](https://github.
 
 - [x] **5 Super-Intents Action Bar (`!vibe`):** Consolidate 70+ commands into a 1-tap mobile action bar (`🚀 Build`, `🌙 Night Shift`, `⚡ Race`, `🧬 Teleport`, `🌾 Harvest`, `🎁 Wrapped`).
 - [x] **Dynamic OpenGraph Social Cards (`/share` & `/share/card.svg`):** Stateless SVG/HTML OpenGraph card generator + Web Share API Level 2 (`navigator.share({ files })`) for native 1-tap photo/GIF sharing to X and Reddit without manual file attachment.
-- [ ] **Telegram-Free 60s First Run & QR Mobile Pairing (PR #128):** Boot straight into the mobile PWA via terminal QR code before configuring BotFather.
+- [x] **Telegram-Free 60s First Run & QR Mobile Pairing (`nightmux up`):** Boot straight into the dashboard before configuring BotFather, and pair a phone by QR once Tailscale gives it a route. No LAN binding or third-party tunnel by default.
 
 ## Phase 2: Handoff between agents, and using the quota you already pay for
 *Goal: Zero wasted tokens on agent failover and zero wasted 5-hour subscription windows while you sleep.*
