@@ -29,7 +29,7 @@ window resets — or hands the work to another agent.
 ## Quickstart
 
 1. `curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh`
-2. Scan the QR it prints to create your bot — no token to copy. (Or paste one from [@BotFather](https://t.me/BotFather), or press Enter for dashboard-only.)
+2. Create the bot: scan the QR it prints (quickest; the new token passes through the maintainer's [onboarding relay](SECURITY.md#the-qr-onboarding-relay)), or press Enter and paste a token from [@BotFather](https://t.me/BotFather) (nothing leaves your machine). No token at all runs dashboard-only.
 3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type.
 
 No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup` (or `pipx run --spec git+https://github.com/mmr710/nightmux nightmux --setup`).
@@ -39,15 +39,15 @@ Docker, a fresh VPS and the rest: [Install →](#install)
 
 ## How it compares
 
-| | nightmux | hosted / relay mobile apps | tmux + SSH from a phone |
-|---|:-:|:-:|:-:|
-| Resumes by itself after a usage limit, or hands off to another agent | ✅ | — | — |
-| Any agent CLI (Claude Code, Codex, Gemini, opencode, Cursor…) | ✅ | usually one | ✅ |
-| Phone UI: menus as buttons, photos, voice notes | ✅ | ✅ | — |
-| Runs on your machine; no relay sees your code | ✅ | — | ✅ |
-| Overnight: schedules, `!goal` test loops, morning briefing | ✅ | — | — |
-| Attaches to the tmux session you can still SSH into | ✅ | — | ✅ |
-| One file, Python stdlib, no account | ✅ | — | ✅ |
+nightmux is one of several ways to reach a coding agent from your phone, and not the biggest. The others, and where to look first:
+
+- **[Happy](https://github.com/slopus/happy)** (MIT, 24k★) and **[HAPI](https://github.com/tiann/hapi)** (AGPL-3.0, 5k★) are apps for Claude Code, Codex and more, with communities far larger than this one. If you want an app rather than a chat bot, start there.
+- **[ccbot](https://github.com/six-ddc/ccbot)** and **[ccgram](https://github.com/alexei-led/ccgram)** bridge Telegram topics to tmux sessions, the same shape as nightmux's core. If a bridge is all you want, try them first.
+- **[claude-auto-resume](https://github.com/terryso/claude-auto-resume)** is a shell script that resumes Claude Code when a usage limit lifts. nightmux does the same inside a bigger tool.
+- **[claude-squad](https://github.com/smtg-ai/claude-squad)** manages several terminal agents at once, from the terminal.
+- **Anthropic's own** Remote Control and Telegram channel plugin reach a Claude Code session with no third-party code. If Claude Code is the only agent you use, start there.
+
+What nightmux is for is the overnight layer across agents: a queue that waits out usage limits or hands the work to another agent, schedules, `!goal` loops that run your tests until they pass, a morning briefing, and a dashboard with an office view. The cost is size: the daemon is a single file of about 20,000 lines, from one maintainer.
 
 ## The night shift
 
@@ -64,16 +64,17 @@ someone awake types `continue`. nightmux reads the reset time, holds everything
 you send, and puts the work back the moment the window reopens — including the
 turn the limit cut off. You read the result at breakfast.
 
-That is the part nobody else is doing. The rest is what makes it usable:
+The rest is what makes it usable:
 
 Run **Claude Code from your phone** — or Codex, Gemini, aider, anything with a
 prompt. One Telegram forum topic per project, one tmux session behind it. Text
 you send is typed into that session's prompt; what the session says comes back
 to the topic. Approvals arrive as tap buttons.
 
-No container, no DNS, no certificates, no ports open, no relay service. It
-attaches to tmux sessions you already have, on the machine you already use.
-Python stdlib only — one file you can read.
+No container, no DNS, no certificates, no ports open. It attaches to tmux
+sessions you already have, on the machine you already use. Messages travel
+through Telegram's servers; nightmux runs none of its own in that path.
+Python standard library only, nothing to `pip install`.
 
 ![What a night looks like: the limit hits at 02:14, nightmux resumes the turn at 04:11, and the one approval waits for breakfast](docs/demo.svg)
 
@@ -98,7 +99,7 @@ Python stdlib only — one file you can read.
 | 🔧 **Code** | `!git` / `!diff` / `!undo` snapshots · issues in, PRs out · CI and preview watchers · dependency health |
 | 👀 **See it** | dashboard · chat PWA · pixel-art office · Android app with alerts and a widget · GIF of the night |
 | 🖥 **Two servers** | one bot, several machines; move a topic between them |
-| 🧩 **Yours** | one Python file, stdlib only · plugins · webhook API · runs without Telegram |
+| 🧩 **Yours** | stdlib only, no dependencies · plugins · webhook API · runs without Telegram |
 
 The [guide](docs/GUIDE.md) walks through each one; [COMMANDS.md](docs/COMMANDS.md) lists every command.
 
@@ -120,7 +121,7 @@ docker run -it --name nightmux -v nightmux-home:/root -v ~/code:/code \
   -p 127.0.0.1:9090:9090 ghcr.io/mmr710/nightmux
 docker exec -it nightmux claude      # log the agent in once
 ```
-The dashboard has no login of its own — keep the port on `127.0.0.1` (or your tailnet).
+The dashboard trusts this machine and your tailnet — keep the port on `127.0.0.1` (or behind `tailscale serve`), never on the open internet. See [SECURITY.md](SECURITY.md).
 
 **A fresh VPS** (Hetzner, DigitalOcean, Vultr…): paste
 [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml) into the provider's user-data
@@ -238,8 +239,8 @@ What that means in practice:
 - **Only you can drive it.** Telegram messages from anyone not in `allow_users` are ignored.
 - **Risky approvals stay human.** `!autoyes` is opt-in per topic and never presses yes on `rm -rf`, `sudo`, `git push`, `curl | sh`, `--force` or publish dialogs (`!policy` tunes this).
 - **Spend is capped.** `!budget` and `!spendcap` stop runaway loops; `!cost top` shows where it went.
-- **The QR onboarding relay holds nothing.** It passes your new bot's token to your terminal once, in memory, and keeps no logs and no disk copy.
-- **Zero dependencies.** One stdlib-only Python file you can read in an afternoon.
+- **The QR shortcut in setup trusts the maintainer.** The relay passes your new bot's token to your terminal once, from memory, with no logs and no disk copy — but it runs on a machine you can't audit, so paste a BotFather token instead if that matters ([details](SECURITY.md#the-qr-onboarding-relay)).
+- **Zero dependencies.** Standard library only, so nothing third-party to audit. The daemon itself is a single file of about 20,000 lines.
 
 ## License
 

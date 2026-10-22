@@ -196,7 +196,7 @@ live terminal (`/term/<topic>`), and OpenGraph social share cards (`/share`,
 `/share/card.svg`) directly from `127.0.0.1` or the user's tailnet. Only
 `/public/<token>` and `/share` are safe for public exposure (`!public expose`).
 
-**Context Teleportation (`!teleport`) & Quota Arbitrage (`!harvest`).** When a
+**Handoff (`!teleport`) & quota top-up (`!harvest`).** When a
 session hits its rate limit and fails over (or when a user invokes `!teleport`),
 nightmux synthesises a `.nightmux/HANDOFF.md` packet (recent turns, tool calls,
 `git status/diff`, and `.nightmux/memory.md`) so the next agent continues
