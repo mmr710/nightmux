@@ -22,6 +22,7 @@ import hmac
 import glob
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import queue
@@ -15162,11 +15163,57 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # What a tunnel or reverse proxy on this machine adds to a request from elsewhere.
+    FORWARDED = ("X-Forwarded-For", "X-Real-Ip", "Cf-Connecting-Ip", "True-Client-Ip")
+    # Names nobody can register publicly, so a DNS-rebinding page cannot use them.
+    OWN_SUFFIXES = (".local", ".lan", ".internal", ".home.arpa", ".ts.net")
+
+    def via_internet(self):
+        """A request over loopback that a proxy says came from a public address.
+        Loopback is open because only this machine can reach it; `tailscale funnel`
+        or a tunnel on this machine breaks that: the peer is 127.0.0.1, the person
+        is on the internet. Tailnet and LAN clients (`tailscale serve`) stay local.
+        """
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return True
+        for name in self.FORWARDED:
+            for ip in (self.headers.get(name) or "").split(","):
+                try:
+                    if ip.strip() and ipaddress.ip_address(ip.strip()).is_global:
+                        return True
+                except ValueError:
+                    return True
+        return False
+
     def is_localhost(self):
         client = getattr(self, "client_address", None)
         if not client:
             return True
-        return client[0] in ("127.0.0.1", "::1", "localhost")
+        return client[0] in ("127.0.0.1", "::1", "localhost") and not self.via_internet()
+
+    def host_ok(self):
+        """DNS rebinding: a page on evil.example whose name flips to 127.0.0.1 after
+        it loads is same-origin with the dashboard and would inherit the open
+        loopback. The browser still sends evil.example as Host. Addresses, one-word
+        names and names under OWN_SUFFIXES pass; a public name has to be listed in
+        "allowed_hosts" (or be office_url / preview_host).
+        """
+        try:
+            name = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "localhost")).hostname
+        except ValueError:
+            return False
+        name = (name or "").rstrip(".")
+        if not name:
+            return False
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            pass
+        cfg = getattr(getattr(self, "server", None), "cfg", None) or {}
+        mine = {str(h).lower() for h in cfg.get("allowed_hosts") or []}
+        mine |= {urllib.parse.urlsplit(cfg.get("office_url") or "").hostname, cfg.get("preview_host")}
+        return "." not in name or name.endswith(self.OWN_SUFFIXES) or name in mine
 
     def check_auth(self):
         cookie = self.headers.get("Cookie", "")
@@ -15177,12 +15224,25 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         return False
 
     def auth_gate(self):
-        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Localhost stays open."""
-        if self.is_localhost() or self.peer:   # peer_gate already checked the secret
+        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Loopback stays
+        open, for the names this machine answers to (host_ok)."""
+        clean_path, _, query = self.path.partition("?")
+        # peer_gate already checked the secret; a /public/ link carries its own token.
+        if self.peer or clean_path.startswith("/public/"):
             return True
-        clean_path = self.path.split("?")[0]
-        if clean_path in ("/pair", "/icon.svg", "/manifest.json", "/sw.js") \
-                or clean_path.startswith(("/qr.svg", "/public/", "/peer/")):
+        if self.is_localhost():
+            if self.host_ok():
+                return True
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Host not allowed. If that is your own name for this machine, "
+                             b"add it to \"allowed_hosts\" in ~/.nightmux.json.\n")
+            return False
+        # Redeeming a pairing code needs no login (the code is the login); asking for one does.
+        if (clean_path == "/pair" and urllib.parse.parse_qs(query).get("code")) \
+                or clean_path in ("/icon.svg", "/manifest.json", "/sw.js") \
+                or clean_path.startswith(("/qr.svg", "/peer/")):
             return True
         if not self.check_auth():
             self.send_response(401)
@@ -15236,9 +15296,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 return
             c = new_pairing_code()
             purl = pairing_url(self.server.cfg, c)
-            html = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
+            page = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
                                     ).replace("__PAIR_URL__", html.escape(purl))
-            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, page), "text/html; charset=utf-8")
         if self.path == "/api/connect":
             cfg = self.server.cfg
             return self.reply(json.dumps({
@@ -15262,8 +15322,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 with self.server.lock:
                     data = public_snapshot(self.server.cfg, self.server.state)
                 return self.reply(json.dumps(data), "application/json")
-            html = OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>" % json.dumps(tok), 1)
-            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+            page = OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>" % json.dumps(tok), 1)
+            return self.reply(inject_telemetry(self.server.cfg, page), "text/html; charset=utf-8")
         if self.path in ("/", ""):
             return self.reply(inject_telemetry(self.server.cfg, DASHBOARD_HTML), "text/html; charset=utf-8")
         if self.path.startswith("/share/card.svg"):
@@ -15440,7 +15500,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
         if self.path == "/api/pair/revoke":
-            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+            if self.headers.get("X-Nightmux") != "1":
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -15449,7 +15509,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps({"ok": True, "revoked": count, "msg": f"Revoked {count} paired devices"}),
                               "application/json")
         if self.path == "/api/pair/code":
-            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+            if self.headers.get("X-Nightmux") != "1":
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -18613,6 +18673,46 @@ def selfcheck():
     code3_ = new_pairing_code()
     tok3_ = redeem_pairing_code(code3_)
     assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", headers={"Cookie": f"nm_auth={tok3_}"})) is True
+
+    # Loopback is open for this machine's own names, and only when nobody forwarded the request.
+    for host_ in ("127.0.0.1:9090", "localhost", "[::1]:9090", "mybox", "box.tail1234.ts.net", "mac.local:9090"):
+        assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1", headers={"Host": host_})) is True, host_
+    for host_ in ("evil.example.com", "evil.example.com:9090", "localhost.evil.com", "127.0.0.1.evil.com", ":9090"):
+        h_rb_ = DummyHandler("127.0.0.1", headers={"Host": host_})            # DNS rebinding
+        assert WebhookHandler.auth_gate(h_rb_) is False and h_rb_.status == 403, host_
+
+    class OwnHost(DummyHandler):
+        server = type("S", (), {"cfg": {"allowed_hosts": ["Nm.Example.com"]}})()
+    assert OwnHost("127.0.0.1", headers={"Host": "nm.example.com:443"}).auth_gate() is True
+    for fwd_ in ({"Tailscale-Funnel-Request": "?1"}, {"X-Forwarded-For": "8.8.8.8"},
+                 {"X-Forwarded-For": "10.0.0.2, 8.8.8.8"}, {"Cf-Connecting-Ip": "2001:4860:4860::8888"},
+                 {"X-Forwarded-For": "nonsense"}):       # funnel, tunnel, proxy: the peer is 127.0.0.1, the person is not
+        h_px_ = DummyHandler("127.0.0.1", headers=fwd_)
+        assert WebhookHandler.auth_gate(h_px_) is False and h_px_.status == 401, fwd_
+    for fwd_ in ({"X-Forwarded-For": "100.64.1.2"}, {"X-Forwarded-For": "192.168.1.9"},
+                 {"X-Forwarded-For": "fd7a:115c:a1e0::1"}):    # `tailscale serve`: the tailnet is the boundary
+        assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1", headers=fwd_)) is True, fwd_
+    # Asking for a pairing code takes a login; redeeming one does not.
+    for path_ in ("/pair", "/pair?code=", "/pair?x=1"):
+        h_mint_ = DummyHandler("192.168.1.50", path=path_)
+        assert WebhookHandler.auth_gate(h_mint_) is False and h_mint_.status == 401, path_
+    # ...and on the real server: the page renders (it died on a shadowed `html`), a foreign Host
+    # is refused, and the pairing POSTs need the header from loopback too.
+    pair_page_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/pair").read().decode()
+    assert "Scan to Pair Phone" in pair_page_ and "/pair?code=" in pair_page_
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port_}/api/connect",
+                                                      headers={"Host": "evil.example.com"}))
+        assert False, "served a rebinding Host"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+    for path_ in ("/api/pair/code", "/api/pair/revoke"):
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port_}{path_}", data=b"{}",
+                                                          method="POST"))
+            assert False, "pairing POST without the header"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
 
     # 5 Starter templates
     assert len(STARTER_TEMPLATES) == 5

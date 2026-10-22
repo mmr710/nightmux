@@ -30,6 +30,29 @@ lets them read your sessions' output — the code Claude wrote, the file paths, 
 error messages, whatever scrolled past. It does not let them type, but assume
 anyone in the group sees everything the bot sends.
 
+## The dashboard
+
+The dashboard (`webhook_port`, default 9090) is a second way in, and the allowlist
+does not guard it: whoever it lets in can type into every session, which is a
+shell. It listens on `127.0.0.1` unless `webhook_host` says otherwise.
+
+- **This machine and your tailnet are trusted.** A request over loopback needs no
+  login, and that includes one `tailscale serve` relays from your tailnet.
+- **Everything else needs a paired device.** A request from another address, or
+  one a proxy says came from a public address (`tailscale funnel`, a tunnel, an
+  `X-Forwarded-For` that is not private), must carry the `nm_auth` cookie you get
+  by scanning the pairing QR. A pairing code is handed out only to this machine
+  or to a device that is already paired.
+- **A browser tab cannot ride the open loopback.** Over loopback the dashboard
+  answers only to this machine's own names: addresses, one-word names, `.local`,
+  `.lan`, `.internal`, `.ts.net`. That is what stops DNS rebinding, where a page
+  on someone else's domain flips its name to `127.0.0.1`. A name of your own on a
+  public domain goes in `"allowed_hosts": ["nm.example.com"]`. Anything that
+  changes state also needs the `X-Nightmux` header, which another site cannot send.
+- A reverse proxy on the same machine that adds no forwarding header looks exactly
+  like you. nightmux has no login of its own, so do not put the dashboard behind
+  one on the open internet.
+
 ## The bot token
 
 `~/.nightmux.json` holds the bot token. **The token is equivalent to the
