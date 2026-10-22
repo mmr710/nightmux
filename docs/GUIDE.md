@@ -660,7 +660,9 @@ a new topic named after a directory start that project on its first message.
 agent hits a usage limit — the working tree and the cut-off instruction go to
 `codex` (or whoever) instead of waiting hours for the reset. Without it, the
 limit message offers the same thing as one-tap buttons; `!failover <agent>`
-does it by hand.
+does it by hand. Without the bot, `nightmux handoff <agent>` does the same from
+a terminal in the repo: it writes `.nightmux/HANDOFF.md` from the newest Claude
+Code or Codex conversation there and the git state, and starts the agent on it.
 
 `auto_update` (`true` = daily, or an interval like `"12h"`; off by default)
 runs each installed agent's own updater on that schedule — `claude update`,
