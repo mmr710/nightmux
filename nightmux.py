@@ -20557,6 +20557,31 @@ def selfcheck():
             assert 'property="og:image"' in sp_ and 'name="twitter:card"' in sp_, sp_[:400]
             assert "navigator.canShare" in sp_ and "demo.example.com/share/card.svg" in sp_, sp_[:600]
         assert "url=https%3A%2F%2Fd.uguu.se%2Fx.png" in reddit_url("my recap", "https://d.uguu.se/x.png")
+    # The CLI: -h prints usage, and an unknown option stops. `nightmux --help`
+    # used to fall through to main() and start a daemon on the live config.
+    import io
+    ran_ = []
+
+    def cli_(*args):
+        old_argv_, sys.argv = sys.argv, ["nightmux", *args]
+        out_, err_, code_ = io.StringIO(), io.StringIO(), None
+        try:
+            with contextlib.redirect_stdout(out_), contextlib.redirect_stderr(err_):
+                cli()
+        except SystemExit as e:
+            code_ = e.code
+        finally:
+            sys.argv = old_argv_
+        return code_, out_.getvalue(), err_.getvalue()
+
+    with stubbed(main=lambda: ran_.append("daemon")):
+        for args_ in (("--help",), ("-h",), ("--help", "--bogus")):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ is None and "usage: nightmux" in out_ and "--doctor" in out_ and not ran_, (args_, out_, ran_)
+        for args_ in (("--bogus",), ("setup",)):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ == 2 and "unknown option" in err_ and "usage: nightmux" in err_ and not out_ and not ran_, (args_, code_, err_, ran_)
+        assert cli_() == (None, "", "") and ran_ == ["daemon"], ran_
     print("selfcheck ok")
 
 
@@ -20832,9 +20857,28 @@ def demo_serve(port=8099):
         pass
 
 
+USAGE = """usage: nightmux [option]
+
+  (none)               run the daemon; what the service starts
+  --setup              first run: bot token, group, hooks, service
+  --doctor             find what is wrong with this install
+  --demo [port]        the office with a made-up night; no bot, no keys
+  --join <code>        add this machine to another nightmux
+  --relay              run the QR claim relay
+  --mcp [--companion]  MCP server on stdio
+  --mcp-desktop        MCP server for the desktop app
+  --commands           every command, as markdown
+  --version            version and what it runs on
+  --selfcheck          the built-in tests
+  -h, --help           this text
+"""
+
+
 def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
-    if "--selfcheck" in sys.argv:
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(USAGE, end="")
+    elif "--selfcheck" in sys.argv:
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
@@ -20859,6 +20903,9 @@ def cli():
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
         demo_serve(int(port))
+    elif len(sys.argv) > 1:     # a typo used to start a daemon on the live config
+        print(f"nightmux: unknown option {sys.argv[1]!r}\n\n{USAGE}", end="", file=sys.stderr)
+        sys.exit(2)
     else:
         main()
 
