@@ -447,7 +447,9 @@ fewer tokens. The same report is `!stats [days]` in Telegram.
   re-read after compactions and fresh starts, turns worked between midnight
   and 7, queues resumed after limits, hand-offs, green checks, loops caught.
 - `!wrapped [days]` — the same as a 1200×675 card with your agent stats, and a
-  🐦 button that opens a ready-to-post tweet.
+  🐦 button that opens a ready-to-post tweet. `nightmux wrapped [days]` draws it
+  from the shell with no bot or config, and adds what the tokens would cost at
+  API list prices; `"prices"` in `~/.nightmux.json` adds a model's rates.
 - The night reel is signed with the repo link and gets the same 🐦 button.
 - `!public on` — a read-only office at `/public/<token>`: agent states only,
   no screen text, prompts or buttons. Tailnet-only until `!public expose`,
