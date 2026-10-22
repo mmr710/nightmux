@@ -1,6 +1,6 @@
 # 🌙 nightmux Product Roadmap
 
-`nightmux` is the **Autonomous Hypervisor & Mobile Cockpit for CLI Coding Agents** (`claude`, `codex`, `agy`, `opencode`, `gemini`, `cursor`, `amp`, `goose`, `qwen`).
+`nightmux` drives CLI coding agents from your phone and keeps them working overnight (`claude`, `codex`, `agy`, `opencode`, `gemini`, `cursor`, `amp`, `goose`, `qwen`).
 
 Want one of these sooner, or have a better idea? Open an [issue](https://github.com/mmr710/nightmux/issues/new/choose) — and say if you'd like to build it.
 
@@ -13,11 +13,11 @@ Want one of these sooner, or have a better idea? Open an [issue](https://github.
 - [x] **Dynamic OpenGraph Social Cards (`/share` & `/share/card.svg`):** Stateless SVG/HTML OpenGraph card generator + Web Share API Level 2 (`navigator.share({ files })`) for native 1-tap photo/GIF sharing to X and Reddit without manual file attachment.
 - [ ] **Telegram-Free 60s First Run & QR Mobile Pairing (PR #128):** Boot straight into the mobile PWA via terminal QR code before configuring BotFather.
 
-## Phase 2: Cross-Agent Context Teleportation & Subscription Quota Arbitrage
+## Phase 2: Handoff between agents, and using the quota you already pay for
 *Goal: Zero wasted tokens on agent failover and zero wasted 5-hour subscription windows while you sleep.*
 
-- [x] **Context Teleportation (`!teleport` & Smart Failover):** Extract recent transcript turns, tool calls, `git status/diff`, and `.nightmux/memory.md` into a structured `.nightmux/HANDOFF.md` packet so failover or switched agents continue mid-thought without re-exploring the codebase.
-- [x] **Unused Quota Window Harvester (`!harvest`):** Monitor 5-hour subscription quota windows; when a window is about to reset with unused capacity (`< 60m` left and below the safety ceiling, default `85%`), automatically wake idle sessions to run queued tech-debt, test, and cleanup tasks.
+- [x] **Handoff (`!teleport` & failover):** Extract recent transcript turns, tool calls, `git status/diff`, and `.nightmux/memory.md` into a structured `.nightmux/HANDOFF.md` packet so failover or switched agents continue mid-thought without re-exploring the codebase.
+- [x] **Using up an expiring quota window (`!harvest`):** Monitor 5-hour subscription quota windows; when a window is about to reset with unused capacity (`< 60m` left and below the safety ceiling, default `85%`), automatically wake idle sessions to run queued tech-debt, test, and cleanup tasks.
 - [ ] **Universal Agent Schema Adapters & Drift Guard (PR #111):** First-class structured transcript & limit readers across Claude Code, Codex, OpenCode, and Antigravity (`agy`).
 
 ## Phase 3: "Walkie-Talkie" & "Swipe-to-Ship" Mobile Vibe UX

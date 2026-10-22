@@ -12453,7 +12453,8 @@ def setup():
         uname = "nm" + secrets.token_hex(6) + "_bot"
         link = f"https://t.me/newbot/{MANAGER_BOT}/{uname}?name=nightmux"
         print("1. Scan this with your phone and tap Create: nightmux makes the bot and\n"
-              "   picks it up itself. Press Enter instead to paste a BotFather token.\n\n"
+              "   picks it up itself, through the maintainer's relay (see SECURITY.md).\n"
+              "   Press Enter instead to paste a BotFather token; it never leaves here.\n\n"
               f"{qr_text(link)}\n   {link}\n   Waiting...")
         token = claim_managed_bot(RELAY_URL, uname)
     if not token:

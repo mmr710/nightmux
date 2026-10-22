@@ -42,6 +42,13 @@ group, including output from your sessions.
 - If it leaks, revoke it in BotFather (`/revoke`) — that invalidates the old
   token immediately — then re-run `python3 nightmux.py --setup`.
 
+## The QR onboarding relay
+
+`--setup` offers a shortcut: scan a QR code and Telegram creates the bot for you. It goes through a manager bot and a small relay (`nightmux --relay`), both run by the maintainer, and it is the one place nightmux depends on a server you don't run.
+
+- Whoever holds the manager bot's token can read the token of every bot made through it. The relay keeps a new token in memory for up to ten minutes, hands it once to whoever names the bot's random username, and forgets it; nothing is logged or written to disk. `relay_serve()` is short and says so, but you cannot audit the machine it runs on.
+- A bot token has the reach described above. If that is more trust than you want to give, press Enter at the QR prompt and paste a token from @BotFather: it then never leaves your machine. To use a relay of your own, set `NIGHTMUX_RELAY`.
+
 ## Prompt injection
 
 Everything arriving over Telegram is untrusted input that gets typed into an

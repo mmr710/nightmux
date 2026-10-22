@@ -29,7 +29,7 @@ them instead of discovering them:
   every project by token type
 
 Long-running agent sessions cost money and stall in ways chat never does. That is
-the part nobody else is watching.
+what nightmux watches for.
 
 **It attaches to sessions instead of owning them.** nightmux types into tmux. The
 session is still yours — SSH in, attach, type directly, and the bot keeps working
