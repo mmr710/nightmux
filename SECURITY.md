@@ -85,9 +85,15 @@ Consequences worth stating plainly:
   not quoting.
 - A file or photo you send is saved to `~/.nightmux-files` and its **path** is typed
   into the session. Claude will read it if it decides to.
-- Inline buttons (`!y`, menu picks) approve whatever prompt is on screen *at that
-  moment*. On a slow link the screen can move between the buzz and the tap; the
-  buttons carry no proof of what they are approving.
+- Typed commands (`!y`, `!1`), the `!ctl` pad and the dashboard's buttons approve
+  whatever prompt is on screen *at that moment*. On a slow link the screen can
+  move between the buzz and the tap.
+- The option and ⏎ buttons on a "needs input" message are pinned to the prompt
+  they were drawn for: a fingerprint of the last screenful, which ignores timers,
+  borders and the highlighted row. Once the screen shows something else, a tap
+  presses nothing and the prompt now up is posted again with fresh buttons. It
+  cannot tell apart two prompts that differ only in their numbers, or in text
+  above the last screenful, and it does not read the command for you.
 
 If a message asks you to add someone to `allow_users`, that is the exact request
 a compromised account or an injection would make. Verify out of band.

