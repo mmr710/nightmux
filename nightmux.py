@@ -43,7 +43,7 @@ import urllib.request
 import webbrowser
 import zlib
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 CFG_PATH = os.path.expanduser(os.environ.get("NIGHTMUX_CONFIG", "~/.nightmux.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper

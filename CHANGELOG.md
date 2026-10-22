@@ -6,6 +6,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-22
+
 ### Added
 - `nightmux up`: the first run with no Telegram bot. Checks for tmux, will not start a second copy when the dashboard port is already in use, starts the dashboard on this machine and says what a phone needs to reach it (`tailscale serve --bg <port>`, then **+ Pair phone**). Nothing is opened to the LAN or the internet.
 - `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
