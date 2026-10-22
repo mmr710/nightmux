@@ -4174,10 +4174,13 @@ def fan_cmd(cfg, state, lock, topic, arg):
         return "fan cancelled" if gone else "nothing to cancel"
     if arg == "go":
         return fan_go(cfg, state, lock, t)
+    if arg == "clean":
+        return fan_clean(cfg, state, lock, t)
     if not arg:
         return ("usage: !fan <big task>\nthe agent splits it into independent tasks; "
                 "!fan go opens one topic + git worktree + agent each, with its own "
-                "!goal check · !plan runs steps one at a time instead")
+                "!goal check · !fan clean closes this topic's task topics when you are "
+                "done · !plan runs steps one at a time instead")
     sess = cfg["topics"].get(t)
     if not sess or not has_session(sess):
         return "this topic has no live session to plan in"
@@ -4187,6 +4190,24 @@ def fan_cmd(cfg, state, lock, topic, arg):
     _plan[t] = {"sess": sess, "task": arg, "at": time.time(), "fan": True}
     reply = send_prompt(cfg, state, topic, sess, FAN_PROMPT.format(task=arg, max=FAN_MAX))
     return reply or "\U0001fa6d asking %s to split this up..." % sess
+
+
+def fan_clean(cfg, state, lock, topic):
+    """Close the task topics !fan go opened from this one. Sessions stop and the
+    Telegram topics close; folders, worktrees and branches stay (topic_close
+    never deletes files), so merged work is removed with git, not here."""
+    kids = sorted(k for k, v in (cfg.get("fan_kids") or {}).items() if v == topic)
+    if not kids:
+        return "no fan topics opened from here"
+    rows = []
+    for k in kids:
+        name = (cfg.get("topics") or {}).get(k) or k
+        ok, msg = topic_close(cfg, state, lock, k)
+        with lock:
+            cfg["fan_kids"].pop(k, None)
+            save_cfg(cfg)
+        rows.append(("✅ closed " if ok else "✕ ") + f"{name}" + ("" if ok else f": {msg[:60]}"))
+    return "\n".join(rows) + "\nfolders and fan/* branches stay — git worktree remove <folder> once merged"
 
 
 def fan_go(cfg, state, lock, topic):
@@ -4210,10 +4231,14 @@ def fan_go(cfg, state, lock, topic):
         if not os.path.isdir(folder):
             rows.append(f"✕ {name}: {out[:80]}")
             continue
-        ok, msg, new = topic_new(cfg, state, lock, task[:60], name, folder, key)
+        ok, msg, new = topic_new(cfg, state, lock, f"🪭 {os.path.basename(repo)}: {task}"[:60],
+                                 name, folder, key)
         if not ok:
             rows.append(f"✕ {name}: {msg[:80]}")
             continue
+        with lock:
+            cfg.setdefault("fan_kids", {})[new] = topic
+            save_cfg(cfg)
         state.setdefault(name, {}).setdefault("queue", []).append(task + FAN_TAIL)
         if check:
             goal_cmd(cfg, lock, new, check)
@@ -4859,7 +4884,7 @@ HELP = [
         "and send failures back until it passes",
         "!shift then one prompt per line = a sequential overnight plan",
         "!plan <big task> = the agent splits it into steps, run one at a time",
-        "!fan <big task> = the agent splits it into independent tasks; !fan go opens a topic + worktree + agent for each",
+        "!fan <big task> = the agent splits it into independent tasks; !fan go opens a topic + worktree + agent for each, !fan clean closes them",
         "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]",
         "!queue [clear|now] = prompts waiting for the agent",
         "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
@@ -19825,6 +19850,11 @@ def selfcheck():
             assert all(os.path.isdir(f) for _, f, _ in fnew_) and fgoals_ == [("301", "true")]
             assert "do not merge" in pstate["add-tests"]["queue"][0]
             assert "fan/docs" in run("git", "-C", repo_, "branch")
+            assert fcfg_["fan_kids"] == {"301": "9", "302": "9"}
+            assert fnew_[0][0] == "add-tests" and "no fan topics" in fan_clean(fcfg_, pstate, threading.Lock(), "5")
+            with stubbed(topic_close=lambda c, st, lk, t: (True, "closed"), save_cfg=lambda c: None):
+                out = fan_clean(fcfg_, pstate, threading.Lock(), "9")
+            assert out.count("✅ closed") == 2 and not fcfg_["fan_kids"], out
         csent.clear()
         fan_cmd(cfg2, pstate, threading.Lock(), "9", "again")
         assert "fan cancelled" == fan_cmd(cfg2, pstate, threading.Lock(), "9", "cancel")
