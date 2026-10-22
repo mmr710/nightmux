@@ -42,7 +42,7 @@ import urllib.request
 import webbrowser
 import zlib
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 CFG_PATH = os.path.expanduser(os.environ.get("NIGHTMUX_CONFIG", "~/.nightmux.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper
@@ -15688,9 +15688,10 @@ def restore_held(cfg, state):
 
 
 def web_host(cfg):
-    """Where the dashboard listens. Loopback unless told otherwise: it has no login,
-    so anything that can reach it drives your agents. Docker sets 0.0.0.0 inside the
-    container and publishes the port on the host's loopback only."""
+    """Where the dashboard listens. Loopback unless told otherwise: this machine needs
+    no login and any other client needs a paired device (SECURITY.md), so keep it off
+    the open internet. Docker sets 0.0.0.0 inside the container and publishes the
+    port on the host's loopback only."""
     return cfg.get("webhook_host") or os.environ.get("NIGHTMUX_HOST") or "127.0.0.1"
 
 

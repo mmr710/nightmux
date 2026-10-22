@@ -8,4 +8,4 @@
 - [ ] New behaviour has an `assert` in `selfcheck()`
 - [ ] Changed `HELP`? `python3 nightmux.py --commands > docs/COMMANDS.md`
 - [ ] User-visible change? A line in `CHANGELOG.md` under Unreleased
-- [ ] Still stdlib-only and still one file
+- [ ] Still stdlib-only (no new dependency)

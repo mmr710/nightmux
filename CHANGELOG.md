@@ -6,6 +6,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-22
+
 ### Added
 - Unified `AGENT_ADAPTERS` registry: launch commands, screen detectors, multi-schema transcript/usage readers, and limit readers for claude, agy, codex, opencode, gemini, and other agent CLIs.
 - Dual-schema OpenCode reader: parses both `session_message`/`session_v2` and legacy `message`/`session` schemas directly.
@@ -41,6 +43,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - README cut to the essentials (quickstart, comparison, feature grid, install); the long form moved to [docs/GUIDE.md](docs/GUIDE.md). [docs/COMMANDS.md](docs/COMMANDS.md) is generated from `!help` by `nightmux --commands`, and selfcheck fails when it goes stale. Added ROADMAP, CODE_OF_CONDUCT and a PR template.
 - `!wrapped` card is taller and says more: tokens saved by compactions, how many projects you worked in and the top six with bars, a 24-hour chart of when you prompt (in your `tz_offset`), peak hour, share after midnight, longest daily streak, busiest day, cache hit, tokens per prompt and top model. The chat analysis now records each prompt's project folder and hour — never its text.
 - `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+- README and SECURITY.md say what the QR shortcut in `--setup` trusts (the maintainer's onboarding relay; paste a BotFather token to keep the token on your machine), list the alternatives (Happy, HAPI, ccbot, ccgram, claude-squad, Anthropic's Remote Control) in place of a comparison table, and drop claims nobody could check. The `--setup` prompt mentions the relay too.
 
 ### Fixed
 
@@ -48,6 +51,14 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 - The `/public` office never fetched anything since `!public` landed: a line inserted above the poll turned it into an `else`. Both offices poll again, and selfcheck pins it.
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
+- `GET /pair` crashed with `UnboundLocalError` (a local named `html` shadowed the module).
+- An unknown command-line option no longer starts the daemon on your real config: it prints the usage and exits 2. `nightmux --help` (or `-h`) prints it on request.
+
+### Security
+
+- Over loopback the dashboard answers only to this machine's own names (addresses, one-word names, `.local`, `.lan`, `.internal`, `.ts.net`), which stops DNS rebinding. A name of your own on a public domain goes in `"allowed_hosts"`. SECURITY.md has a new section on the dashboard's trust model.
+- `/pair` hands out a pairing code only to this machine or a device that is already paired, and a request a proxy says came from a public address (`tailscale funnel`, a tunnel) counts as remote. `/api/pair/code` and `/api/pair/revoke` need the `X-Nightmux` header like the other writes.
+- The option and ⏎ buttons under an approval prompt are pinned to a fingerprint of the prompt they were posted for. A tap on an older message, after the agent has moved on to another prompt, presses nothing and re-posts the one that is waiting. Typed `!1`/`!y`, the `!ctl` pad and the dashboard's buttons are not pinned and still answer whatever is on screen.
 
 ## [1.3.0] — 2026-10-08
 
