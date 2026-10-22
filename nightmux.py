@@ -7313,6 +7313,13 @@ h1 svg { width: 44px; height: 44px; filter: drop-shadow(0 0 12px rgba(255, 123, 
 </body></html>"""
 
 
+def render_file(b, src, out, size="1200,1100"):
+    """Chromium `b` draws the local page `src` into the png `out`."""
+    run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+        f"--window-size={size}", "--virtual-time-budget=2000", f"--screenshot={out}",
+        "file://" + os.path.abspath(src), timeout=60)
+
+
 def render_html(cfg, page, size="1200,1100"):
     b = browser_bin(cfg)
     if not b: return None
@@ -7322,9 +7329,7 @@ def render_html(cfg, page, size="1200,1100"):
     src, out = os.path.join(STATE_DIR, f"{f_base}.html"), os.path.join(STATE_DIR, f"{f_base}.png")
     with open(src, "w") as f:
         f.write(page)
-    run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-        f"--window-size={size}", "--virtual-time-budget=2000", f"--screenshot={out}",
-        "file://" + src, timeout=60)
+    render_file(b, src, out, size)
     try:
         with open(out, "rb") as f:
             png = f.read()
@@ -7935,6 +7940,84 @@ def saved_in(d, days, key="tokens"):
     return got + round(before * min(1, (start - (now - days * 86400)) / span))
 
 
+# $ per million tokens: input, output, cache read, cache write. Public list prices
+# from LiteLLM's model_prices_and_context_window.json, read 2026-10-22; a cache price
+# the provider does not publish is its input price. Names match exactly, so a "-pro" or
+# "-mini" never borrows its sibling's price: a model missing here is named and left out
+# of the dollar total. "prices": {"model": [input, output, cache read, cache write]} in
+# the config adds to this or overrides it.
+PRICES_AT = "2026-10-22"
+PRICES = {n: r[1:] for r in (
+    ("claude-fable-5-1", 10, 50, .25, 12.5),
+    ("claude-fable-5", 10, 50, 1, 12.5),
+    ("claude-opus-4-5 claude-opus-4-6 claude-opus-4-7 claude-opus-4-8 claude-opus-5", 5, 25, .5, 6.25),
+    ("claude-opus-5-5", 4, 20, .2, 5),
+    ("claude-sonnet-4-5 claude-sonnet-4-6", 3, 15, .3, 3.75),
+    ("claude-sonnet-5", 2, 10, .2, 2.5),
+    ("claude-sonnet-5-5", 2, 10, .1, 2.5),
+    ("claude-haiku-4-5", 1, 5, .1, 1.25),
+    ("claude-haiku-5-5", .1, .5, .01, .125),
+    ("gpt-5.6 gpt-5.6-sol", 4, 20, .4, 5),
+    ("gpt-5.6-terra", 2, 12, .2, 2.5),
+    ("gpt-5.6-luna", .2, 1.2, .02, .25),
+    ("gpt-5.5", 5, 30, .5, 5),
+    ("gpt-5.4", 2.5, 15, .25, 2.5),
+    ("gpt-5.4-mini", .75, 4.5, .075, .75),
+    ("gpt-5.4-nano", .2, 1.25, .02, .2),
+    ("gpt-5.3-codex gpt-5.2 gpt-5.2-codex", 1.75, 14, .175, 1.75),
+    ("gpt-5 gpt-5-codex gpt-5.1 gpt-5.1-codex gpt-5.1-codex-max", 1.25, 10, .125, 1.25),
+    ("gpt-5-mini gpt-5.1-codex-mini", .25, 2, .025, .25),
+    ("gpt-5-nano", .05, .4, .005, .05),
+    ("gpt-4.1", 2, 8, .5, 2),
+    ("gpt-4.1-mini", .4, 1.6, .1, .4),
+    ("o3", 2, 8, .5, 2),
+    ("o4-mini", 1.1, 4.4, .275, 1.1),
+    ("gemini-2.5-pro", 1.25, 10, .125, 1.25),
+    ("gemini-2.5-flash", .3, 2.5, .03, .3),
+    ("gemini-2.5-flash-lite", .1, .4, .01, .1),
+    ("gemini-3.1-pro-preview", 2, 12, .2, 2),
+    ("gemini-3-flash-preview", .5, 3, .05, .5),
+    ("gemini-3.5-flash", 1.5, 9, .15, 1.5),
+    ("gemini-3.6-flash gemini-3.7-flash gemini-3.8-flash", .75, 3.75, .075, .75),
+) for n in r[0].split()}
+
+
+def price_of(model, extra=None):
+    """(input, output, cache read, cache write) $ per million tokens, or None."""
+    n = re.sub(r"(\[.*\]|@.*|-\d{8}|-\d{4}-\d{2}-\d{2}|-latest)$", "", model.lower().rsplit("/", 1)[-1])
+    p = (extra or {}).get(model) or (extra or {}).get(n) or PRICES.get(n)
+    try:
+        p = [float(x) for x in p or ()]
+    except (TypeError, ValueError):
+        return None
+    return tuple(p + [p[0]] * (4 - len(p))) if 2 <= len(p) <= 4 and all(0 <= x < 1e6 for x in p) else None
+
+
+def fleet_cost(agents, extra=None):
+    """What the tokens in analyze_chats()["agents"] would cost at API list prices.
+
+    A model with no price, and tokens that came with no model name, are counted in
+    `left_out` by name — never as free. Subscriptions, batch and long-context tiers
+    bill differently, and cache writes are taken at the five-minute rate."""
+    out = {"total": 0.0, "agents": {}, "models": {}, "left_out": {}}
+    for a, s in agents.items():
+        named = 0
+        for m, t in (s.get("by_model") or {}).items():
+            named += sum(t)
+            p = price_of(m, extra)
+            if not p:
+                out["left_out"][m] = out["left_out"].get(m, 0) + sum(t)
+                continue
+            c = (t[0] * p[0] + t[3] * p[1] + t[1] * p[2] + t[2] * p[3]) / 1e6
+            out["total"] += c
+            out["agents"][a] = out["agents"].get(a, 0) + c
+            out["models"][m] = out["models"].get(m, 0) + c
+        rest = sum((s.get("tokens") or {}).get(k, 0) for k in ("input", "cache_read", "cache_write", "output")) - named
+        if rest > 0:
+            out["left_out"]["(no model name)"] = out["left_out"].get("(no model name)", 0) + rest
+    return out
+
+
 def wrapped_data(cfg, days):
     """Everything on the card: headline numbers, projects, the hours, and what they say."""
     d, r = fleet_sav(cfg), fleet_analysis(cfg, days)
@@ -7946,7 +8029,9 @@ def wrapped_data(cfg, days):
     saved, lighter = saved_in(d, days), saved_in(d, days, "model_tokens")
     r = saved / (toks + saved) if saved and toks else 0
     pct = f"{r:.0%}" if r >= 0.01 or not r else f"{r:.2%}"     # 941k of 3.4B is not 0%
+    cost = fleet_cost(ag, cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     cells = [(_k(toks), "TOKENS CRUNCHED"),
+             (_usd(cost["total"]), "AT API LIST PRICES"),
              (pct, f"SAVED FROM THE ABYSS ({_k(saved)})"),
              (_k(lighter), "SAVED VIA SMART ROUTING"),
              (str(prompts), "VIBE DIRECTIVES ISSUED"),
@@ -7954,8 +8039,8 @@ def wrapped_data(cfg, days):
              (str(d.get("night_turns", 0)), "GHOST CODING (WHILE SLEEPING)"),
              (str(d.get("resumes", 0)), "API LIMITS OBLITERATED"),
              (str(d.get("greens", 0)), "CI CHECKS RESCUED"),
-             (str(sum(a["sessions"] or 0 for a in ag.values())), "AGENT SESSIONS")]
-    cells = [c for c in cells if c[0] not in ("0", "0k")][:6]
+             (str(w["active_days"]), "ACTIVE DAYS")]
+    cells = [c for c in cells if c[0] not in ("0", "0k", "0%", "$0.00")][:6]
     ins = []
     if w.get("peak_hour") is not None:
         h = w["peak_hour"]
@@ -7985,7 +8070,7 @@ def wrapped_data(cfg, days):
     split = sorted(((a, sum(v["tokens"].values()), v["requests"] or 0) for a, v in ag.items()),
                    key=lambda x: (-x[1], -x[2]))
     return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]), "split": split,
-            "used": toks, "saved": saved, "lighter": lighter,
+            "used": toks, "saved": saved, "lighter": lighter, "cost": cost, "prompts": prompts,
             "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
 
 
@@ -8081,11 +8166,13 @@ def share_card_svg(cfg, q=None):
         ag_str = " · ".join(w.get("agents") or ["claude", "codex", "agy"])
     else:
         cells = [(g("tokens", "0"), "TOKENS CRUNCHED"),
+                 (g("usd"), "AT API LIST PRICES"),
                  (g("saved", "0%"), "SAVED FROM ABYSS"),
                  (g("lighter", "0"), "SMART ROUTING"),
                  (g("prompts", "0"), "VIBE DIRECTIVES"),
                  (g("repos", "1"), "REPOS DOMINATED"),
                  (g("night", "0"), "GHOST CODING TURNS")]
+        cells = [c for c in cells if c[0]]            # no usd: a link made before the estimate
         ag_str = g("agents", "claude · codex · agy")
     e = html.escape
     boxes = []
@@ -8130,12 +8217,14 @@ def share_page_html(cfg, q=None, base=""):
     w = wrapped_data(cfg, days)
     cells = w.get("cells") or [("0", "TURNS")]
     top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+    by = {l.split(" (")[0]: n for n, l in cells}      # cells come and go: ask by label
     qs = urllib.parse.urlencode({
         "days": days,
-        "tokens": cells[0][0] if len(cells) > 0 else "0",
-        "saved": cells[1][0] if len(cells) > 1 else "0%",
-        "lighter": cells[2][0] if len(cells) > 2 else "0",
-        "prompts": cells[3][0] if len(cells) > 3 else "0",
+        "tokens": by.get("TOKENS CRUNCHED", "0"),
+        "usd": by.get("AT API LIST PRICES", ""),
+        "saved": by.get("SAVED FROM THE ABYSS", "0%"),
+        "lighter": by.get("SAVED VIA SMART ROUTING", "0"),
+        "prompts": by.get("VIBE DIRECTIVES ISSUED", "0"),
         "repos": len(w.get("projects") or []),
         "agents": " · ".join(w.get("agents") or ["claude"]),
     })
@@ -8266,6 +8355,61 @@ def wrapped_cmd(cfg, topic, arg):
                   buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
     return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
+
+
+def wrapped_cli(args, out="."):
+    """`nightmux wrapped [days]`: Wrapped from this machine's agent transcripts alone —
+    no bot, daemon or config. Prints a summary and writes two cards into `out` (a PNG
+    each when Chromium is around, else a web page). Nothing is uploaded."""
+    if len(args) > 1 or (args and not (args[0].isascii() and args[0].isdigit() and 0 < int(args[0]) <= 365)):
+        print("usage: nightmux wrapped [days]    (1 to 365, default 30)", file=sys.stderr)
+        sys.exit(2)
+    days = int(args[0]) if args else 30
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    print(f"reading the last {days} days of agent transcripts...", file=sys.stderr)
+    w = wrapped_data(cfg, days)
+    if not w["used"]:
+        sys.exit(f"no agent transcripts found for the last {days} days (looked for Claude Code, "
+                 "Codex, OpenCode and Antigravity in your home folder)")
+    c = w["cost"]
+    print(f"\n🌙 nightmux wrapped · last {days} days · {' · '.join(w['agents'])}\n\n"
+          f"  {_usd(c['total'])} at API list prices · {_k(w['used'])} tokens · "
+          f"{w['prompts']} prompts\n")
+    for a, n, _ in w["split"]:
+        print(f"  {a:<10}{_k(n):>7} tokens {_usd(c['agents'][a]) if a in c['agents'] else '—':>10}")
+    print()
+    for k, v in w["insights"]:
+        print(f"  {k:<16}{v}")
+    if w["projects"]:
+        print(f"  {'projects':<16}" + " · ".join(f"{p} {n}" for p, n in w["projects"]))
+    if c["left_out"]:
+        print("\n  no list price known, so not counted: " + " · ".join(
+            f"{m} {_k(n)}" for m, n in sorted(c["left_out"].items(), key=lambda kv: -kv[1])[:5])
+            + f"\n  ('prices' in {CFG_PATH} adds more; README has the shape)")
+    b = browser_bin(cfg)
+    os.makedirs(out, exist_ok=True)
+    made = []
+    for name, share, note in (("nightmux-wrapped", False, "project names in it: keep this one"),
+                              ("nightmux-wrapped-share", True, "projects as counts only: fine to post")):
+        src, png = os.path.join(out, name + ".html"), os.path.join(out, name + ".png")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(wrapped_page(days, w, share=share))
+        if b:
+            render_file(b, src, png)
+        if b and os.path.exists(png):
+            os.remove(src)
+            src = png
+        made.append((src, note))
+    print()
+    for path, note in made:
+        print(f"  {path}   {note}")
+    if not b or made[0][0].endswith(".html"):
+        print("  (no Chromium to draw a PNG: open the page in a browser and screenshot it)")
+    print(f"\n  Prices are list prices of {PRICES_AT}; a subscription bills differently. "
+          "Nothing was uploaded.")
 
 
 # ---------- !public: a read-only office anyone can open ----------
@@ -11401,7 +11545,7 @@ def _chat_bucket(stats, agent):
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
         "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
-        "projects": {}, "at": {}, "days": {}})
+        "projects": {}, "at": {}, "days": {}, "by_model": {}})
 
 
 def _chat_when(b, ts, cwd):
@@ -11447,6 +11591,9 @@ def _chat_call(b, model, inp, cread, cwrite, out, think=0, day=None):
     b["big_ctx"] += ctx > 150000
     if model:
         b["models"][model] = b["models"].get(model, 0) + ctx + out
+        t = b["by_model"].setdefault(model, [0, 0, 0, 0])     # what a price is applied to
+        for i, n in enumerate((inp, cread, cwrite, out)):
+            t[i] += n
 
 
 def _scan_claude(stats, home, since):
@@ -11458,7 +11605,7 @@ def _scan_claude(stats, home, since):
             p = os.path.join(dirpath, n)
             if not n.endswith(".jsonl") or os.path.getmtime(p) < since:
                 continue
-            seen, counted = set(), False
+            seen, calls, counted = set(), {}, False
             with open(p, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     if '"usage"' not in line and '"type":"user"' not in line:
@@ -11475,20 +11622,25 @@ def _scan_claude(stats, home, since):
                         if (isinstance(c, str) and not d.get("isMeta")
                                 and not d.get("isSidechain") and not c.startswith("<")):
                             _chat_prompt(b, c, _iso_ts(d.get("timestamp")), d.get("cwd"))
-                    elif m.get("usage") and d.get("requestId") not in seen:
-                        seen.add(d.get("requestId"))
-                        u = m["usage"]
+                    elif m.get("usage"):
+                        u, rid = m["usage"], d.get("requestId")
                         if m.get("model") == "<synthetic>":
-                            b["errors"] += 1
+                            if rid not in seen:
+                                b["errors"] += 1
+                                seen.add(rid)
                             continue
-                        _chat_call(b, m.get("model"), u.get("input_tokens") or 0,
-                                   u.get("cache_read_input_tokens") or 0,
-                                   u.get("cache_creation_input_tokens") or 0,
-                                   u.get("output_tokens") or 0,
-                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
-                                   d.get("timestamp", "")[:10])
+                        # One line per content block, and only the last holds the
+                        # request's final output_tokens: the first runs ~9% short.
+                        calls[rid] = (m.get("model"), u.get("input_tokens") or 0,
+                                      u.get("cache_read_input_tokens") or 0,
+                                      u.get("cache_creation_input_tokens") or 0,
+                                      u.get("output_tokens") or 0,
+                                      (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
+                                      d.get("timestamp", "")[:10])
                     if not counted:
                         counted, b["sessions"] = True, b["sessions"] + 1
+            for c in calls.values():
+                _chat_call(b, *c)
 
 
 def _scan_codex(stats, home, since):
@@ -11882,6 +12034,7 @@ def analyze_chats(days=30, home=None):
             "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
             "errors": s["errors"],
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+            "by_model": s["by_model"],
             "daily": dict(sorted(s["days"].items())),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
@@ -11934,7 +12087,7 @@ def merge_analysis(parts):
         for a, s in (r.get("agents") or {}).items():
             m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
                                    "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
-                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}})
+                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}, "by_model": {}})
             n = s.get("prompts") or 0
             for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
                 m[k] += s.get(k) or 0
@@ -11946,6 +12099,8 @@ def merge_analysis(parts):
             for k, (c, q) in (s.get("daily") or {}).items():
                 d = m["daily"].setdefault(k, [0, 0])
                 d[0], d[1] = d[0] + c, d[1] + q
+            for k, t in (s.get("by_model") or {}).items():
+                m["by_model"][k] = [x + y for x, y in zip(m["by_model"].get(k, [0] * 4), t)]
             m["chars"] += (s.get("avg_prompt") or 0) * n
             m["nud"] += (s.get("nudge_pct") or 0) * n
     for a, m in acc.items():
@@ -11953,7 +12108,7 @@ def merge_analysis(parts):
         ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
         out["agents"][a] = dict(
             {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
-            daily=dict(sorted(m["daily"].items())),
+            daily=dict(sorted(m["daily"].items())), by_model=m["by_model"],
             cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
             avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
             avg_prompt=round(m["chars"] / n) if n else None,
@@ -12025,6 +12180,10 @@ def when_summary(cfg, w):
 
 def _k(n):
     return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+def _usd(x):
+    return f"${x:,.0f}" if x >= 100 else f"${x:,.2f}"
 
 
 def stats_report(r):
@@ -17831,10 +17990,11 @@ def selfcheck():
                     separators=(",", ":")) + "\n")       # as Claude writes it
                 u_ = {"input_tokens": 5, "cache_read_input_tokens": 10000,
                       "cache_creation_input_tokens": 90000, "output_tokens": 100}
-                for _ in range(2):            # Claude logs one line per content block
+                for out_ in (7, 100):         # one line per content block; the last has the final count
                     f.write(json.dumps({"type": "assistant", "timestamp": now_,
                                         "requestId": f"r{i}", "message": {
-                                            "model": "claude-x", "usage": u_}}) + "\n")
+                                            "model": "claude-x",
+                                            "usage": dict(u_, output_tokens=out_)}}) + "\n")
         cdir_ = os.path.join(h_, ".codex", "sessions", "2026", "01", "02")
         os.makedirs(cdir_)
         tok_ = {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50}
@@ -17874,7 +18034,10 @@ def selfcheck():
         c_ = r_["agents"]["claude"]
         assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
+        assert c_["tokens"]["output"] == 3000 and c_["by_model"]["claude-x"] == [150, 300000, 2700000, 3000], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
+        lo_ = fleet_cost(r_["agents"])
+        assert lo_["total"] == 0 and set(lo_["left_out"]) == {"claude-x", "gpt-x", "agy", "(no model name)"}, lo_
         assert r_["agents"]["opencode"]["prompts"] == 1 and r_["agents"]["opencode"]["tokens"]["input"] == 500
         assert r_["agents"]["agy"]["prompts"] == 1 and r_["agents"]["agy"]["tokens"]["input"] == 1000
         assert check_reader_drift(home=h_)[1] is True
@@ -17915,6 +18078,27 @@ def selfcheck():
         assert "opencode <em>0</em>" in sh_, sh_
         ps_ = wrapped_page(30, wd_, share=True)
         assert "shop" not in ps_ and "project 1" in ps_ and ">30<" in ps_, ps_
+        # Dollars: priced by exact model name; anything else is named and left out, never free
+        assert price_of("anthropic/claude-haiku-4-5-20251001") == PRICES["claude-haiku-4-5"]
+        assert price_of("Claude-Opus-5-5[1m]") == PRICES["claude-opus-5-5"] == (4, 20, .2, 5)
+        assert price_of("claude-x") is price_of("gpt-5.5-pro") is price_of("") is None
+        assert price_of("mine", {"mine": [1, 2]}) == (1, 2, 1, 1)
+        assert price_of("gpt-5.5", {"gpt-5.5": [3, 4, 5, 6]}) == (3, 4, 5, 6)
+        for junk_ in ("junk", [1], [1, -2], [1, float("nan")], [1, 2, 3, 4, 5], 7):
+            assert price_of("gpt-5.5", {"gpt-5.5": junk_}) is None, junk_
+        fc_ = fleet_cost({"claude": {"tokens": {"input": 10**6, "cache_read": 2 * 10**6, "cache_write": 4 * 10**5,
+                                                "output": 10**5},
+                                     "by_model": {"claude-opus-5-5": [10**6, 2 * 10**6, 4 * 10**5, 10**5]}},
+                          "codex": {"tokens": {"input": 7, "cache_read": 0, "cache_write": 0, "output": 5},
+                                    "by_model": {"gpt-9": [7, 0, 0, 3]}}})
+        assert round(fc_["total"], 6) == 8.4 and fc_["agents"].keys() == {"claude"}, fc_
+        assert fc_["left_out"] == {"gpt-9": 10, "(no model name)": 2}, fc_
+        r2_ = dict(r_, agents=dict(r_["agents"], claude=dict(
+            r_["agents"]["claude"], by_model={"claude-opus-5-5": [10**6, 2 * 10**6, 4 * 10**5, 10**5]})))
+        with stubbed(analyze_chats=lambda d: r2_, sav_data=lambda: {"tokens": 0, "model_tokens": 0}):
+            assert wrapped_data({}, 30)["cells"][1] == ("$8.40", "AT API LIST PRICES")
+            assert wrapped_data({"prices": {"claude-opus-5-5": [1, 1]}}, 30)["cells"][1][0] == "$3.50"
+            assert round(wrapped_data({"prices": "junk"}, 30)["cost"]["total"], 6) == 8.4
         t0_ = time.time()
         d0_ = {"since": t0_ - 100 * 86400, "tokens": 1000}
         assert saved_in(d0_, 10) == 100 and saved_in({"since": t0_, "tokens": 7}, 10) == 7
@@ -20586,11 +20770,13 @@ def selfcheck():
                                  "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
                                                            "output": 5, "thinking": 0},
                                  "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
-                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]}}}}
+                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]},
+                                 "by_model": {"opus": [1, 2, 3, 4]}}}}
     a2_ = json.loads(json.dumps(a1_))
     a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
                                    tokens={"input": 90, "cache_read": 10, "cache_write": 0,
-                                           "output": 5, "thinking": 0})
+                                           "output": 5, "thinking": 0},
+                                   by_model={"opus": [10, 20, 30, 40], "other": [1, 1, 1, 1]})
     a2_["when"] = {"projects": [["shop", 1], ["blog", 2]], "at": {"10": 1, "11": 4}}
     got_ = {"api/analysis?days=30": a2_, "api/savings": {"since": 50, "tokens": 7, "tokens_day": {"2026-10-01": 7}},
             "api/lessons": {"n": 4, "ok": 2, "winners": ["w2"]}}
@@ -20603,6 +20789,7 @@ def selfcheck():
         c_ = m_["agents"]["claude"]
         assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
         assert c_["daily"] == {"2026-10-12": [800, 8]}, c_["daily"]
+        assert c_["by_model"] == {"opus": [11, 22, 33, 44], "other": [1, 1, 1, 1]}, c_["by_model"]
         assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
         assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
         assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
@@ -20765,6 +20952,18 @@ def selfcheck():
             sp_ = share_page_html(tcfg, {"days": ["30"]}, "https://demo.example.com")
             assert 'property="og:image"' in sp_ and 'name="twitter:card"' in sp_, sp_[:400]
             assert "navigator.canShare" in sp_ and "demo.example.com/share/card.svg" in sp_, sp_[:600]
+        assert "AT API LIST PRICES" not in svg_ and "$677" in share_card_svg(tcfg, {"tokens": ["1M"], "usd": ["$677"]})
+        # the card's query follows the labels, not the order: the dollar cell sits second
+        with stubbed(wrapped_data=lambda c, d: {"cells": [("14.2M", "TOKENS CRUNCHED"), ("$677", "AT API LIST PRICES"),
+                                                          ("41%", "SAVED FROM THE ABYSS (5.0M)"),
+                                                          ("2.0M", "SAVED VIA SMART ROUTING"),
+                                                          ("128", "VIBE DIRECTIVES ISSUED")],
+                                                "agents": ["claude"], "projects": [("a", 1)],
+                                                "split": [], "hours": [0] * 24, "insights": []}):
+            cq_ = urllib.parse.parse_qs(html.unescape(re.search(
+                r'/share/card\.svg\?([^"]+)"', share_page_html(tcfg, {"days": ["30"]}, "https://d.example.com")).group(1)))
+            assert [cq_[k] for k in ("tokens", "usd", "saved", "lighter", "prompts")] == [
+                ["14.2M"], ["$677"], ["41%"], ["2.0M"], ["128"]], cq_
         assert "url=https%3A%2F%2Fd.uguu.se%2Fx.png" in reddit_url("my recap", "https://d.uguu.se/x.png")
     # The CLI: -h prints usage, and an unknown option stops. `nightmux --help`
     # used to fall through to main() and start a daemon on the live config.
@@ -20790,6 +20989,26 @@ def selfcheck():
         for args_ in (("--bogus",), ("setup",)):
             code_, out_, err_ = cli_(*args_)
             assert code_ == 2 and "unknown option" in err_ and "usage: nightmux" in err_ and not out_ and not ran_, (args_, code_, err_, ran_)
+        # `wrapped` reads transcripts and nothing else: no daemon, nothing sent
+        for args_ in (("wrapped", "0"), ("wrapped", "366"), ("wrapped", "x"), ("wrapped", "²"), ("wrapped", "7", "8")):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ == 2 and "usage: nightmux wrapped" in err_ and not out_ and not ran_, (args_, code_, err_)
+        with stubbed(analyze_chats=lambda d: {"agents": {}, "when": {}}, sav_data=lambda: {"tokens": 0, "model_tokens": 0}):
+            code_, out_, err_ = cli_("wrapped", "3")
+            assert isinstance(code_, str) and code_.startswith("no agent transcripts") and not ran_, code_
+        with tempfile.TemporaryDirectory() as wo_, stubbed(
+                analyze_chats=lambda d: r2_, sav_data=lambda: {"tokens": 0, "model_tokens": 0},
+                browser_bin=lambda cfg: None):
+            so_, se_ = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(so_), contextlib.redirect_stderr(se_):
+                wrapped_cli(["7"], out=os.path.join(wo_, "cards"))
+            priv_, pub_ = (open(os.path.join(wo_, "cards", f"nightmux-wrapped{s}.html"), encoding="utf-8").read()
+                           for s in ("", "-share"))
+            assert "shop" in priv_ and "shop" not in pub_ and "project 1" in pub_, (priv_, pub_)
+            assert "SECRETPROMPT" not in so_.getvalue() + priv_ + pub_
+            assert "$8.40 at API list prices" in so_.getvalue() and "last 7 days" in so_.getvalue(), so_.getvalue()
+            assert "not counted: " in so_.getvalue() and "gpt-x" in so_.getvalue(), so_.getvalue()
+            assert "Nothing was uploaded" in so_.getvalue() and "last 7 days" in se_.getvalue(), (so_.getvalue(), se_.getvalue())
         assert cli_() == (None, "", "") and ran_ == ["daemon"], ran_
     print("selfcheck ok")
 
@@ -21066,9 +21285,10 @@ def demo_serve(port=8099):
         pass
 
 
-USAGE = """usage: nightmux [option]
+USAGE = """usage: nightmux [command | option]
 
   (none)               run the daemon; what the service starts
+  wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
   --setup              first run: bot token, group, hooks, service
   --doctor             find what is wrong with this install
   --demo [port]        the office with a made-up night; no bot, no keys
@@ -21112,6 +21332,8 @@ def cli():
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
         demo_serve(int(port))
+    elif sys.argv[1:2] == ["wrapped"]:
+        wrapped_cli(sys.argv[2:])
     elif len(sys.argv) > 1:     # a typo used to start a daemon on the live config
         print(f"nightmux: unknown option {sys.argv[1]!r}\n\n{USAGE}", end="", file=sys.stderr)
         sys.exit(2)

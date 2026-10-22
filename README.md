@@ -37,6 +37,12 @@ No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup`
 Just looking? `python3 nightmux.py --demo` and open http://127.0.0.1:8099/office — no bot, no keys.
 Docker, a fresh VPS and the rest: [Install →](#install)
 
+## What did your agents cost?
+
+`uvx --from git+https://github.com/mmr710/nightmux nightmux wrapped` (or `python3 nightmux.py wrapped` in a clone) reads the logs Claude Code, Codex, OpenCode and Antigravity already keep in your home folder, and prints what the last 30 days would have cost at API list prices (`wrapped 7` for a week). No bot, no keys, no daemon. It also draws two cards: one with your project names, to keep, and one with counts only, safe to post. Nothing is uploaded.
+
+The dollar figure is the same tokens at the providers' public list prices, dated in the output. A subscription bills differently, so read it as a size, not an invoice. A model with no price in the table is named and left out, never counted as free; `"prices": {"my-model": [input, output, cache read, cache write]}` in `~/.nightmux.json` (dollars per million tokens; the last two are optional) adds a model or overrides a built-in one. The PNG needs Chromium, otherwise you get a web page to screenshot. Drawing a card fetches the Inter and JetBrains Mono fonts from Google Fonts; none of your numbers are in that request.
+
 ## How it compares
 
 nightmux is one of several ways to reach a coding agent from your phone, and not the biggest. The others, and where to look first:

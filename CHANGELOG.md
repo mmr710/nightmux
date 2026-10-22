@@ -6,6 +6,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+### Added
+- `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
+- A dollar estimate, "at API list prices", in `!wrapped` and `nightmux wrapped`, from a built-in price table (Claude, GPT/Codex, Gemini; dated in the output). A model with no price is named and left out, never counted as free. `"prices": {"model": [input, output, cache read, cache write]}` in `~/.nightmux.json` adds or overrides a model.
+
+### Changed
+- The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
+
+### Fixed
+- Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
+
 ## [1.4.0] — 2026-10-22
 
 ### Added
