@@ -4092,6 +4092,8 @@ def plan_capture(cfg, state, topic, sess, body):
     if not p or p["sess"] != sess:
         return False
     del _plan[str(topic)]
+    if p.get("fan"):
+        return fan_capture(cfg, topic, sess, p, body)
     steps = parse_plan(body)
     if not steps:
         send(cfg, topic, f"🗺️ asked {sess} to plan '{p['task'][:60]}', got no "
@@ -4106,6 +4108,118 @@ def plan_capture(cfg, state, topic, sess, body):
          + "\n".join(f"{i + 1}. {s.splitlines()[0][:70]}" for i, s in enumerate(steps)),
          mode="plain", buttons=kb([[("stop", "!shift clear")]]))
     return True
+
+
+# ---------- fan: one big task -> parallel tasks, each in its own topic + worktree ----------
+# !plan runs the breakdown one step at a time in this topic; !fan runs it side by
+# side: the same ask, but every task gets a git worktree, a topic, an agent and
+# its own !goal check. The breakdown waits for "!fan go", so nothing starts
+# before you have read it.
+
+FAN_MAX = 6
+FAN_PROMPT = """[nightmux fan]
+Split the following task into INDEPENDENT parallel tasks. Each one is done in
+its own git worktree by its own agent at the same time, so they must not edit
+the same files or depend on each other's output. At most {max} tasks. Each is a
+complete instruction someone could act on with no other context. After " || "
+put the shell command that proves the task is done. Start a line with @codex,
+@opencode, @agy or @claude only when that agent clearly fits better than the
+default.
+
+TASK
+{task}
+
+Output ONLY a numbered list, one task per line, like
+1. add CSV export to the report page || pytest tests/test_csv.py
+No preamble, no fenced code block, nothing after the list."""
+FAN_TAIL = ("\n\nYou are one of several agents working in parallel, each in its own "
+            "worktree. Touch only what this task needs, commit on this branch when "
+            "done, and do not merge.")
+_fan = {}   # topic -> [(agent or None, task, check or None)] waiting on "!fan go"
+
+
+def parse_fan(body, known):
+    """[(agent|None, task, check|None)] from a numbered list. "@agent" leads a
+    line only when it names an agent we have; " || cmd" ends the task."""
+    out = []
+    for line in parse_plan(body)[:FAN_MAX]:
+        m = re.match(r"@(\w+)\s+(.*)", line, re.S)
+        key, line = (m.group(1).lower(), m.group(2)) if m and m.group(1).lower() in known \
+            else (None, line)
+        task, _, check = line.partition(" || ")
+        if task.strip():
+            out.append((key, task.strip(), check.strip() or None))
+    return out
+
+
+def fan_capture(cfg, topic, sess, p, body):
+    tasks = parse_fan(body, agents(cfg))
+    if not tasks:
+        send(cfg, topic, f"\U0001fa6d asked {sess} to split '{p['task'][:60]}', got no "
+             f"numbered list back:\n\n{body}", mode="mono")
+        return True
+    _fan[str(topic)] = tasks
+    send(cfg, topic, f"\U0001fa6d {sess} split it into {len(tasks)} parallel task(s):\n"
+         + "\n".join(f"{i + 1}. {('@' + k + ' ') if k else ''}{t[:70]}"
+                     + (f"  ✔ {c[:30]}" if c else "") for i, (k, t, c) in enumerate(tasks)),
+         mode="plain", buttons=kb([[("launch", "!fan go"), ("drop", "!fan cancel")]]))
+    return True
+
+
+def fan_cmd(cfg, state, lock, topic, arg):
+    """!fan <big task> | go | cancel."""
+    arg, t = arg.strip(), str(topic)
+    if arg in ("cancel", "off", "stop"):
+        gone = _fan.pop(t, None) or _plan.pop(t, None)
+        return "fan cancelled" if gone else "nothing to cancel"
+    if arg == "go":
+        return fan_go(cfg, state, lock, t)
+    if not arg:
+        return ("usage: !fan <big task>\nthe agent splits it into independent tasks; "
+                "!fan go opens one topic + git worktree + agent each, with its own "
+                "!goal check · !plan runs steps one at a time instead")
+    sess = cfg["topics"].get(t)
+    if not sess or not has_session(sess):
+        return "this topic has no live session to plan in"
+    if t in _plan:
+        return "a plan request is already out — !fan cancel to drop it"
+    _fan.pop(t, None)
+    _plan[t] = {"sess": sess, "task": arg, "at": time.time(), "fan": True}
+    reply = send_prompt(cfg, state, topic, sess, FAN_PROMPT.format(task=arg, max=FAN_MAX))
+    return reply or "\U0001fa6d asking %s to split this up..." % sess
+
+
+def fan_go(cfg, state, lock, topic):
+    tasks = _fan.pop(topic, None)
+    if not tasks:
+        return "nothing waiting — !fan <big task> first"
+    cwd = (cfg.get("dirs") or {}).get(topic) or ""
+    repo = run("git", "-C", cwd, "rev-parse", "--show-toplevel") if cwd else ""
+    if not os.path.isabs(repo):
+        _fan[topic] = tasks
+        return "this topic's folder is not a git repo — each task needs a worktree"
+    rows = []
+    for key, task, check in tasks:
+        key = key or default_agent(cfg)
+        slug = slugify(task)
+        name, n = slug, 2
+        while has_session(name) or os.path.exists(f"{repo}-{name}"):
+            name, n = f"{slug}-{n}", n + 1
+        folder = f"{repo}-{name}"
+        out = run("git", "-C", repo, "worktree", "add", "-q", "-b", f"fan/{name}", folder)
+        if not os.path.isdir(folder):
+            rows.append(f"✕ {name}: {out[:80]}")
+            continue
+        ok, msg, new = topic_new(cfg, state, lock, task[:60], name, folder, key)
+        if not ok:
+            rows.append(f"✕ {name}: {msg[:80]}")
+            continue
+        state.setdefault(name, {}).setdefault("queue", []).append(task + FAN_TAIL)
+        if check:
+            goal_cmd(cfg, lock, new, check)
+        rows.append(f"✅ {name} ← {key}" + (f" · ✔ {check[:30]}" if check else ""))
+    save_queue(state)
+    return "\U0001fa6d fanned out:\n" + "\n".join(rows)
 
 
 def relay_cmd(cfg, state, lock, topic, sess, arg):
@@ -4628,7 +4742,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!autoyes", "!policy",
+              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
@@ -4745,6 +4859,7 @@ HELP = [
         "and send failures back until it passes",
         "!shift then one prompt per line = a sequential overnight plan",
         "!plan <big task> = the agent splits it into steps, run one at a time",
+        "!fan <big task> = the agent splits it into independent tasks; !fan go opens a topic + worktree + agent for each",
         "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]",
         "!queue [clear|now] = prompts waiting for the agent",
         "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
@@ -5143,6 +5258,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return use_prompt(cfg, state, topic, arg)
     if cmd == "!plan":
         return plan_start(cfg, state, topic, arg)
+    if cmd == "!fan":
+        return fan_cmd(cfg, state, lock, topic, arg)
     if cmd == "!autoyes":
         cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
         if arg in ("off", "none"):
@@ -19677,6 +19794,40 @@ def selfcheck():
             assert plan_capture(cfg2, pstate, "9", "box-codex", "1. a\n2. b") is True
             assert pstate["box"]["shift"] == ["a", "b"] and "box-codex" not in pstate, pstate
             assert "plan from box-codex → box: 2 step" in csent[-1], csent[-1]
+        # !fan: parallel tasks, each a worktree + topic + agent + check, after "go"
+        assert parse_fan("Sure:\n1. @codex add tests || pytest -q\n2. @nobody x\n3. doc it",
+                         {"codex"}) == [("codex", "add tests", "pytest -q"),
+                                        (None, "@nobody x", None), (None, "doc it", None)]
+        assert "usage" in fan_cmd(cfg2, pstate, threading.Lock(), "9", "")
+        assert "nothing waiting" in fan_cmd(cfg2, pstate, threading.Lock(), "9", "go")
+        assert "asking" in fan_cmd(cfg2, pstate, threading.Lock(), "9", "ship v2")
+        assert "INDEPENDENT" in pprompts[-1][1] and _plan["9"]["fan"]
+        csent.clear()
+        assert plan_capture(cfg2, pstate, "9", "box", "1. @codex add tests || true\n2. docs") is True
+        assert "2 parallel task" in csent[-1] and "9" in _fan and "9" not in _plan, csent
+        import tempfile as tf_
+        with tf_.TemporaryDirectory() as fr_:
+            fr_ = os.path.realpath(fr_)
+            repo_ = os.path.join(fr_, "app")
+            run("git", "init", "-q", repo_)
+            run("git", "-C", repo_, "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "-q", "--allow-empty", "-m", "init")
+            fcfg_, fgoals_, fnew_ = dict(cfg2, dirs={"9": repo_}), [], []
+
+            def fake_new(c, st, lk, title, name, folder, key, idea="", server=""):
+                fnew_.append((name, folder, key))
+                return True, "ok", str(300 + len(fnew_))
+            with stubbed(topic_new=fake_new, save_queue=lambda s: None,
+                         goal_cmd=lambda c, lk, t, a: fgoals_.append((t, a))):
+                out = fan_go(fcfg_, pstate, threading.Lock(), "9")
+            assert out.count("✅") == 2 and "9" not in _fan, out
+            assert [n for n, _, _ in fnew_] == ["add-tests", "docs"] and fnew_[0][2] == "codex"
+            assert all(os.path.isdir(f) for _, f, _ in fnew_) and fgoals_ == [("301", "true")]
+            assert "do not merge" in pstate["add-tests"]["queue"][0]
+            assert "fan/docs" in run("git", "-C", repo_, "branch")
+        csent.clear()
+        fan_cmd(cfg2, pstate, threading.Lock(), "9", "again")
+        assert "fan cancelled" == fan_cmd(cfg2, pstate, threading.Lock(), "9", "cancel")
     # plugins: a name is a filesystem path, so it is restricted before it
     # becomes one, and only ever run — never typed into a session. Still
     # inside topic 9's "box" window above, before it is put back below.
