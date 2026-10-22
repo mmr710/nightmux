@@ -7,6 +7,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- `nightmux up`: the first run with no Telegram bot. Checks for tmux, will not start a second copy when the dashboard port is already in use, starts the dashboard on this machine and says what a phone needs to reach it (`tailscale serve --bg <port>`, then **+ Pair phone**). Nothing is opened to the LAN or the internet.
 - `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
 - `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
 - A dollar estimate, "at API list prices", in `!wrapped` and `nightmux wrapped`, from a built-in price table (Claude, GPT/Codex, Gemini; dated in the output). A model with no price is named and left out, never counted as free. `"prices": {"model": [input, output, cache read, cache write]}` in `~/.nightmux.json` adds or overrides a model.
@@ -18,6 +19,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ### Fixed
 - "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.
 - Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
+- Dashboard-only first run: the browser that opened at start-up redeemed the pairing code the terminal QR carries, so the QR was dead by the time anyone scanned it. The browser now opens the dashboard without a code.
+- Dashboard-only first run: with the dashboard on 127.0.0.1 and no `tailscale serve` mapping, the terminal printed a QR for the machine's LAN address, which refuses connections. It now says how to reach the dashboard from a phone instead, and still prints the QR when there is a route to it.
 
 ## [1.4.0] — 2026-10-22
 

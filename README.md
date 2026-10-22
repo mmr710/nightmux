@@ -34,6 +34,8 @@ window resets — or hands the work to another agent.
 
 No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup` (or `pipx run --spec git+https://github.com/mmr710/nightmux nightmux --setup`).
 
+No Telegram, or want to look first? `nightmux up` (or `uvx --from git+https://github.com/mmr710/nightmux nightmux up`) checks for tmux, starts the dashboard at http://127.0.0.1:9090 and opens it; **+ project** there starts an agent. It opens nothing to your Wi-Fi or the internet, so a phone needs a route: with [Tailscale](https://tailscale.com) on both devices, run `tailscale serve --bg 9090`, then **+ Pair phone** on the dashboard shows the QR. A bot can be added later with `nightmux --setup`.
+
 Just looking? `python3 nightmux.py --demo` and open http://127.0.0.1:8099/office — no bot, no keys.
 Docker, a fresh VPS and the rest: [Install →](#install)
 

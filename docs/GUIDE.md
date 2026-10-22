@@ -504,6 +504,12 @@ project's 💬 chat view (an installable PWA) is the channel — the same comman
 buttons and replies you would get in a Telegram topic. Add a bot later by
 running `--setup` again.
 
+`nightmux up` is the short way in: it checks for tmux, will not start a second
+copy when the port is taken, and starts dashboard-only. The dashboard listens
+on this machine only. For a phone, run `tailscale serve --bg 9090` (Tailscale
+on both devices) and press **+ Pair phone**; until there is a route, the
+terminal prints that command instead of a QR that could not connect.
+
 ## The office
 
 `/office` on the same port is your night crew as a pixel-art office: a room
