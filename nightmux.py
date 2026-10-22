@@ -1874,6 +1874,8 @@ def warn_ctx(cfg, st, topic, sess):
             _warned.pop(wk)
             save_warned()
 
+    if pct is None:      # a transcript token count only: no window size to make a percent of
+        return
     trip = ctx_trip(cfg)
     if pct < trip:
         st.pop("ctx_warned", None)   # compacted or cleared: arm again
@@ -17284,7 +17286,12 @@ def selfcheck():
     assert sent[-1].startswith("\U0001f648 no context figure for c1"), sent[-1]
     warn_ctx(c_cfg_auto, blind, "1", "c1")
     assert len(sent) == n + 1                      # once per session, not per tick
-    
+    # Tokens from the transcript but no percentage (no sidecar): used to raise
+    # "'<' not supported between NoneType and int" on every watch tick.
+    tok_only, n0 = {"mode": "idle", "ctx_tok": 50000, "snap": {"ts": time.time()}}, len(sent)
+    warn_ctx(c_cfg_auto, tok_only, "1", "c1")
+    assert len(sent) == n0 and "ctx_warned" not in tok_only
+
     # Non-claude agent
     a_cfg_auto = {"topics": {"1": "agy1"}, "started": {"1": "agy"}, "autocompact": 70}
     warn_ctx(a_cfg_auto, blind, "1", "agy1")
