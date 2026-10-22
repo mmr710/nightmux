@@ -1477,20 +1477,24 @@ def failover_buttons(cfg, topic, sess):
     return kb([[("⏭ hand to " + k, "!failover " + k) for k in alts]]) if alts else None
 
 
-def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
+def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False, cwd=None, tpath=None):
     """Build a structured cross-agent handoff packet (.nightmux/HANDOFF.md) so a
     receiving agent continues mid-thought without re-exploring the codebase.
+
+    cwd and tpath name the folder and the Claude transcript directly, for
+    `nightmux handoff`, which has no topic, session or daemon to ask.
     """
     st = (state.get(sess) or {}) if sess else {}
     was = was or (cfg.get("started") or {}).get(topic) or default_agent(cfg)
     last = last if last is not None else (st.get("last") or "")
-    cwd = (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess and has_session(sess) else None)
+    cwd = cwd or (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess and has_session(sess) else None)
     tools, notes = [], []
-    tpath = (st.get("snap") or {}).get("transcript")
+    tpath = tpath or (st.get("snap") or {}).get("transcript")
     if tpath and os.path.isfile(tpath):
         try:
-            with open(tpath, encoding="utf-8", errors="replace") as f:
-                tail = f.readlines()[-40:]
+            with open(tpath, "rb") as f:   # the tail only: a long session runs to hundreds of MB
+                f.seek(max(0, os.path.getsize(tpath) - 2_000_000))
+                tail = f.read().decode("utf-8", "replace").splitlines()[-200:]
             for raw in tail:
                 try:
                     rec = json.loads(raw)
@@ -1502,15 +1506,21 @@ def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
                         continue
                     if b.get("type") == "tool_use":
                         tools.append(f"- `{b.get('name', 'tool')}`: {brief(b.get('input') or {})}")
-                    elif b.get("type") == "text" and (b.get("text") or "").strip():
+                    elif rec.get("type") == "assistant" and b.get("type") == "text" and (b.get("text") or "").strip():
                         txt = " ".join((b.get("text") or "").strip().split())
                         if len(txt) > 20:
                             notes.append("- " + txt[:240])
         except OSError:
             pass
     scr = strip_noise(pane(sess))[-12:] if sess and has_session(sess) else []
-    gstat = tmux_git(cwd, "status", "-sb") if cwd and os.path.isdir(cwd) else ""
-    gdiff = tmux_git(cwd, "diff", "--stat", "HEAD") if cwd and os.path.isdir(cwd) else ""
+
+    def git(*a):
+        # run() hands back git's complaint as its output; a brief is no place for it.
+        # And a repo with 20k untracked files must not become a 20k-line prompt.
+        out = tmux_git(cwd, *a) if cwd and os.path.isdir(cwd) else ""
+        ls = out.splitlines()
+        return "" if out.startswith("fatal:") else (out if len(ls) <= 40 else "\n".join(ls[:38] + ["…"] + ls[-1:]))
+    gstat, gdiff, glog = git("status", "-sb"), git("diff", "--stat", "HEAD"), git("log", "--oneline", "-5")
     lines = [
         f"# 🧬 Nightmux Context Teleport ({was})",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
@@ -1528,6 +1538,8 @@ def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
         lines += ["", "## Git Status", "```", gstat, "```"]
     if gdiff:
         lines += ["", "## Git Diffstat", "```", gdiff, "```"]
+    if glog:
+        lines += ["", "## Recent Commits", "```", glog, "```"]
     if cwd and os.path.isfile(os.path.join(cwd, ".nightmux", "memory.md")):
         lines += ["", "## Project Memory", "See `.nightmux/memory.md` for architecture, test commands, and decisions."]
     body = "\n".join(lines) + "\n"
@@ -1593,6 +1605,137 @@ def teleport_cmd(cfg, state, lock, topic, sess, arg):
     sav_add("teleports")
     return (f"{out}\n🧬 context teleported from {was} → {target} (.nightmux/HANDOFF.md)"
             + (f" with {len(rest)} queued prompt(s)" if rest else ""))
+
+
+# What starts each agent in a session that opens on a prompt. These CLIs disagree
+# (a bare `qwen "..."` is a one-shot, opencode wants a flag), so only the ones
+# checked against their own --help are started; any other gets the brief to paste.
+# A cfg["agents"] entry can change the binary, not these flags.
+HANDOFF_FLAGS = {"claude": [], "codex": [], "opencode": ["--prompt"],
+                 "agy": ["-i"], "gemini": ["-i"], "qwen": ["-i"]}
+HANDOFF_USAGE = """usage: nightmux handoff [agent [instruction...]]
+
+  (no agent)   write .nightmux/HANDOFF.md for this folder and show it
+  <agent>      ...and start that agent on it, here in this terminal: """ + ", ".join(HANDOFF_FLAGS) + """
+  <agent> <instruction...>   the same, with what to do next
+"""
+
+
+def _chat_cwd(path, codex):
+    """The folder a Claude Code or Codex transcript ran in, from its first lines."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for _, line in zip(range(30), f):
+            if '"cwd"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = (d.get("payload") or {}).get("cwd") if codex else d.get("cwd")
+                if cwd:
+                    return cwd
+    return None
+
+
+def _chat_last(path, codex):
+    """The last thing the person typed in a transcript. Tool results, meta lines,
+    <command> echoes, slash commands and the summary a /compact writes back are
+    "user" records too; counted as prompts they would bury it."""
+    last = ""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if '"type":"user"' not in line and '"user_message"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if codex:
+                pl = d.get("payload") or {}
+                if pl.get("type") == "user_message":
+                    last = pl.get("message") or last
+                continue
+            c = (d.get("message") or {}).get("content")
+            if (d.get("type") == "user" and isinstance(c, str) and c.strip() and not c.startswith("<")
+                    and not (d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"))
+                    and not re.match(r"/[\w:-]+(\s|$)", c)):
+                last = c
+    return last
+
+
+def latest_chat(root, home=None):
+    """(agent, transcript, last prompt) of the newest Claude Code or Codex conversation
+    that ran in `root` or under it; (None, None, "") when there is none."""
+    home = home or os.path.expanduser("~")
+    found = [(p, False) for p in glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl"))]
+    found += [(p, True) for p in glob.glob(os.path.join(home, ".codex", "sessions", "*", "*", "*", "*.jsonl"))]
+    stamped = []
+    for p, codex in found:
+        try:
+            stamped.append((os.path.getmtime(p), p, codex))
+        except OSError:       # gone since the glob
+            pass
+    root = root.rstrip(os.sep)
+    for _, path, codex in sorted(stamped, reverse=True)[:200]:
+        try:
+            cwd = _chat_cwd(path, codex)
+            if cwd and (cwd == root or cwd.startswith(root + os.sep)):
+                return ("codex" if codex else "claude"), path, _chat_last(path, codex)
+        except OSError:
+            pass
+    return None, None, ""
+
+
+def _exec(argv):
+    os.execvp(argv[0], argv)
+
+
+def handoff_cli(args):
+    """`nightmux handoff [agent [instruction...]]`: write what the last agent in this folder
+    left behind (its last instruction, recent actions, the git state) to
+    .nightmux/HANDOFF.md and, given an agent, start that agent on it. The plain-CLI
+    side of !teleport: no bot, daemon or config."""
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    known = agents(cfg)
+    if args[:1] in (["-h"], ["--help"]):
+        print(HANDOFF_USAGE, end="")
+        return
+    if args and args[0] not in known:
+        print(f"nightmux handoff: unknown agent {args[0]!r}\n\n{HANDOFF_USAGE}", end="", file=sys.stderr)
+        sys.exit(2)
+    here = os.getcwd()
+    top = tmux_git(here, "rev-parse", "--show-toplevel")
+    in_repo = bool(top) and not top.startswith("fatal:") and os.path.isdir(top)
+    root = top if in_repo else here
+    was, tpath, last = latest_chat(root)
+    last = last.strip()[:2000]
+    hpath, body = teleport_packet({}, {}, None, None, was=was or "unknown agent", last=last, force=in_repo,
+                                  cwd=root, tpath=tpath if was == "claude" else None)
+    if not args:
+        installed = [k for k in HANDOFF_FLAGS if shutil.which(agent(cfg, k)[0])]
+        print(body + ("\nsaved to " + hpath if hpath else "\nnot a git repo, so nothing was written")
+              + "\nhand it on: nightmux handoff <agent> [instruction]    here: " + (", ".join(installed) or "none installed"))
+        return
+    key, extra = args[0], " ".join(args[1:]).strip()
+    prompt = (f"{was or 'Another agent'} was working in this directory and stopped before it was done. "
+              + (f"Read {hpath} first: it holds its last instruction, recent actions and the git state. " if hpath else "")
+              + "Look at the working tree to see how far it got, then carry on."
+              + (f"\n\nNext instruction:\n{extra}" if extra else "")
+              + ("" if hpath else "\n\n" + body[:6000]))
+    binary = agent(cfg, key)[0]
+    if key not in HANDOFF_FLAGS:
+        sys.exit(f"nightmux does not know how to start {key} on a prompt. Start it here and paste:\n\n{prompt}")
+    if not shutil.which(binary):
+        sys.exit(f"{binary} is not installed here (or not on PATH). Start it elsewhere and paste:\n\n{prompt}")
+    print(f"🧬 handoff · {was or 'unknown agent'} → {key}\n"
+          + (f"   last instruction: {last.splitlines()[0][:100]}\n" if last else "")
+          + (f"   brief: {hpath}\n" if hpath else "   not a git repo: the brief goes in the prompt\n"), flush=True)
+    try:
+        _exec([binary, *HANDOFF_FLAGS[key], prompt])
+    except OSError as e:
+        sys.exit(f"could not start {binary}: {e}")
 
 
 def failover(cfg, state, lock, topic, key):
@@ -21009,6 +21152,89 @@ def selfcheck():
             assert "$8.40 at API list prices" in so_.getvalue() and "last 7 days" in so_.getvalue(), so_.getvalue()
             assert "not counted: " in so_.getvalue() and "gpt-x" in so_.getvalue(), so_.getvalue()
             assert "Nothing was uploaded" in so_.getvalue() and "last 7 days" in se_.getvalue(), (so_.getvalue(), se_.getvalue())
+        # `handoff`: the newest conversation in a folder, a brief, another agent started on it
+        with tempfile.TemporaryDirectory() as hh_:
+            def w_(rel, rows, age):
+                p_ = os.path.join(hh_, rel)
+                os.makedirs(os.path.dirname(p_), exist_ok=True)
+                with open(p_, "w", encoding="utf-8") as f_:
+                    f_.writelines(json.dumps(r_, separators=(",", ":")) + "\n" for r_ in rows)
+                os.utime(p_, (time.time() - age,) * 2)
+                return p_
+            repo_ = os.path.join(os.path.realpath(hh_), "repo")   # git answers with the resolved path
+            os.makedirs(os.path.join(repo_, "sub"))
+            for g_ in (("init", "-q"), ("-c", "user.email=a@b", "-c", "user.name=a",
+                                         "commit", "-q", "--allow-empty", "-m", "first commit")):
+                subprocess.run(["git", "-C", repo_, *g_], check=True, capture_output=True)
+            open(os.path.join(repo_, "up.py"), "w").close()
+            u_ = lambda text, **kw: {"type": "user", "cwd": repo_, "message": {"role": "user", "content": text}, **kw}
+            cl_ = w_(".claude/projects/-r/a.jsonl", [
+                u_("older ask"),
+                {"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "I will add a retry loop around the upload call."},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "up.py"}}]}},
+                u_("add retry to the uploader"),
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}},
+                {"type": "user", "message": {"content": [{"type": "text", "text": "reminder text, not agent reasoning"}]}},
+                u_("meta noise", isMeta=True), u_("<command-name>/clear</command-name>"), u_("/compact"),
+                u_("/effort max"), u_("This session is being continued from a previous conversation", isCompactSummary=True)], 100)
+            cx_ = w_(".codex/sessions/2026/10/22/rollout-1.jsonl", [
+                {"type": "session_meta", "payload": {"cwd": os.path.join(repo_, "sub")}},
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "codex ask"}}], 200)
+            w_(".claude/projects/-o/b.jsonl", [u_("elsewhere", cwd=os.path.join(hh_, "other"))], 10)
+            w_(".claude/projects/-p/c.jsonl", [u_("a sibling folder with the same prefix", cwd=repo_ + "2")], 5)
+            assert latest_chat(repo_, home=hh_) == ("claude", cl_, "add retry to the uploader")
+            os.utime(cx_, (time.time() - 50,) * 2)     # newest in the repo, from its sub folder
+            assert latest_chat(repo_, home=hh_) == ("codex", cx_, "codex ask")
+            assert latest_chat(os.path.join(hh_, "nowhere"), home=hh_) == (None, None, "")
+            os.utime(cx_, (time.time() - 200,) * 2)
+            execs_, real_latest_ = [], latest_chat
+
+            def hand_(*a_, where=repo_):
+                old_cwd_ = os.getcwd()
+                os.chdir(where)
+                try:
+                    with stubbed(load_cfg=lambda: {"agents": {"codex": ["/bin/sh", ""], "opencode": ["/bin/sh", ""],
+                                                              "agy": ["/nonexistent/agy", ""]}},
+                                 latest_chat=lambda root: real_latest_(root, home=hh_),
+                                 _exec=execs_.append, setup=lambda: ran_.append("setup")):
+                        return cli_("handoff", *a_)
+                finally:
+                    os.chdir(old_cwd_)
+            code_, out_, err_ = hand_()
+            hp_ = os.path.join(repo_, ".nightmux", "HANDOFF.md")
+            assert code_ is None and not execs_ and not err_, (code_, err_)
+            assert "reminder text" not in out_ and "/compact" not in out_ and "being continued" not in out_, out_
+            for want_ in ("## Last Instruction\nadd retry to the uploader", "`Edit`", "retry loop", "?? up.py",
+                          "## Recent Commits", "first commit", "saved to " + hp_, "codex"):
+                assert want_ in out_, (want_, out_)
+            assert open(hp_, encoding="utf-8").read().startswith("# 🧬") and ".nightmux/" in open(
+                os.path.join(repo_, ".git", "info", "exclude")).read().split()
+            code_, out_, err_ = hand_("codex", "also", "add", "tests")
+            assert code_ is None and len(execs_) == 1 and execs_[0][0] == "/bin/sh", (code_, execs_, err_)
+            assert execs_[0][1].startswith("claude was working in this directory") and hp_ in execs_[0][1], execs_
+            assert execs_[0][1].endswith("Next instruction:\nalso add tests"), execs_
+            assert "claude → codex" in out_ and "last instruction: add retry to the uploader" in out_, out_
+            hand_("opencode")
+            assert execs_[-1][:2] == ["/bin/sh", "--prompt"] and len(execs_[-1]) == 3, execs_
+            hand_("codex", "--setup")       # instruction text, not a flag: nothing else runs
+            assert execs_[-1][1].endswith("Next instruction:\n--setup") and "setup" not in ran_, (execs_[-1], ran_)
+            n_ = len(execs_)
+            code_, out_, err_ = hand_("agy")
+            assert "/nonexistent/agy is not installed" in code_ and "add retry to the uploader" not in code_ and len(execs_) == n_, code_
+            code_, out_, err_ = hand_("aider")
+            assert "does not know how to start aider" in code_ and hp_ in code_ and len(execs_) == n_, code_
+            code_, out_, err_ = hand_("nope")
+            assert code_ == 2 and "unknown agent 'nope'" in err_ and "usage: nightmux handoff" in err_ and not out_, (code_, err_)
+            code_, out_, err_ = cli_("handoff", "--help")
+            assert code_ is None and out_.startswith("usage: nightmux handoff") and "codex" in out_ and not err_, out_
+            # outside a repo: nothing is written, and the brief rides in the prompt
+            plain_ = os.path.join(hh_, "plain")
+            os.makedirs(plain_)
+            code_, out_, err_ = hand_(where=plain_)
+            assert code_ is None and "not a git repo" in out_ and not os.path.exists(os.path.join(plain_, ".nightmux")), out_
+            hand_("codex", where=plain_)
+            assert "## Last Instruction" in execs_[-1][1] and ".nightmux" not in execs_[-1][1], execs_[-1]
         assert cli_() == (None, "", "") and ran_ == ["daemon"], ran_
     print("selfcheck ok")
 
@@ -21289,6 +21515,7 @@ USAGE = """usage: nightmux [command | option]
 
   (none)               run the daemon; what the service starts
   wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
+  handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
   --setup              first run: bot token, group, hooks, service
   --doctor             find what is wrong with this install
   --demo [port]        the office with a made-up night; no bot, no keys
@@ -21305,7 +21532,9 @@ USAGE = """usage: nightmux [command | option]
 
 def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
-    if "-h" in sys.argv or "--help" in sys.argv:
+    if sys.argv[1:2] == ["handoff"]:   # free text follows: keep it from the flag checks below
+        handoff_cli(sys.argv[2:])
+    elif "-h" in sys.argv or "--help" in sys.argv:
         print(USAGE, end="")
     elif "--selfcheck" in sys.argv:
         selfcheck()

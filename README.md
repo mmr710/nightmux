@@ -43,6 +43,12 @@ Docker, a fresh VPS and the rest: [Install →](#install)
 
 The dollar figure is the same tokens at the providers' public list prices, dated in the output. A subscription bills differently, so read it as a size, not an invoice. A model with no price in the table is named and left out, never counted as free; `"prices": {"my-model": [input, output, cache read, cache write]}` in `~/.nightmux.json` (dollars per million tokens; the last two are optional) adds a model or overrides a built-in one. The PNG needs Chromium, otherwise you get a web page to screenshot. Drawing a card fetches the Inter and JetBrains Mono fonts from Google Fonts; none of your numbers are in that request.
 
+## Hit a limit mid-task?
+
+`nightmux handoff codex`, run in the repo from any terminal, writes what the last Claude Code or Codex conversation there left behind to `.nightmux/HANDOFF.md` and starts Codex on it: the instruction that was cut off, its last actions and notes, `git status`, the diffstat and the recent commits. The file stays out of `git status` (it goes in `.git/info/exclude`). Say what comes next after the agent's name: `nightmux handoff gemini "finish the tests"`. With no agent it only writes the file and shows it. No install: `uvx --from git+https://github.com/mmr710/nightmux nightmux handoff codex`.
+
+It starts Claude Code, Codex, OpenCode, agy, Gemini and Qwen Code, the ones whose first-prompt flag was checked against their own `--help`; for any other agent it prints the prompt to paste. Only Claude Code and Codex conversations are read, and only Claude Code's give the last actions and notes. After anything else you get the git state and whatever you type after the agent's name. No bot, no keys, no daemon, and nothing leaves your machine except to the agent you named.
+
 ## How it compares
 
 nightmux is one of several ways to reach a coding agent from your phone, and not the biggest. The others, and where to look first:

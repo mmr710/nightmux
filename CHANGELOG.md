@@ -7,13 +7,16 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
 - `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
 - A dollar estimate, "at API list prices", in `!wrapped` and `nightmux wrapped`, from a built-in price table (Claude, GPT/Codex, Gemini; dated in the output). A model with no price is named and left out, never counted as free. `"prices": {"model": [input, output, cache read, cache write]}` in `~/.nightmux.json` adds or overrides a model.
 
 ### Changed
+- The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
 - The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
 
 ### Fixed
+- "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.
 - Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
 
 ## [1.4.0] — 2026-10-22
