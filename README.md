@@ -288,7 +288,7 @@ What that means in practice:
 - **Nothing is exposed by default.** The dashboard binds `127.0.0.1`; phones reach it through your tailnet or a pairing QR.
 - **Only you can drive it.** Telegram messages from anyone not in `allow_users` are ignored.
 - **Risky approvals stay human.** `!autoyes` is opt-in per topic and never presses yes on `rm -rf`, `sudo`, `git push`, `curl | sh`, `--force` or publish dialogs (`!policy` tunes this).
-- **Spend is capped.** `!budget` and `!spendcap` stop runaway loops; `!cost top` shows where it went.
+- **Spend is capped.** `!budget` (in tokens or dollars) and `!spendcap` stop runaway loops; `!cost top` shows where it went.
 - **The QR shortcut in setup trusts the maintainer.** The relay passes your new bot's token to your terminal once, from memory, with no logs and no disk copy — but it runs on a machine you can't audit, so paste a BotFather token instead if that matters ([details](https://github.com/mmr710/nightmux/blob/main/SECURITY.md#the-qr-onboarding-relay)).
 - **Zero dependencies.** Standard library only, so nothing third-party to audit. The daemon itself is a single file of about 20,000 lines.
 

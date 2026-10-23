@@ -18,6 +18,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - Doctor checks (`!doctor`, `--doctor`, the setup panel): "office link opens" asks `office_url` itself and reports a 404, a 5xx or a refused connection with the fix; "service runs the code on disk" says when the service started before nightmux's own files last changed.
 - The daemon tells the center topic once when its own files changed on disk after it started (a `git checkout` or `pip install -U` that nobody restarted) and gives the restart command; `/office` shows the same warning. A deploy directory had been checked out six times over a week while the service kept running the first copy.
 - `android/keystore.sh`: makes the release key once and prints the two `gh secret set` commands. Without them every CI APK is signed with a throwaway key, and Android refuses to update an installed app over a differently signed one.
+- `!budget $20 [day|week|month]`: a budget in dollars at API list prices, next to the token one. Each usage record is priced at its own model's rate; a model nightmux has no price for counts at the dearest rates it knows, never as free.
 
 ### Changed
 - A new README and website: the benefits first, a 48-second video (on the website) with a 12-second cut at the top of the README, a new social card, and absolute links so the PyPI page shows its images. The PyPI summary, keywords and classifiers say what nightmux is now, not only the Telegram bridge it started as.
@@ -34,6 +35,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
 
 ### Fixed
+- A spent `!budget` said "!budget off or a bigger !budget to lift it", but a bigger budget did not lift the hold, and `!budget off` lifted it only for the topic's main agent: its other agents stayed held until the period ended. Both lift every agent of the topic now, and a new amount that is already spent holds again at once.
 - Aider's questions ("Add file to the chat? (Y)es/(N)o [Yes]:") read as unknown: no buttons, and prompts waited behind them. They read as waiting now, and `!y`, `!n` and auto-yes type the letter and the Enter Aider waits for. An answered one stays on screen and no longer counts.
 - Gemini CLI's folder trust dialog read as unknown: nothing reached the phone, and prompts waited behind it with only `!raw` to get past. A boxed row marked ● now counts as an option, so the dialog is waiting, with its three options as buttons. Auto-yes does not trust a folder by itself.
 - "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.

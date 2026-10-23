@@ -987,7 +987,7 @@ def model_cost(model):
     return next((r for k, r in MODEL_COST.items() if k in (model or "").lower()), 1.0)
 
 
-def tail_transcript(st, path, ladder=False):
+def tail_transcript(st, path, ladder=False, prices=None):
     """Assistant output appended since the last read. Exact text, no chrome.
 
     ladder: !ladder picks this session's model, so a turn on a lighter model
@@ -1002,7 +1002,7 @@ def tail_transcript(st, path, ladder=False):
         return []
     if pos == size:
         return []
-    out, spent = [], 0.0
+    out, spent, usd = [], 0.0, 0.0
     with open(path, "rb") as f:
         f.seek(pos)
         while True:
@@ -1025,6 +1025,11 @@ def tail_transcript(st, path, ladder=False):
                         + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
                         + u.get("output_tokens", 0) * WEIGHT["out"])
                 spent += turn
+                if u:   # and at its model's list price, for a !budget in dollars
+                    p = price_of(rec["message"].get("model") or "", prices) or DEAREST
+                    usd += (u.get("input_tokens", 0) * p[0] + u.get("output_tokens", 0) * p[1]
+                            + u.get("cache_read_input_tokens", 0) * p[2]
+                            + u.get("cache_creation_input_tokens", 0) * p[3]) / 1e6
                 cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
                 if ladder and turn and cheap > 0:
                     sav_add("model_tokens", round(turn * cheap))
@@ -1053,6 +1058,7 @@ def tail_transcript(st, path, ladder=False):
     if spent:
         st.setdefault("spend", []).append((time.time(), spent))
         st["unbilled"] = st.get("unbilled", 0) + spent     # for !budget's ledger
+        st["unbilled_usd"] = st.get("unbilled_usd", 0) + usd
     return out
 
 
@@ -2311,47 +2317,58 @@ def budget_window(cfg, per, now=None):
     return start, start + 86400
 
 
-def spend_note(sess, n, now=None):
-    """Add to the per-session ledger: tokens per UTC hour, 35 days kept."""
+def spend_note(sess, n, now=None, ledger="spent"):
+    """Add to a per-session ledger, tokens ("spent") or dollars ("spent_usd") per
+    UTC hour, 35 days kept."""
     hr = int((now or time.time()) // 3600)
     with _sav_lock:
-        led = sav_data().setdefault("spent", {}).setdefault(sess, {})
+        led = sav_data().setdefault(ledger, {}).setdefault(sess, {})
         led[str(hr)] = led.get(str(hr), 0) + n
         for k in [k for k in led if int(k) < hr - 35 * 24]:
             del led[k]
         _sav["dirty"] = True
 
 
-def budget_used(cfg, topic, start):
+def budget_used(cfg, topic, start, ledger="spent"):
     sessions = set(bench_of(cfg, topic).values()) | {cfg["topics"].get(topic)}
     with _sav_lock:
-        led = sav_data().get("spent") or {}
-        return int(sum(n for s in sessions for h, n in (led.get(s) or {}).items()
-                       if int(h) >= start // 3600))
+        led = sav_data().get(ledger) or {}
+        used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
+    return used if ledger == "spent_usd" else int(used)
+
+
+def budget_of(cfg, topic, b, start):
+    """(used, cap, how to write an amount) for a budget in tokens or in dollars."""
+    if "usd" in b:
+        return budget_used(cfg, topic, start, "spent_usd"), b["usd"], _usd
+    return budget_used(cfg, topic, start), b["tokens"], _k
 
 
 def budget_tick(cfg, state, topic, sess):
     st = state.setdefault(sess, {})
     spend_note(sess, st.pop("unbilled", 0))
+    if st.get("unbilled_usd"):
+        spend_note(sess, st.pop("unbilled_usd"), ledger="spent_usd")
     b = (cfg.get("budgets") or {}).get(str(topic))
     if not b:
         return
     start, end = budget_window(cfg, b["per"])
-    used, cap, key = budget_used(cfg, topic, start), b["tokens"], f"{b['per']}:{int(start)}"
+    used, cap, amt = budget_of(cfg, topic, b, start)
+    key = f"{b['per']}:{int(start)}:{cap}"      # a new amount warns and holds afresh
     if used >= cap and st.get("budget_hold") != key:
-        st["budget_hold"] = st["budget_warned"] = key
+        st["budget_warned"] = key
         for s in set(bench_of(cfg, topic).values()) | {sess}:
             o = state.setdefault(s, {})
-            o["limit_until"] = max(o.get("limit_until", 0), end)
+            o["limit_until"], o["budget_hold"] = max(o.get("limit_until", 0), end), key
         save_queue(state)
         event(cfg, "budget", topic, sess)
-        send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {_k(used)} of {_k(cap)} — "
+        send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {amt(used)} of {amt(cap)} — "
              f"the turn in flight finishes, new prompts queue until {clock(cfg, end)}.\n"
              "!budget off or a bigger !budget to lift it", mode="plain")
     elif used >= 0.8 * cap and st.get("budget_warned") != key:
         st["budget_warned"] = key
         send(cfg, topic, f"💸 {sess} at {used / cap:.0%} of its {BUDGET_ADJ[b['per']]} budget "
-             f"({_k(used)} of {_k(cap)})", mode="plain")
+             f"({amt(used)} of {amt(cap)})", mode="plain")
 
 
 def budget_line(cfg, topic):
@@ -2359,8 +2376,8 @@ def budget_line(cfg, topic):
     b = (cfg.get("budgets") or {}).get(str(topic))
     if not b:
         return None
-    used = budget_used(cfg, topic, budget_window(cfg, b["per"])[0])
-    return f"{_k(used)} of {_k(b['tokens'])} this {b['per']}"
+    used, cap, amt = budget_of(cfg, topic, b, budget_window(cfg, b["per"])[0])
+    return f"{amt(used)} of {amt(cap)} this {b['per']}"
 
 
 def budget_cmd(cfg, state, topic, sess, arg):
@@ -2368,30 +2385,38 @@ def budget_cmd(cfg, state, topic, sess, arg):
     words = arg.lower().split()
     if words[:1] == ["off"]:
         bs.pop(str(topic), None)
+    elif words:
+        usd = re.fullmatch(r"\$(\d+(?:\.\d+)?)", words[0])
+        n = float(usd.group(1)) if usd else parse_amount(words[0])[1]
+        per = words[1] if len(words) > 1 else "day"
+        if not n or per not in ("day", "week", "month"):
+            return ("usage: !budget <50M|800k|$20> [day|week|month] | off   "
+                    "(base-equiv tokens, or dollars at API list prices)")
+        bs[str(topic)] = {"usd": n, "per": per} if usd else {"tokens": n, "per": per}
+    lifted = 0
+    if words:
         save_cfg(cfg)
-        lifted = 0
+        # Off or a new amount lifts the hold of the old one, on every agent of
+        # the topic; a new amount that is spent too holds again below.
         for s in set(bench_of(cfg, topic).values()) | {sess}:
             o = state.get(s) or {}
             if o.pop("budget_hold", None):
                 o.pop("limit_until", None)
                 lifted += 1
         save_queue(state)
+    if words[:1] == ["off"]:
         return "budget off" + (" · hold lifted, the queue resumes on idle" if lifted else "")
-    if words:
-        _, n = parse_amount(words[0])
-        per = words[1] if len(words) > 1 else "day"
-        if not n or per not in ("day", "week", "month"):
-            return "usage: !budget <50M|800k> [day|week|month] | off   (base-equiv tokens)"
-        bs[str(topic)] = {"tokens": n, "per": per}
-        save_cfg(cfg)
     b = bs.get(str(topic))
     if not b:
-        return "no budget here · !budget 50M [day|week|month] holds new prompts once it is spent"
+        return "no budget here · !budget 50M or $20 [day|week|month] holds new prompts once it is spent"
+    if words:
+        budget_tick(cfg, state, topic, sess)
     start, end = budget_window(cfg, b["per"])
-    used = budget_used(cfg, topic, start)
-    return (f"💸 {_k(used)} of {_k(b['tokens'])} this {b['per']} ({used / b['tokens']:.0%}) · "
-            f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\nbase-equivalent tokens: "
-            "cache reads count 0.1, output 5 — the same scale as !cost")
+    used, cap, amt = budget_of(cfg, topic, b, start)
+    return (f"💸 {amt(used)} of {amt(cap)} this {b['per']} ({used / cap:.0%}) · "
+            f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\n" +
+            ("dollars at API list prices, from Claude Code's usage records" if "usd" in b else
+             "base-equivalent tokens: cache reads count 0.1, output 5 — the same scale as !cost"))
 
 
 # ---------- events: a webhook for lights, Home Assistant, anything ----------
@@ -3008,7 +3033,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # first, because a transcript that grew is reason enough to do the rest.
     st["snap"] = snap = snapshot(pane_id)
     tpath = (snap or {}).get("transcript")
-    gained = tail_transcript(st, tpath, ladder_on(cfg, topic)) if tpath else []
+    gained = tail_transcript(st, tpath, ladder_on(cfg, topic), cfg.get("prices")) if tpath else []
     if st.get("unbilled"):
         budget_tick(cfg, state, topic, sess)
     if gained:
@@ -5215,7 +5240,7 @@ HELP = [
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
         "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
-        "!budget <50M> [day|week|month] | off = a token allowance for this project; "
+        "!budget <50M|$20> [day|week|month] | off = a token or dollar allowance for this project; "
         "once spent, new prompts wait for the next period",
         "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
         "first-try prompts have in common",
@@ -8214,6 +8239,8 @@ PRICES = {n: r[1:] for r in (
     ("gemini-3.5-flash", 1.5, 9, .15, 1.5),
     ("gemini-3.6-flash gemini-3.7-flash gemini-3.8-flash", .75, 3.75, .075, .75),
 ) for n in r[0].split()}
+# A model with no price, in a dollar !budget: the dearest rates, never free.
+DEAREST = tuple(map(max, zip(*PRICES.values())))
 
 
 def price_of(model, extra=None):
@@ -9806,8 +9833,8 @@ def nm_call(name, a, base=None, companion=False):
             text += "".join(f"\n{t}: {names.get(t) or os.path.basename(d)} · no session · {d} "
                             "· send_prompt starts one" for t, d in (c_.get("dirs") or {}).items()
                             if t not in bound and os.path.isdir(d))
-            used, cap = companion_allowance(c_)
-            text += (f"\nyour allowance: {_k(used)} of {_k(cap)} this period — covers projects "
+            used, cap, amt = companion_allowance(c_)
+            text += (f"\nyour allowance: {amt(used)} of {amt(cap)} this period — covers projects "
                      "with no !budget of their own" if cap else
                      "\nno allowance: you act only where a project has its own !budget")
     elif name == "read_terminal":
@@ -10209,7 +10236,7 @@ def companion_allowance(cfg, now=None):
     comp = cfg.get("companion") or {}
     b = (cfg.get("budgets") or {}).get(str(comp.get("topic")))
     if not b:
-        return 0, 0
+        return 0, 0, _k
     start = budget_window(cfg, b["per"], now)[0]
     acted = set()
     try:
@@ -10222,12 +10249,12 @@ def companion_allowance(cfg, now=None):
         pass
     try:
         with open(sav_path()) as f:
-            led = json.load(f).get("spent") or {}
+            led = json.load(f).get("spent_usd" if "usd" in b else "spent") or {}
     except (OSError, ValueError):
         led = {}
     sessions = {s for t in acted for s in set(bench_of(cfg, t).values()) | {cfg["topics"].get(t)}}
     used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
-    return int(used), b["tokens"]
+    return (used, b["usd"], _usd) if "usd" in b else (int(used), b["tokens"], _k)
 
 
 def companion_wake(base, cfg, topic):
@@ -10282,12 +10309,12 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
     if companion and topic == str((cfg.get("companion") or {}).get("topic")):
         raise ValueError("that is your own topic — send work to a project")
     if companion and topic not in (cfg.get("budgets") or {}):
-        used, cap = companion_allowance(cfg)
+        used, cap, amt = companion_allowance(cfg)
         if not cap:
             raise ValueError(f"topic {topic} has no !budget and you have no allowance — "
                              "suggest it instead, or ask the owner for a !budget in your topic")
         if used >= cap:
-            raise ValueError(f"your allowance is spent ({_k(used)} of {_k(cap)}) — suggest "
+            raise ValueError(f"your allowance is spent ({amt(used)} of {amt(cap)}) — suggest "
                              "it instead; it resets with the period")
     if not role:
         return text
@@ -20635,6 +20662,33 @@ def selfcheck():
             assert bst_["b"]["limit_until"] > time.time() and bst_["b-codex"]["limit_until"] > time.time()
             assert "hold lifted" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget off")
             assert "limit_until" not in bst_["b"] and "3" not in bcfg_["budgets"]
+            assert "limit_until" not in bst_["b-codex"]          # every agent of the topic
+            # A new amount already spent holds at once; a bigger one lifts it,
+            # as the hold message says.
+            handle(bcfg_, bst_, threading.Lock(), "3", "!budget 1M")
+            assert "spent its daily budget" in bsaid_[-1] and bst_["b"]["limit_until"] > time.time(), bsaid_
+            assert "of 2.0M" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget 2M")
+            assert "limit_until" not in bst_["b"] and "limit_until" not in bst_["b-codex"]
+            # In dollars: each usage record at its model's list price, and a
+            # model with no price at the dearest one, never free.
+            d_ = tempfile.mkdtemp()
+            tp_ = os.path.join(d_, "t.jsonl")
+            open(tp_, "w").close()
+            bst_["b"].update(tpos=0, tpath=tp_)
+            assert "$0.00 of $2.00 this day" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget $2")
+            rec_ = lambda m, **u: json.dumps({"message": {"model": m, "usage": u}}) + "\n"
+            with open(tp_, "a") as f:
+                f.write(rec_("claude-sonnet-4-5", input_tokens=100000, output_tokens=100000))
+            tail_transcript(bst_["b"], tp_)
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "90%" in bsaid_[-1] and "($1.80 of $2.00)" in bsaid_[-1], bsaid_
+            with open(tp_, "a") as f:
+                f.write(rec_("claude-next", output_tokens=10000))
+            tail_transcript(bst_["b"], tp_)
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "budget: $2.30 of $2.00" in bsaid_[-1] and budget_line(bcfg_, "3") == "$2.30 of $2.00 this day"
+            shutil.rmtree(d_)
+            assert "hold lifted" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget off")
             spend_note("b", 5, now=time.time() - 40 * 86400)
             assert len(sav_data()["spent"]["b"]) == 2   # added, then pruned on the next note
             spend_note("b", 5)
@@ -21485,7 +21539,7 @@ def selfcheck():
         hr_ = int(time.time() // 3600)
         with open(os.path.join(cdir_, "sav.json"), "w") as f:
             json.dump({"spent": {"work": {str(hr_): 1500}}}, f)
-        assert companion_allowance(ccf_) == (1500, 1000)
+        assert companion_allowance(ccf_)[:2] == (1500, 1000)
         try:
             companion_prompt(ccf_, "9", "go")
             raise AssertionError("a spent allowance must refuse")
