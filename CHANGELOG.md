@@ -22,6 +22,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - `!stopall`: one command stops every agent of every topic. A working turn is interrupted, and nothing starts again until `!stopall off`: prompts, shifts and schedules queue, and goal loops, failover, auto-yes and autocompact wait. A usage window that resets does not lift it, and a restart keeps it.
 
 ### Changed
+- README: an agent table lists the dialogs, usage windows and token counts nightmux reads for each agent, and which agents CI starts every night.
 - A new README and website: the benefits first, a 48-second video (on the website) with a 12-second cut at the top of the README, a new social card, and absolute links so the PyPI page shows its images. The PyPI summary, keywords and classifiers say what nightmux is now, not only the Telegram bridge it started as.
 - The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
 - The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.

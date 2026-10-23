@@ -131,6 +131,25 @@ Python standard library only, nothing to `pip install`.
 
 The [guide](https://github.com/mmr710/nightmux/blob/main/docs/GUIDE.md) walks through each one; [COMMANDS.md](https://github.com/mmr710/nightmux/blob/main/docs/COMMANDS.md) lists every command.
 
+## Agents
+
+Any agent that runs in a terminal works: nightmux types into its tmux pane and reads the screen back. What it reads beyond the prompt and the reply depends on the agent:
+
+| Agent | Dialogs it turns into buttons | Usage windows | Tokens and cost | Started every night in CI |
+|---|---|---|---|---|
+| Claude Code | permissions, menus, folder trust | 5-hour and weekly | ✓ | ✓ |
+| Codex | menus | 5-hour and weekly | ✓ | ✓ |
+| agy | permissions | ✓ | ✓ | – |
+| OpenCode | questions | – | ✓ | ✓ |
+| Gemini CLI | folder trust | – | – | ✓ |
+| Aider | (Y)es/(N)o questions | – | – | ✓ |
+| Qwen Code | not yet | – | – | ✓ |
+| Cursor, Amp, Goose | not tested | – | – | – |
+
+Claude Code also gets hooks, so its replies and permission prompts arrive the moment they happen; the others' are read off the screen. Every agent's queue waits out a usage-limit message nightmux recognises and resumes at the reset it states. The tests cover Claude Code's limit messages and the capacity errors of Gemini models; another agent's wording may need adding.
+
+The last column is the [drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml). Every night it installs the newest release of each agent, starts it in tmux from an empty home folder and checks how nightmux reads its first screen; each run's summary lists the versions. If a new release reads differently on your machine, an issue with a screenshot is the fastest fix.
+
 ## Two tools that need nothing running
 
 ### What did your agents cost?
@@ -274,8 +293,8 @@ What nightmux is for is the overnight layer across agents: a queue that waits ou
 
 Python 3.8+ (CI runs 3.8 through 3.13), tmux, a terminal coding agent, and Linux
 with systemd (the service is optional — `python3 nightmux.py` in a terminal works
-fine). Claude Code gets the hooks and the usage numbers; everything else runs on
-the terminal scrape.
+fine). Claude Code gets hooks as well; the
+[agent table](https://github.com/mmr710/nightmux#agents) shows what each agent gets.
 
 ## Security
 
