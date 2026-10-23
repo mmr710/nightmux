@@ -18,6 +18,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - `android/keystore.sh`: makes the release key once and prints the two `gh secret set` commands. Without them every CI APK is signed with a throwaway key, and Android refuses to update an installed app over a differently signed one.
 
 ### Changed
+- A new README and website: the benefits first, a 48-second video (on the website) with a 12-second cut at the top of the README, a new social card, and absolute links so the PyPI page shows its images. The PyPI summary, keywords and classifiers say what nightmux is now, not only the Telegram bridge it started as.
 - The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
 - The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
 - `!office` asks the `office_url` before it sends the button. A link that answers 404 or 5xx, or refuses the connection (another service owns that address), gets the cause and a tailnet-only fix (`tailscale serve --bg --https=<port> <port>`, then `office_url` with that port) instead of a button that opens a blank page.

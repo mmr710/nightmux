@@ -1,52 +1,84 @@
 <!doctype html>
-<!-- Source for docs/og.png, the GitHub social preview card (Settings ->
-     Social preview). Re-render after an edit:
-     chromium --headless --screenshot=docs/og.png --window-size=1280,640 docs/og.html -->
+<!-- Source for docs/og.png, the social preview card (GitHub: Settings ->
+     Social preview; the website's og:image). Serve docs/ over HTTP, then:
+     chromium --headless --virtual-time-budget=8000 --window-size=1280,640 --screenshot=og.png http://127.0.0.1:<port>/og.html -->
 <meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800;900&display=block">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 1280px; height: 640px; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
   body {
-    background: #0d1117;
+    position: relative; color: #e6e9f5; font-family: Inter, sans-serif;
+    background: #07090f;
     background-image:
-      radial-gradient(900px 420px at 78% 8%, rgba(46,166,255,.16), transparent 70%),
-      radial-gradient(700px 400px at 6% 100%, rgba(126,231,135,.10), transparent 70%);
-    color: #e6edf3;
-    font-family: "DejaVu Sans", sans-serif;
-    padding: 68px 72px;
-    display: flex; flex-direction: column; justify-content: space-between;
+      radial-gradient(520px 360px at 12% 4%, rgba(224,175,104,.22), transparent 70%),
+      radial-gradient(760px 520px at 92% 0%, rgba(122,162,247,.20), transparent 70%),
+      radial-gradient(700px 420px at 70% 115%, rgba(187,154,247,.16), transparent 70%);
   }
-  .name {
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 92px; font-weight: bold; letter-spacing: -2px; line-height: 1;
-  }
-  .name .dim { color: #2ea6ff; }
-  .tag { margin-top: 18px; font-size: 34px; color: #9fb0c0; }
-  .pitch { margin-top: 26px; font-size: 30px; line-height: 1.45; max-width: 720px; }
-  .pitch b { color: #7ee787; font-weight: normal; }
-  .wire {
-    position: absolute; right: 72px; top: 190px;
-    font-family: "DejaVu Sans Mono", monospace; font-size: 21px; line-height: 1.7;
-    color: #7d8f9f; white-space: pre; text-align: left;
-  }
-  .wire .t { color: #2ea6ff; }
-  .wire .s { color: #7ee787; }
-  .chips { display: flex; gap: 14px; }
-  .chip {
-    border: 1px solid #263344; border-radius: 999px; padding: 12px 22px;
-    font-size: 21px; color: #b9c7d4; background: rgba(255,255,255,.02);
-  }
+  #stars i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; }
+  .left { position: absolute; left: 68px; top: 58px; width: 690px; }
+  .brand { display: flex; align-items: center; gap: 18px; }
+  .brand svg { width: 84px; height: 84px; filter: drop-shadow(0 0 26px rgba(255,200,120,.5)); }
+  .word { font-size: 92px; font-weight: 900; letter-spacing: -.045em; line-height: 1; }
+  .word .m { background: linear-gradient(180deg,#ffe2a8,#e0a352); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .tag { margin-top: 30px; font-size: 46px; font-weight: 800; letter-spacing: -.025em; line-height: 1.1; }
+  .tag em { font-style: normal; background: linear-gradient(90deg,#f2c27c,#ff9e64); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  ul { list-style: none; margin-top: 32px; }
+  li { display: flex; align-items: center; gap: 16px; font-size: 25px; font-weight: 500; color: #b8c0da; margin-top: 14px; }
+  li svg { width: 40px; height: 40px; padding: 8px; border-radius: 11px; background: rgba(224,175,104,.12);
+           stroke: #f2c27c; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .chips { position: absolute; left: 68px; bottom: 50px; display: flex; gap: 10px; }
+  .chips span { border: 1px solid #262e47; background: rgba(13,17,32,.85); border-radius: 999px; padding: 8px 16px; font-size: 19px; font-weight: 500; color: #c6cde4; }
+  .phone { position: absolute; right: 64px; top: 50px; width: 400px; height: 540px; border-radius: 40px;
+           background: #0b0f1c; border: 2px solid #2a3250; box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 0 0 6px #070a14; padding: 26px 22px; }
+  .head { display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid #1c2338; }
+  .av { width: 42px; height: 42px; border-radius: 50%; background: #141a2e; display: grid; place-items: center; }
+  .av svg { width: 28px; height: 28px; }
+  .head b { display: block; font-size: 19px; font-weight: 600; }
+  .head small { font-size: 15px; color: #7f88a6; }
+  .msg { margin-top: 14px; padding: 12px 15px; border-radius: 16px; font-size: 17px; line-height: 1.35; max-width: 92%; background: #161c30; }
+  .msg b { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #e9ecf8; }
+  .msg b::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--d); flex: none; }
+  .msg span { display: block; color: #98a1bf; font-size: 15.5px; margin-top: 3px; }
+  .me { margin-left: auto; background: #2f5bd0; color: #fff; border-bottom-right-radius: 5px; }
+  .bot { border-bottom-left-radius: 5px; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; }
+  .btns i { font-style: normal; font-size: 14.5px; padding: 6px 12px; border-radius: 9px; background: #222a44; color: #cfd6ee; }
+  .btns i.y { background: #2f6b3a; color: #e6ffe9; }
 </style>
-<div>
-  <div class="name">night<span class="dim">mux</span></div>
-  <div class="tag">Your night crew, on Telegram.</div>
-  <div class="pitch">Run <b>Claude Code</b> from your phone.<br>One Telegram topic per tmux session, on your own machine.</div>
+<div id="stars"></div>
+<svg width="0" height="0" style="position:absolute"><defs>
+  <radialGradient id="mg" cx="30%" cy="30%" r="80%"><stop offset="0" stop-color="#fff4d6"/><stop offset=".5" stop-color="#f6cd85"/><stop offset="1" stop-color="#c88a35"/></radialGradient>
+  <mask id="mm"><rect width="100" height="100" fill="#fff"/><circle cx="67" cy="35" r="37" fill="#000"/></mask>
+  <symbol id="moon" viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="url(#mg)" mask="url(#mm)"/></symbol>
+</defs></svg>
+
+<div class="left">
+  <div class="brand"><svg><use href="#moon"/></svg><div class="word">night<span class="m">mux</span></div></div>
+  <div class="tag">Your AI coding agents keep<br>working <em>while you sleep.</em></div>
+  <ul>
+    <li><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>Resumes on its own after usage limits</li>
+    <li><svg viewBox="0 0 24 24"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>Or hands the work to another agent</li>
+    <li><svg viewBox="0 0 24 24"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>Approve from your phone, in one tap</li>
+  </ul>
 </div>
-<div class="wire"><span class="t">#api</span>      ──►  tmux <span class="s">api</span>      → claude
-<span class="t">#frontend</span> ──►  tmux <span class="s">web</span>      → codex
-<span class="t">#scratch</span>  ──►  tmux <span class="s">scratch</span>  → gemini</div>
-<div class="chips">
-  <div class="chip">self-hosted</div>
-  <div class="chip">holds prompts through rate limits</div>
-  <div class="chip">Python stdlib only</div>
+<div class="chips"><span>Claude Code</span><span>Codex</span><span>Gemini</span><span>opencode</span><span>Cursor</span><span>+5 more</span></div>
+
+<div class="phone">
+  <div class="head"><div class="av"><svg><use href="#moon"/></svg></div><div><b>#api · nightmux</b><small>4 agents · this machine</small></div></div>
+  <div class="msg me">refactor the api, then run the tests</div>
+  <div class="msg bot" style="--d:#f7768e"><b>claude hit the usage limit</b><span>5-hour window spent · resumes 04:11</span></div>
+  <div class="msg bot" style="--d:#9ece6a"><b>codex takes over</b><span>picks up from the working tree</span></div>
+  <div class="msg bot" style="--d:#ff9e64"><b>agy needs input</b><span>Run migration 0042_sessions?</span><div class="btns"><i class="y">✓ Yes</i><i>Always</i><i>No</i></div></div>
+  <div class="msg bot" style="--d:#e0af68"><b>Morning briefing</b><span>3 tasks done · 2 PRs ready · tests green</span></div>
 </div>
+
+<script>
+  // fixed seed, so a re-render gives the same sky
+  let s = 7, r = () => (s = (s * 16807) % 2147483647) / 2147483647, h = "";
+  for (let n = 0; n < 90; n++) {
+    const z = r() < .15 ? 3 : 2;
+    h += `<i style="left:${(r() * 1280) | 0}px;top:${(r() * 640) | 0}px;width:${z}px;height:${z}px;opacity:${(.15 + r() * .6).toFixed(2)}"></i>`;
+  }
+  document.getElementById("stars").innerHTML = h;
+</script>
