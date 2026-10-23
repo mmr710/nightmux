@@ -23,12 +23,15 @@ HOME = tempfile.mkdtemp(prefix="agents-home-")
 # Before nightmux is imported, since its state lives under the home folder.
 # Nothing reads or writes the real one, and no agent finds a login or a key;
 # without the CLAUDE* variables, a Claude Code run from Claude Code is not
-# tied to the session that ran it.
+# tied to the session that ran it. CI's own variables go too: Gemini CLI sees
+# CI or any CI_* name, skips its screen, prints an error and exits.
+SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
 os.environ.update(HOME=HOME, XDG_CONFIG_HOME=os.path.join(HOME, ".config"),
                   XDG_DATA_HOME=os.path.join(HOME, ".local", "share"),
                   XDG_STATE_HOME=os.path.join(HOME, ".local", "state"),
                   XDG_CACHE_HOME=os.path.join(HOME, ".cache"))
-for k in [k for k in os.environ if k.endswith("_API_KEY") or k.startswith(("TMUX", "CLAUDE"))]:
+for k in [k for k in os.environ if k.endswith("_API_KEY") or k in ("CI", "CONTINUOUS_INTEGRATION")
+          or k.startswith(("TMUX", "CLAUDE", "CI_", "GITHUB_", "RUNNER_"))]:
     del os.environ[k]
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
@@ -37,6 +40,7 @@ SOCKET = "agents-check"   # a tmux server of its own: a running nightmux never s
 # How each first screen reads today. A different reading is drift, either way.
 EXPECT = {
     "agy": "waiting",       # sign-in method
+    "aider": "waiting",     # sign in to OpenRouter? (Y)es/(N)o
     "claude": "idle",       # a first run's theme picker, read as a prompt; a session nightmux drives is past it
     "codex": "waiting",     # sign in with ChatGPT, a device code or a key
     "gemini": "waiting",    # trust this folder?
@@ -92,8 +96,8 @@ def main():
     table = "\n".join(["| Agent | Version | First screen | Options read | |",
                        "|---|---|---|---|---|"] + rows)
     print(table)
-    if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+    if SUMMARY:
+        with open(SUMMARY, "a") as f:
             f.write("### Agents' first screens, read by nightmux\n\n" + table + "\n")
     if drift:
         print("drift: " + ", ".join(drift) + ". The screens are in " + out)

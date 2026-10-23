@@ -723,7 +723,12 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      # Gemini CLI marks the chosen row of a boxed dialog with ●: its
                      # folder trust dialog has no other sign, and read as unknown.
                      # Boxed only, since ● is also Claude Code's reply bullet.
-                     r"|^\s*[│┃]\s*●\s*\d[.)]\s", re.M)
+                     r"|^\s*[│┃]\s*●\s*\d[.)]\s"
+                     # Aider asks on its input line, and only the last line is asking:
+                     # an answered one stays in the scrollback.
+                     r"|\(Y\)es/\(N\)o\b[^\n]*\]:[ \t]*(?:\n[ \t]*)*\Z", re.M)
+# Aider's question takes its answer as a line, so the key waits for an Enter.
+LINE_ASK = re.compile(r"\(Y\)es/\(N\)o\b.*\]:\s*$")
 # The agent's own input box: a rule, then its prompt. A dialog takes the box's
 # place while it is up, so a "menu" with the box drawn under it is the
 # transcript quoting one. A reply ending in "2. Run the release command" read
@@ -3739,6 +3744,9 @@ def press(sess, key, confirm=False):
     tmux("send-keys", "-t", tgt(sess), key)
     if not confirm:
         return
+    if LINE_ASK.search(next((plain(l) for l in reversed(before) if l.strip()), "")):
+        tmux("send-keys", "-t", tgt(sess), "Enter")
+        return
     end = time.time() + CONFIRM_AFTER
     while time.time() < end:
         time.sleep(0.25)
@@ -4688,7 +4696,7 @@ def autoyes(cfg, state, topic, sess):
     if not digit:
         tail = [plain(l) for l in (lines[-15:] if lines else [])]
         tail_text = "\n".join(tail)
-        if re.search(r"[\(\[][yY]/[nN](?:/[aA])?[\)\]]", tail_text) or re.search(r"\b(?:y/n|yes/no)\b", tail_text, re.I):
+        if re.search(r"[\(\[][yY]/[nN](?:/[aA])?[\)\]]", tail_text) or re.search(r"\b(?:y/n|yes/no)\b|\(Y\)es/\(N\)o", tail_text, re.I):
             digit = "y"
         elif re.search(r"(?:Do you want to proceed|Continue\?|Press Enter to continue)", tail_text, re.I):
             digit = "y"
@@ -17657,6 +17665,17 @@ def selfcheck():
            " │   3. Don't trust                       │", " ╰────────────────────────────────────────╯"]
     assert pane_state(gem) == "waiting" and [d for d, _ in menu_items(gem)] == ["1", "2", "3"]
     assert menu_digit(gem, YES_NO["!n"]) == "3" and not menu_digit(gem, YES_NO["!y"])  # auto-yes never trusts
+    # Aider asks on its input line and read as unknown. It takes a line, so !y
+    # is y and an Enter; answered, the line stays on screen and asks nothing.
+    aid = ["No LLM model was specified and no API keys were provided.",
+           "Login to OpenRouter or create a free account? (Y)es/(N)o [Yes]:      ", "", ""]
+    assert pane_state(aid) == "waiting"
+    assert pane_state(["Add a.py to the chat? (Y)es/(N)o/(D)on't ask again [Yes]: y", "Added a.py to the chat.", "> "]) != "waiting"
+    assert pane_state(["Add a.py to the chat? (Y)es/(N)o [Yes]: ", "Added a.py to the chat.", "> "]) != "waiting"
+    akeys = []
+    with stubbed(visible=lambda s: aid, tmux=lambda *a: akeys.append(a[-1]) or ""):
+        press("a", "y", confirm=True)
+    assert akeys == ["y", "Enter"], akeys
     assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
         == ["!1 o", "!2 o", "!3 o", "!esc o"]
     bsel, bkeyed = [0], []

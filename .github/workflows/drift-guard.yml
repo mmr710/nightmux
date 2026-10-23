@@ -10,6 +10,9 @@ on:
       - '.github/workflows/drift-guard.yml'
       - 'tests/**'
 
+permissions:
+  contents: read   # it runs the newest release of six third-party CLIs
+
 jobs:
   drift-guard:
     runs-on: ubuntu-22.04
@@ -34,6 +37,13 @@ jobs:
           npm install -g @anthropic-ai/claude-code || true
           npm install -g @openai/codex || true
           npm install -g opencode-ai || true
+          # Claude Code's and OpenCode's own installers go first on PATH: npm's
+          # opencode-ai is a major version behind, and the claude found on the
+          # first run was older than the one on npm.
+          curl -fsSL https://claude.ai/install.sh | bash || true
+          curl -fsSL https://opencode.ai/install | bash || true
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
           pip install --no-cache-dir aider-chat || true
 
       - name: run pane classifier tests

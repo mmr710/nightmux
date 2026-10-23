@@ -34,6 +34,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
 
 ### Fixed
+- Aider's questions ("Add file to the chat? (Y)es/(N)o [Yes]:") read as unknown: no buttons, and prompts waited behind them. They read as waiting now, and `!y`, `!n` and auto-yes type the letter and the Enter Aider waits for. An answered one stays on screen and no longer counts.
 - Gemini CLI's folder trust dialog read as unknown: nothing reached the phone, and prompts waited behind it with only `!raw` to get past. A boxed row marked ● now counts as an option, so the dialog is waiting, with its three options as buttons. Auto-yes does not trust a folder by itself.
 - "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.
 - Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
