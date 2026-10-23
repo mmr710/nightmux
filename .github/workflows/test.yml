@@ -10,6 +10,7 @@ jobs:
     # the floor nightmux supports — it is what Ubuntu 20.04 LTS ships, and that is a
     # common thing to have an always-on box sitting on.
     runs-on: ubuntu-22.04
+    timeout-minutes: 15   # a stuck apt mirror fails the job instead of holding it for six hours
     strategy:
       fail-fast: false   # one version failing should not hide the others
       matrix:
