@@ -21,11 +21,11 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
 - The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
 - `!office` asks the `office_url` before it sends the button. A link that answers 404 or 5xx, or refuses the connection (another service owns that address), gets the cause and a tailnet-only fix (`tailscale serve --bg --https=<port> <port>`, then `office_url` with that port) instead of a button that opens a blank page.
-- Peers are asked together, for the office, `/api/topics`, `/api/metrics`, `/api/servers` and fleet analysis, and a peer that just failed is not waited on again for 15 seconds (one background probe checks whether it is back, and its failure is logged once). One unreachable peer used to add its whole 3-second timeout to every poll, and the Android service polls every 15 seconds.
+- Peers are asked together, for the office, `/api/topics`, `/api/metrics`, `/api/servers` and fleet analysis, and a route a peer just failed on is not waited on again for 15 seconds (one background probe checks whether it answers again, and its failure is logged once). That is kept per route, so a peer too old for one route still shows everywhere else, and a failure no poll has looked at for a minute is asked again, so a report run now and then does not leave out a peer that is back. One unreachable peer used to add its whole 3-second timeout to every poll, and the Android service polls every 15 seconds.
 - `agy -p /usage` and the opencode token scan no longer run on the request thread. They refresh in the background (agy at most every 5 minutes, failures included; opencode every 10) and the office shows the last reading. A slow or missing `agy` used to hold the daemon's lock for seconds on every poll.
 - Responses over 1 KB are gzipped when the client accepts it: the office poll goes from about 33 KB to 11 KB.
 - The office page keeps one request in flight, pauses while the tab is hidden, gives up after 8 seconds and says "can't reach nightmux, retrying…" after two failures. It used to swallow every error, which looked like a quiet night.
-- Android: the alert service backs off from 15 seconds to 2 minutes while the daemon does not answer; the notification, the widget and the app say "answers 404, pair again" or "wants a login" when the address responds but is not the dashboard, not "can't reach".
+- Android: the alert service backs off from 15 seconds to 2 minutes while the daemon does not answer; the notification, the widget and the app say "answers 404, pair again" or "wants a login" when the address responds but is not the dashboard, not "can't reach", and any other HTTP error shows its status.
 - The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
 
 ### Fixed
@@ -35,6 +35,9 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - Dashboard-only first run: with the dashboard on 127.0.0.1 and no `tailscale serve` mapping, the terminal printed a QR for the machine's LAN address, which refuses connections. It now says how to reach the dashboard from a phone instead, and still prints the QR when there is a route to it.
 - A watcher that raised on every tick wrote the same line about 170 times in six minutes and told nobody. It logs when the reason changes (and every 150 ticks), and the session's topic is told once after a minute of it.
 - The office's usage block swallowed every error with a bare `except:`; failures of the opencode scan now reach the log.
+- OpenCode prompts were never counted by the prompt lessons and `!coach`: the reader used `sqlite3` without importing it, and the error was swallowed.
+- A peer that answers 200 with something other than JSON (another app on that address) showed as a 500 for the whole office; it now shows as a peer that is down, and its log line says what answered. A peer cut off mid-answer counts as down too, instead of failing the request.
+- After a Discord gateway reconnect, the old connection's heartbeat thread read the new connection's state.
 
 ## [1.4.0] — 2026-10-22
 

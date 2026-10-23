@@ -10,7 +10,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
-import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -25,11 +25,17 @@ final class Office {
         HttpURLConnection c = (HttpURLConnection) new URL(base + "/api/office").openConnection();
         c.setConnectTimeout(5000);
         c.setReadTimeout(8000);
-        try (InputStream in = c.getInputStream()) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[8192];
-            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
-            return new JSONObject(out.toString("UTF-8"));
+        try {
+            // Android throws FileNotFoundException for every status from 400 up, so the number
+            // is read first: problem() needs it to tell a wrong address from a login wall.
+            int code = c.getResponseCode();
+            if (code != 200) throw new IOException("HTTP " + code);
+            try (InputStream in = c.getInputStream()) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                return new JSONObject(out.toString("UTF-8"));
+            }
         } finally {
             c.disconnect();
         }
@@ -38,11 +44,11 @@ final class Office {
     /** What a failed fetch means for the person: a wrong address and an unreachable one need different fixes. */
     static String problem(String base, Exception e) {
         String m = String.valueOf(e.getMessage());
-        if (e instanceof FileNotFoundException || m.contains("response code: 404"))
+        if (m.equals("HTTP 404"))
             return base + " answers 404: not the nightmux address. Pair this phone again";
-        if (m.contains("response code: 401") || m.contains("response code: 403"))
+        if (m.equals("HTTP 401") || m.equals("HTTP 403"))
             return base + " wants a login. Pair this phone again";
-        return "can't reach " + base;
+        return "can't reach " + base + (m.startsWith("HTTP ") ? " (" + m + ")" : "");
     }
 
     /** Same request the office page makes when a button is tapped. */
