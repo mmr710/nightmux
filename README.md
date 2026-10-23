@@ -145,6 +145,17 @@ The dollar figure is the same tokens at the providers' public list prices, dated
 
 It starts Claude Code, Codex, OpenCode, agy, Gemini and Qwen Code, the ones whose first-prompt flag was checked against their own `--help`; for any other agent it prints the prompt to paste. Only Claude Code and Codex conversations are read, and only Claude Code's give the last actions and notes. After anything else you get the git state and whatever you type after the agent's name. No bot, no keys, no daemon, and nothing leaves your machine except to the agent you named.
 
+### From inside Claude Code
+
+Both also come as a Claude Code plugin:
+
+```
+/plugin marketplace add mmr710/nightmux
+/plugin install nightmux@nightmux
+```
+
+`/nightmux:wrapped` (or `/nightmux:wrapped 7`) prints the report and writes the cards to your home folder. `/nightmux:handoff codex` writes the brief, has Claude add where it stopped, and gives you the line that starts Codex on it in a terminal. Claude also uses them on its own when you ask what your agents cost or to pass the work on. The plugin needs Python 3.8 or newer, and adds no hooks and no MCP server.
+
 ## Install
 
 The fastest way to install is using the one-line installer:

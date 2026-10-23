@@ -17120,6 +17120,10 @@ def selfcheck():
     if os.path.exists(cmd_md):              # a git checkout, not a pip install
         with open(cmd_md) as f:
             assert f.read() == commands_md(), "docs/COMMANDS.md is stale: nightmux --commands > docs/COMMANDS.md"
+    plugin = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude-plugin", "plugin.json")
+    if os.path.exists(plugin):              # the Claude Code plugin ships at the same version
+        with open(plugin) as f:
+            assert json.load(f)["version"] == VERSION, "bump .claude-plugin/plugin.json with VERSION"
     assert chunks("a\nb") == ["a\nb"]
     assert chunks("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
     big = "\n".join("y" * 100 for _ in range(100))

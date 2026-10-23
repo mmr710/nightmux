@@ -9,6 +9,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [1.5.0] — 2026-10-22
 
 ### Added
+- A Claude Code plugin: `/plugin marketplace add mmr710/nightmux`, then `/plugin install nightmux@nightmux`. `/nightmux:wrapped` and `/nightmux:handoff` bring the two commands that need no bot into Claude Code, and the handoff has Claude write where it stopped into the brief.
 - `nightmux up`: the first run with no Telegram bot. Checks for tmux, will not start a second copy when the dashboard port is already in use, starts the dashboard on this machine and says what a phone needs to reach it (`tailscale serve --bg <port>`, then **+ Pair phone**). Nothing is opened to the LAN or the internet.
 - `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
 - `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
@@ -43,6 +44,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - After a Discord gateway reconnect, the old connection's heartbeat thread read the new connection's state.
 - Auto-yes typed digits into a Claude prompt, up to 25 an hour, and they arrived in front of your next message. A topic that opted in for agy counted its Claude session as agy because Claude is the default agent, and a reply ending in a numbered list ("2. Run the release command") read as an open menu. The topic's one agent is now assumed only for a session nightmux knows nothing about, and a menu with the agent's input box drawn under it is part of the transcript, not a question.
 - `!y`, `!n`, auto-yes and the approval buttons counted every numbered line near the bottom of the screen as an option, so a numbered list in the reply above a dialog, or in the command it asks about, could be picked instead of the dialog's own "1. Yes". A dialog's options are now the last run numbered from 1.
+- The Stop and Notification hooks asked tmux for the current session without naming their pane, and outside tmux that is whichever session was used last: a Claude Code run in another terminal posted its reply, or its permission prompt with that session's buttons, in another session's topic. The hooks now look up their own pane and do nothing outside tmux.
 
 ## [1.4.0] — 2026-10-22
 

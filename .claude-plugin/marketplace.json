@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "nightmux",
+  "description": "nightmux for Claude Code: what your agents cost, and handoffs to other agents.",
+  "owner": {
+    "name": "Mohamed Raslan"
+  },
+  "plugins": [
+    {
+      "name": "nightmux",
+      "description": "What your coding agents cost at API list prices, and a handoff to Codex, Gemini CLI or another agent with a brief.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

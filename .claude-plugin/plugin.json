@@ -1,0 +1,13 @@
+{
+  "name": "nightmux",
+  "version": "1.5.0",
+  "description": "See what your coding agents cost at API list prices, and hand a repo's work to Codex, Gemini CLI or another agent with a brief when Claude Code nears its usage limit. The nightmux daemon adds phone control and resuming past limits.",
+  "author": {
+    "name": "Mohamed Raslan"
+  },
+  "homepage": "https://mmr710.github.io/nightmux/",
+  "repository": "https://github.com/mmr710/nightmux",
+  "license": "MIT",
+  "icon": "./fastlane/metadata/android/en-US/images/icon.png",
+  "keywords": ["usage-limits", "handoff", "cost", "codex", "gemini-cli", "tmux", "telegram"]
+}

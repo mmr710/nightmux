@@ -30,7 +30,12 @@ def main():
     msg = (payload.get("message") or "").strip()
     if IDLE in msg.lower():
         return
-    sess = subprocess.run(("tmux", "display-message", "-p", "#S"),
+    # This pane's session. Without -t, tmux names the session used last, so a
+    # Claude Code run outside tmux posted its permission prompt, with that
+    # session's buttons, in another session's topic.
+    if not os.environ.get("TMUX_PANE"):
+        return
+    sess = subprocess.run(("tmux", "display-message", "-p", "-t", os.environ["TMUX_PANE"], "#S"),
                           capture_output=True, text=True).stdout.strip()
     if not sess:
         return

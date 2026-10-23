@@ -8,18 +8,19 @@ Everything released so far is in the [changelog](CHANGELOG.md).
 
 - `nightmux wrapped`: your Wrapped report and a dollar estimate at API list prices, from the logs your agents already keep. No bot or config needed.
 - `nightmux handoff`: hands the work in a repo to another agent from the terminal, with a brief of what was done.
+- A Claude Code plugin: `/nightmux:wrapped` and `/nightmux:handoff` from inside Claude Code.
 - `nightmux up`: a first run with the dashboard alone, no Telegram bot.
 - Safer dashboard pairing, an office that stays up when a peer is down, and `--doctor` checks for a dead office link or a service still running old code.
 
 ## Next
 
-1. **Claude Code plugin.** One `/plugin install` sets up the hooks and the MCP server, instead of `--setup` editing `~/.claude/settings.json`.
-2. **Code that is easy to read and change.** Split `nightmux.py` into modules and generate the single file from them, so installs do not change; move the self-check into `tests/`; add ruff, coverage and a macOS CI run.
-3. **Agent compatibility table.** The nightly drift guard already installs the newest Gemini CLI, Qwen Code and Aider, records their versions and runs the tests. Next: a table in the README of the version of each agent that was last checked, kept up to date by that job.
-4. **Rails for unattended nights.** A dollar cap next to the token `!budget`, and one command that stops every session at once.
+1. **Code that is easy to read and change.** Split `nightmux.py` into modules and generate the single file from them, so installs do not change; move the self-check into `tests/`; add ruff, coverage and a macOS CI run.
+2. **Agent compatibility table.** The nightly drift guard already installs the newest Gemini CLI, Qwen Code and Aider, records their versions and runs the tests. Next: a table in the README of the version of each agent that was last checked, kept up to date by that job.
+3. **Rails for unattended nights.** A dollar cap next to the token `!budget`, and one command that stops every session at once.
 
 ## Later
 
+- The Stop and Notification hooks from the plugin instead of `--setup` editing `~/.claude/settings.json`, once the plugin and the daemon can agree on a version.
 - A voice note turned into a written plan you approve before an agent starts (voice notes are already transcribed with `transcribe_cmd`).
 - Reviewing a night's changes on the phone, one change at a time.
 - Installs that follow tagged releases instead of `main`.
