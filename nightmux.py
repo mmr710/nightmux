@@ -2805,13 +2805,16 @@ def drain(cfg, state, topic, sess):
     q = st.get("queue")
     if q and open_window:
         held = st.pop("resumed", None)
-        if held:
-            sav_add("resumes")
+        # The first resume on this machine is when nightmux has earned a star
+        # ask, so it asks there, once, rather than in the installer.
+        star = (f"\n\n⭐ First resume past a usage limit on this machine. If nightmux "
+                f"saved your night, a star helps others find it: {REPO_URL}"
+                if held and sav_add("resumes") == 1 else "")
         text = q.pop(0)
         if held:
             event(cfg, "resumed", topic, sess)
         send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
-             f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
+             f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}{star}", mode="plain")
         # Every prompt that reaches here was sent by the daemon, not typed live
         # this instant — a lockout replay, a schedule firing, a busy-queued
         # human prompt going in unattended a moment later. That is the line: a
@@ -7977,6 +7980,7 @@ def sav_add(key, n=1):
             for old in sorted(by)[:-400]:
                 del by[old]
         _sav["dirty"] = True
+        return d[key]
 
 
 def sav_save():
@@ -18109,14 +18113,20 @@ def selfcheck():
     assert held.startswith("📥 queued (1)") and typed == [], (held, typed)
     drain(cfg, state, "1", "s")                   # window still shut: nothing moves
     assert typed == [] and len(sent) == n
+    sav_data().pop("resumes", None)               # a machine that never resumed
     st["limit_until"] = time.time() - 1           # window reset
     drain(cfg, state, "1", "s")
     assert typed == ["do the thing later"], typed
     assert sent[-2].startswith("▶️ s resumed") and "limit_until" not in st
+    assert REPO_URL in sent[-2], sent[-2]         # its first resume asks for a star
     assert sent[-1].startswith("⚙️ s")           # then the live trace for that turn
     assert st["queue"] == [] and st["prog_msg"] == 77   # live trace opened for it
     assert "limit_line" not in st   # the ended window's banner suppresses nothing
     st.pop("prog_msg"), st.pop("last", None)   # not a prompt awaiting its turn
+    st["queue"], st["limit_until"], n = ["and again"], time.time() - 1, len(sent)
+    drain(cfg, state, "1", "s")                   # ...once: the next resume does not
+    assert sent[n].startswith("▶️ s resumed") and REPO_URL not in sent[n], sent[n:]
+    st.pop("prog_msg"), st.pop("last", None)
 
     # A window that resets with nothing queued must still clear the hold and say
     # so. The silent version left the session flagged as limited for good, and

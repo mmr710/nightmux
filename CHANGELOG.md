@@ -27,6 +27,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - Responses over 1 KB are gzipped when the client accepts it: the office poll goes from about 33 KB to 11 KB.
 - The office page keeps one request in flight, pauses while the tab is hidden, gives up after 8 seconds and says "can't reach nightmux, retrying…" after two failures. It used to swallow every error, which looked like a quiet night.
 - Android: the alert service backs off from 15 seconds to 2 minutes while the daemon does not answer; the notification, the widget and the app say "answers 404, pair again" or "wants a login" when the address responds but is not the dashboard, not "can't reach", and any other HTTP error shows its status.
+- The installer no longer asks for a GitHub star. nightmux asks once, in the message for the first session it resumes after a usage limit on that machine.
+- `ROADMAP.md` is rewritten in plain words: what shipped, what comes next, and where help is welcome.
 - The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
 
 ### Fixed
