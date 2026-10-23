@@ -41,6 +41,8 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - OpenCode prompts were never counted by the prompt lessons and `!coach`: the reader used `sqlite3` without importing it, and the error was swallowed.
 - A peer that answers 200 with something other than JSON (another app on that address) showed as a 500 for the whole office; it now shows as a peer that is down, and its log line says what answered. A peer cut off mid-answer counts as down too, instead of failing the request.
 - After a Discord gateway reconnect, the old connection's heartbeat thread read the new connection's state.
+- Auto-yes typed digits into a Claude prompt, up to 25 an hour, and they arrived in front of your next message. A topic that opted in for agy counted its Claude session as agy because Claude is the default agent, and a reply ending in a numbered list ("2. Run the release command") read as an open menu. The topic's one agent is now assumed only for a session nightmux knows nothing about, and a menu with the agent's input box drawn under it is part of the transcript, not a question.
+- `!y`, `!n`, auto-yes and the approval buttons counted every numbered line near the bottom of the screen as an option, so a numbered list in the reply above a dialog, or in the command it asks about, could be picked instead of the dialog's own "1. Yes". A dialog's options are now the last run numbered from 1.
 
 ## [1.4.0] — 2026-10-22
 

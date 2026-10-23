@@ -720,6 +720,11 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      # Footer hints, unambiguous wherever they land on the line.
                      r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
                      r"|Enter to select ·|⇆ select", re.M)   # Claude Code's select menu
+# The agent's own input box: a rule, then its prompt. A dialog takes the box's
+# place while it is up, so a "menu" with the box drawn under it is the
+# transcript quoting one. A reply ending in "2. Run the release command" read
+# as an open menu, and auto-yes typed 2 into the prompt every few seconds.
+INPUT_BOX = re.compile(r"^\s*─{8,}.*\n\s*[│┃]?\s*[❯>](?:\s|$)", re.M)
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
 # Perusing… — so matching the word list caught almost nothing and read a working
@@ -1050,7 +1055,9 @@ def pane_state(lines):
     """
     tail = lines[-25:]
     joined = "\n".join(tail)
-    if WAITING.search(joined) or (ARROWED.search(joined)
+    asks = [m.start() for m in WAITING.finditer(joined)]
+    box = [m.start() for m in INPUT_BOX.finditer(joined)]
+    if (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
                                   and any(BOXED.match(l) or CHOICE.match(l)
                                           for l in tail)):
         return "waiting"
@@ -3624,7 +3631,13 @@ def menu_rows(lines):
     rows = [l for l in tail if MENU.match(plain(l))]
     boxed = [l for l in rows if BOXED.match(plain(l))]
     if len(boxed) * 2 > len(rows):
-        return boxed
+        rows = boxed
+    # The options are the last run numbered from 1. A numbered list in the
+    # reply above the dialog, or in the command it asks about, is not more of
+    # them: "2. Run the release command" in a reply was the first "yes" found.
+    ones = [i for i, l in enumerate(rows) if MENU.match(plain(l)).group(1) == "1"]
+    if ones:
+        return rows[ones[-1]:]
     # Claude Code's trust prompt numbers nothing: "❯ No, exit" and, indented to
     # the same column with no pointer, "Yes, I trust this folder". Only the
     # pointed row matched, so the only button was ⏎ — on "No, exit". The rest
@@ -4642,7 +4655,9 @@ def autoyes(cfg, state, topic, sess):
         live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
         if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
             ak = live_key
-        elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and (ak is None or ak == default_agent(cfg)):
+        # Only a session nothing is known about takes the topic's one agent:
+        # one nightmux started as Claude is not agy because Claude is the default.
+        elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and not live_key:
             ak = keys[0]
         else:
             return
@@ -17619,6 +17634,13 @@ def selfcheck():
     assert bar_opts(flat) == (["Allow once", "Always allow", "Reject"], None)
     assert pane_state(flat) == "waiting"
     assert menu_digit(flat, YES_NO["!y"]) == "1" and menu_digit(flat, YES_NO["!n"]) == "3"
+    # A dialog under a reply that ends in a numbered list: its options are the
+    # last run numbered from 1, not every numbered line on screen.
+    listed = ["  1. Merge the pull request.", "  2. Run the release command.", "",
+              " Bash command", "   gh pr checks 160", " Do you want to proceed?",
+              " ❯ 1. Yes", "   2. Yes, and don't ask again for gh commands", "   3. No"]
+    assert pane_state(listed) == "waiting" and menu_digit(listed, YES_NO["!y"]) == "1"
+    assert [d for d, _ in menu_items(listed)] == ["1", "2", "3"]
     assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
         == ["!1 o", "!2 o", "!3 o", "!esc o"]
     bsel, bkeyed = [0], []
@@ -20877,6 +20899,16 @@ def selfcheck():
         with stubbed(visible=lambda x: ["Run this command?", "> [1] Approve", "  [2] Reject"]):
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
+        # A topic that opted in for agy, bound to a session nightmux started as
+        # Claude: not an agy pane because Claude is the default agent. It typed
+        # 2 into Claude's prompt every few seconds, up to the hourly cap.
+        n_ = len(ypress)
+        yst["cl"] = {"mode": "waiting"}
+        autoyes(dict(ycfg, topics={"7": "cl"}, bench={}, started={"7": "claude"}), yst, "7", "cl")
+        assert len(ypress) == n_, "answered a Claude pane for an agy opt-in"
+        yst["un"] = {"mode": "waiting"}         # one nothing is known about still does
+        autoyes(dict(ycfg, topics={"7": "un"}, bench={}, started={}), yst, "7", "un")
+        assert len(ypress) == n_ + 1, "the single-agent fallback stopped answering"
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
     assert "usage" in template_cmd({}, {}, None, "1", "") and "what?" in template_cmd({}, {}, None, "1", "api")
     assert all("{what}" in v for v in TEMPLATES.values())
