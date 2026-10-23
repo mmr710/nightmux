@@ -15,7 +15,7 @@ Everything released so far is in the [changelog](CHANGELOG.md).
 ## Next
 
 1. **Code that is easy to read and change.** Split `nightmux.py` into modules and generate the single file from them, so installs do not change; move the self-check into `tests/`; add ruff, coverage and a macOS CI run.
-2. **Agent compatibility table.** The nightly drift guard already installs the newest Gemini CLI, Qwen Code and Aider, records their versions and runs the tests. Next: a table in the README of the version of each agent that was last checked, kept up to date by that job.
+2. **Agent compatibility table.** Every night the drift guard starts the newest Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode and Aider and records how nightmux reads each first screen (`tests/live_agents.py`); its first run found Gemini CLI's folder trust dialog unread. Next: that table in the README, kept current by the job, and the screens after the first one.
 3. **Rails for unattended nights.** A dollar cap next to the token `!budget`, and one command that stops every session at once.
 
 ## Later

@@ -1,0 +1,19 @@
+⚠  Warning you are running Gemini CLI in your home directory.
+   This warning can be disabled in /settings
+
+
+ ╭────────────────────────────────────────────────────────────────────────────╮
+ │                                                                            │
+ │ Do you trust the files in this folder?                                     │
+ │                                                                            │
+ │ Trusting a folder allows Gemini CLI to load its local configurations,      │
+ │ including custom commands, hooks, MCP servers, agent skills, and settings. │
+ │ These configurations could execute code on your behalf or change the       │
+ │ behavior of the CLI.                                                       │
+ │                                                                            │
+ │                                                                            │
+ │ ● 1. Trust folder (myproject)                                              │
+ │   2. Trust parent folder (code)                                            │
+ │   3. Don't trust                                                           │
+ │                                                                            │
+ ╰────────────────────────────────────────────────────────────────────────────╯

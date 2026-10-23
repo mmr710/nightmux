@@ -719,7 +719,11 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
                      r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
-                     r"|Enter to select ·|⇆ select", re.M)   # Claude Code's select menu
+                     r"|Enter to select ·|⇆ select"   # Claude Code's select menu
+                     # Gemini CLI marks the chosen row of a boxed dialog with ●: its
+                     # folder trust dialog has no other sign, and read as unknown.
+                     # Boxed only, since ● is also Claude Code's reply bullet.
+                     r"|^\s*[│┃]\s*●\s*\d[.)]\s", re.M)
 # The agent's own input box: a rule, then its prompt. A dialog takes the box's
 # place while it is up, so a "menu" with the box drawn under it is the
 # transcript quoting one. A reply ending in "2. Run the release command" read
@@ -740,7 +744,7 @@ BUSY = re.compile(r"esc (?:to )?(?:interrupt|cancel)"
                   r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
-MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
+MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>●]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
 # opencode's modal draws key hints where the other TUIs write a question, so
 # WAITING saw nothing and the pane read "idle": no 🟠, no buttons, and drain()
 # free to type a queued prompt into an open dialog. The hints are chrome and
@@ -763,7 +767,7 @@ DIGIT_SGR = re.compile(r"(\x1b\[[0-9;]*m)(?=\d[.)])")
 # the border and the agent's own prose outside it, and prose numbers a plan:
 # "1. Core mechanic (wk 1)" is a MENU match and is not a choice anyone is being
 # offered. Where both are on screen, the box is the menu.
-BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
+BOXED = re.compile(r"^\s*[│┃]\s*[❯>●]?\s*\d[.)]\s+\S")
 
 # A highlighted option that is not numbered and not boxed. Claude Code's trust
 # prompt used to be a boxed numbered list and is now a bare pointed one:
@@ -17645,6 +17649,14 @@ def selfcheck():
               " ❯ 1. Yes", "   2. Yes, and don't ask again for gh commands", "   3. No"]
     assert pane_state(listed) == "waiting" and menu_digit(listed, YES_NO["!y"]) == "1"
     assert [d for d, _ in menu_items(listed)] == ["1", "2", "3"]
+    # Gemini CLI marks the chosen row of a boxed dialog with ●, and its folder
+    # trust dialog has no other sign: it read as unknown, with no buttons.
+    gem = [" ╭────────────────────────────────────────╮",
+           " │ Do you trust the files in this folder? │", " │                                        │",
+           " │ ● 1. Trust folder (app)                │", " │   2. Trust parent folder (code)        │",
+           " │   3. Don't trust                       │", " ╰────────────────────────────────────────╯"]
+    assert pane_state(gem) == "waiting" and [d for d, _ in menu_items(gem)] == ["1", "2", "3"]
+    assert menu_digit(gem, YES_NO["!n"]) == "3" and not menu_digit(gem, YES_NO["!y"])  # auto-yes never trusts
     assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
         == ["!1 o", "!2 o", "!3 o", "!esc o"]
     bsel, bkeyed = [0], []
