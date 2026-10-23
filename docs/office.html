@@ -701,9 +701,19 @@ async function send(topic, text) {
   setTimeout(poll, 700);
 }
 
+let polling = false, fails = 0;
 async function poll() {
+  // One request at a time, none while the tab is hidden, none that hangs for ever. A poll
+  // slower than the interval used to pile up behind itself, and every failure was
+  // swallowed, so a dead connection looked like a quiet night.
+  if (polling || document.hidden) return;
+  polling = true;
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 8000);
   try {
-    data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
+    const r = await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store', signal: ac.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    fails = 0;
     for (const [k, v] of Object.entries(data.looks || {})) LOOK[k] = Object.assign({}, look(k), v);
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
@@ -711,12 +721,18 @@ async function poll() {
     document.getElementById('srvs').innerHTML = sv.length > 1 ? sv.map(x =>
       '<span class="sdot" style="background:' + (x.ok ? '#3fb950' : '#f85149') + '"></span>' + esc(x.name)).join('') : '';
     const down = sv.filter(x => !x.ok);
-    document.getElementById('offline').innerHTML = down.length ? down.map(x =>
+    document.getElementById('offline').innerHTML = (data.stale ?
+      '⚠ nightmux is running older code than is on disk. Restart it to use the new version.<br>' : '') +
+      (down.length ? down.map(x =>
       '⚠ <b>' + esc(x.name) + '</b> is not answering — ' +
       (off.filter(r => r.server === x.name).map(r => esc(r.name.split(' · ')[0])).join(', ') || 'no topics') +
-      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '';
+      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '');
     render();
-  } catch (e) {}
+  } catch (e) {
+    if (++fails >= 2) document.getElementById('offline').textContent = "⚠ can't reach nightmux, retrying…";
+  }
+  clearTimeout(timer);
+  polling = false;
   document.getElementById('clock').textContent = hhmm();
 }
 
@@ -771,6 +787,7 @@ if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
+if (!DEMO && !REEL && !REPLAY) document.addEventListener('visibilitychange', poll);
 // The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
 // walk moves a pixel at a time instead of hopping two.
 let lastT = 0;

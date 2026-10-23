@@ -13,16 +13,28 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
 - `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
 - A dollar estimate, "at API list prices", in `!wrapped` and `nightmux wrapped`, from a built-in price table (Claude, GPT/Codex, Gemini; dated in the output). A model with no price is named and left out, never counted as free. `"prices": {"model": [input, output, cache read, cache write]}` in `~/.nightmux.json` adds or overrides a model.
+- Doctor checks (`!doctor`, `--doctor`, the setup panel): "office link opens" asks `office_url` itself and reports a 404, a 5xx or a refused connection with the fix; "service runs the code on disk" says when the service started before nightmux's own files last changed.
+- The daemon tells the center topic once when its own files changed on disk after it started (a `git checkout` or `pip install -U` that nobody restarted) and gives the restart command; `/office` shows the same warning. A deploy directory had been checked out six times over a week while the service kept running the first copy.
+- `android/keystore.sh`: makes the release key once and prints the two `gh secret set` commands. Without them every CI APK is signed with a throwaway key, and Android refuses to update an installed app over a differently signed one.
 
 ### Changed
 - The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
 - The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
+- `!office` asks the `office_url` before it sends the button. A link that answers 404 or 5xx, or refuses the connection (another service owns that address), gets the cause and a tailnet-only fix (`tailscale serve --bg --https=<port> <port>`, then `office_url` with that port) instead of a button that opens a blank page.
+- Peers are asked together, for the office, `/api/topics`, `/api/metrics`, `/api/servers` and fleet analysis, and a peer that just failed is not waited on again for 15 seconds (one background probe checks whether it is back, and its failure is logged once). One unreachable peer used to add its whole 3-second timeout to every poll, and the Android service polls every 15 seconds.
+- `agy -p /usage` and the opencode token scan no longer run on the request thread. They refresh in the background (agy at most every 5 minutes, failures included; opencode every 10) and the office shows the last reading. A slow or missing `agy` used to hold the daemon's lock for seconds on every poll.
+- Responses over 1 KB are gzipped when the client accepts it: the office poll goes from about 33 KB to 11 KB.
+- The office page keeps one request in flight, pauses while the tab is hidden, gives up after 8 seconds and says "can't reach nightmux, retrying…" after two failures. It used to swallow every error, which looked like a quiet night.
+- Android: the alert service backs off from 15 seconds to 2 minutes while the daemon does not answer; the notification, the widget and the app say "answers 404, pair again" or "wants a login" when the address responds but is not the dashboard, not "can't reach".
+- The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
 
 ### Fixed
 - "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.
 - Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
 - Dashboard-only first run: the browser that opened at start-up redeemed the pairing code the terminal QR carries, so the QR was dead by the time anyone scanned it. The browser now opens the dashboard without a code.
 - Dashboard-only first run: with the dashboard on 127.0.0.1 and no `tailscale serve` mapping, the terminal printed a QR for the machine's LAN address, which refuses connections. It now says how to reach the dashboard from a phone instead, and still prints the QR when there is a route to it.
+- A watcher that raised on every tick wrote the same line about 170 times in six minutes and told nobody. It logs when the reason changes (and every 150 ticks), and the session's topic is told once after a minute of it.
+- The office's usage block swallowed every error with a bare `except:`; failures of the opencode scan now reach the log.
 
 ## [1.4.0] — 2026-10-22
 

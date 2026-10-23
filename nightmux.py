@@ -20,6 +20,7 @@ import contextlib
 import difflib
 import hmac
 import glob
+import gzip
 import hashlib
 import html
 import ipaddress
@@ -3469,6 +3470,27 @@ def watch_one(cfg, state, lock, topic, sess, alive):
         idle_hint(cfg, state, topic, sess)
 
 
+_watch_errs = {}        # session -> (consecutive failed ticks, the last reason)
+WATCH_TOLD = 30         # failed ticks in a row before the topic is told: about a minute
+
+
+def watch_failed(cfg, topic, sess, why):
+    """watch_one raised. A tick is two seconds, so the same line used to land 172 times
+    in six minutes and bury the rest of the log: it is printed when the reason changes
+    and every 150 ticks after that. And the topic hears of it once, after a minute of
+    it, because a session nobody is watching looks exactly like an idle one."""
+    n, last = _watch_errs.get(sess, (0, None))
+    n, why = n + 1, why[:300]
+    _watch_errs[sess] = n, why
+    if why != last or n % 150 == 0:
+        print(f"watch {sess}: {why}" + (f" (still failing, {n} ticks)" if n > 1 else ""),
+              file=sys.stderr, flush=True)
+    if n == WATCH_TOLD:
+        send(cfg, topic, f"⚠️ nightmux has failed to watch {sess} for a minute straight: {why}\n"
+             "its queue, limit handling and done-notices may be stalled. It keeps trying; "
+             "if this lasts, restart nightmux and report it", mode="plain")
+
+
 def watcher(cfg, state, lock):
     pruned = 0.0
     bound = []
@@ -3503,20 +3525,22 @@ def watcher(cfg, state, lock):
                 with concurrent.futures.ThreadPoolExecutor(
                         max_workers=min(len(bound), 8)) as pool:
                     futures = {pool.submit(watch_one, cfg, state, lock,
-                                            topic, sess, alive): sess
+                                            topic, sess, alive): (topic, sess)
                                for topic, sess in bound}
                     for fut in concurrent.futures.as_completed(futures):
+                        topic, sess = futures[fut]
                         try:
                             fut.result()
+                            _watch_errs.pop(sess, None)
                         except Exception as e:
                             tb = traceback.extract_tb(e.__traceback__)[-1]
-                            print(f"watch {futures[fut]}: {e} "
-                                  f"({tb.name}:{tb.lineno})", file=sys.stderr)
+                            watch_failed(cfg, topic, sess, f"{e} ({tb.name}:{tb.lineno})")
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
             consult_tick(cfg, state)
             auto_update_tick(cfg)
+            stale_tick(cfg)
             failover_tick(cfg, state, lock)
             harvest_tick(cfg, state, lock)
             goal_tick(cfg, state)
@@ -3950,6 +3974,53 @@ def _auto_update(cfg):
     if news:   # nothing changed and nothing failed is not worth a message
         send(cfg, str(cfg.get("center_topic") or "0"),
              "🔄 agent auto-update\n" + update_report(news), mode="plain")
+
+
+SRC_FILES = ("nightmux.py", "nightmux_stop.py", "nightmux_notify.py", "nightmux_state.py")
+BOOT_AT = time.time()
+STALE_AFTER = 120       # an upgrade restarts itself within seconds: only a deploy nobody restarted lasts
+_stale = {"since": 0, "told": False}
+
+
+def code_newer_than(started):
+    """True when one of nightmux's own files was written after `started`: a git checkout
+    or pip install that no restart followed. Python reads its source once, so until the
+    restart none of it is running."""
+    for f in SRC_FILES:
+        try:
+            if os.stat(os.path.join(HERE, f)).st_mtime > started + 2:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def restart_hint():
+    return ("launchctl kickstart -k gui/$(id -u)/com.nightmux" if sys.platform == "darwin"
+            else "systemctl --user restart nightmux")
+
+
+def service_started():
+    """When the systemd service last started (epoch seconds), or None where that can't be told."""
+    mono = run("systemctl", "--user", "show", "-p", "ActiveEnterTimestampMonotonic",
+               "--value", "nightmux").strip()
+    return time.time() - (time.monotonic() - int(mono) / 1e6) if mono.isdigit() and int(mono) else None
+
+
+def stale_tick(cfg):
+    """Say once that the code on disk is not the code running. A checkout restarts
+    nothing: the daemon this was found in had run one week-old copy through six deploys,
+    so every fix since was on disk and nowhere else."""
+    if not code_newer_than(BOOT_AT):
+        _stale["since"] = 0
+        return
+    now = time.time()
+    _stale["since"] = _stale["since"] or now
+    topic = daemon_topic(cfg)
+    if topic and not _stale["told"] and now - _stale["since"] >= STALE_AFTER:
+        _stale["told"] = True
+        send(cfg, topic, "⚠️ nightmux's files changed on disk after this process started, so the "
+             f"new code is not running.\nrestart it: {restart_hint()}", mode="plain")
 
 
 def agent(cfg, key):
@@ -5389,6 +5460,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     '2. tailscale serve --bg 9090   (reachable from your tailnet only)\n'
                     '3. "office_url": "https://<this machine>.<tailnet>.ts.net/office", '
                     '!reload\nlocally it is already at http://127.0.0.1:<port>/office')
+        why = office_url_problem(url)
+        if why:
+            return f"🏢 {url} {why}, so the button would lead nowhere.\n" + office_fix(cfg, url)
         send(cfg, topic, "🏢 the office — every topic a room, every agent a desk",
              mode="plain", buttons=json.dumps(
                  {"inline_keyboard": [[{"text": "🏢 open office", "url": url}]]}))
@@ -7596,7 +7670,7 @@ def reel_tick(cfg, state, lock):
     if now - _reel["at"] >= REEL_EVERY:
         _reel["at"] = now
         with lock:
-            snap = office_snapshot(cfg, state)
+            snap = office_snapshot(cfg, state, usage=False)
         rec = [{"topic": r["topic"], "name": r["name"],
                 "d": [[d["agent"], d["state"], d["live"], d["queued"]] for d in r["desks"]]}
                for r in snap["rooms"]]
@@ -10953,7 +11027,7 @@ def replay_tick(cfg, state, now=None):
     _replay["tried"] = now
     rooms = [{"topic": r["topic"], "name": r["name"], "desks": [
         {k: d.get(k) for k in ("agent", "session", "live", "state", "queued")} for d in r["desks"]]}
-        for r in office_snapshot(cfg, state)["rooms"]]
+        for r in office_snapshot(cfg, state, usage=False)["rooms"]]
     sig = json.dumps(rooms, sort_keys=True)
     if sig == _replay["sig"] and now - _replay["at"] < REPLAY_EVERY:
         return
@@ -11011,7 +11085,7 @@ def look_cmd(cfg, arg):
         + " · the office picks it up on its next refresh"
 
 
-def office_snapshot(cfg, state):
+def office_snapshot(cfg, state, usage=True):
     """Every topic as a room, every agent on its bench as a desk.
 
     Read from what the watcher already captured this tick (st["scr"], the
@@ -11049,48 +11123,49 @@ def office_snapshot(cfg, state):
             desks.append(desk)
         rooms.append({"topic": topic, "name": names.get(topic) or cur, "desks": desks})
     
-    fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
-    
-    # Extract models and mocked limits for agy and opencode
-    usage = {k: (window(fresh, k) or {}).get("used_percentage") for k in ("five_hour", "seven_day")}
-    try:
-        import os
-        # agy
-        agy_set = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
-        if os.path.exists(agy_set):
-            with open(agy_set) as f:
-                usage["agy_model"] = json.load(f).get("model", "Unknown")
-        else: usage["agy_model"] = "Unknown"
-        
-        # opencode
-        oc_set = os.path.expanduser("~/.config/opencode/opencode.json")
-        if os.path.exists(oc_set):
-            with open(oc_set) as f:
-                usage["oc_model"] = json.load(f).get("model", "Unknown")
-        else: usage["oc_model"] = "Unknown"
-        
-        try:
-            agy_usage = agy_limits()
-            if agy_usage["at"]:
-                if "claude" in usage.get("agy_model", "").lower() or "gpt" in usage.get("agy_model", "").lower():
-                    usage["agy_limit"] = agy_usage["claude_pct"]
-                else:
-                    usage["agy_limit"] = agy_usage["pct"]
-            else:
-                usage["agy_limit"] = 0
-            
-            ch = analyze_chats(1).get("agents", {})
-            o = ch.get("opencode", {}).get("tokens", {})
-            o_tot = sum(o.values()) if isinstance(o, dict) else 0
-            usage["oc_limit"] = min(100, (o_tot / 2_000_000) * 100) if o_tot else 0
-        except Exception:
-            usage["agy_limit"] = 0
-            usage["oc_limit"] = 0
-    except:
-        pass
+    out = {"rooms": rooms, "installed": installed_agents(cfg), "now": now,
+           "looks": cfg.get("looks") or {}}
+    if usage:
+        fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
+        out["usage"] = {k: (window(fresh, k) or {}).get("used_percentage")
+                        for k in ("five_hour", "seven_day")}
+        out["usage"].update(office_extras())
+    return out
 
-    return {"rooms": rooms, "installed": installed_agents(cfg), "now": now, "looks": cfg.get("looks") or {},
-            "usage": usage}
+
+def _model_of(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return json.load(f).get("model") or "Unknown"
+    except (OSError, ValueError, AttributeError):
+        return "Unknown"
+
+
+_oc = {"tried": 0, "tok": 0}
+
+
+def _oc_tokens():
+    try:
+        o = analyze_chats(1).get("agents", {}).get("opencode", {}).get("tokens", {})
+        _oc["tok"] = sum(o.values()) if isinstance(o, dict) else 0
+    except Exception as e:          # a thread: nobody else will ever see this
+        print(f"office: opencode tokens: {e}", file=sys.stderr, flush=True)
+
+
+def office_extras():
+    """agy's and opencode's bars on the office page. Neither is read on the caller's
+    thread: `agy -p /usage` and the chat scan take seconds and the office is asked
+    while the daemon's lock is held, so each refreshes on its own thread and the page
+    gets the last reading (0 until the first one lands)."""
+    if time.time() - _oc["tried"] >= 600:
+        _oc["tried"] = time.time()
+        threading.Thread(target=_oc_tokens, daemon=True).start()
+    agy_model, a = _model_of("~/.gemini/antigravity-cli/settings.json"), agy_limits()
+    return {"agy_model": agy_model, "oc_model": _model_of("~/.config/opencode/opencode.json"),
+            "agy_limit": (a["claude_pct"] if re.search("claude|gpt", agy_model, re.I)
+                          else a["pct"]) if a["at"] else 0,
+            # ponytail: opencode publishes no cap; 2M tokens in a day is this bar's full scale
+            "oc_limit": min(100, _oc["tok"] / 20_000)}
 
 
 
@@ -11991,7 +12066,9 @@ def chat_tips(stats):
                 tips.append((a, f"each call carries {avg / 1000:.0f}k tokens of context "
                              f"({s['big_ctx']} calls over 150k): /clear between unrelated "
                              "tasks, /compact sooner, keep CLAUDE.md/AGENTS.md lean, name the "
-                             "files instead of letting it read the tree"))
+                             "files instead of letting it read the tree"
+                             + ("; !autocompact 150k also makes Claude compact itself mid-turn "
+                                "near 120k instead of 170k" if a == "claude" else "")))
         if s["prompts"] >= 10:
             nud = s["nudges"] / s["prompts"]
             if nud > 0.2:
@@ -12031,24 +12108,32 @@ def chat_tips(stats):
     return tips
 
 
-_agy_usage = {"at": 0, "pct": 0, "claude_pct": 0}
+_agy_usage = {"at": 0, "tried": 0, "pct": 0, "claude_pct": 0}
+
 
 def agy_limits():
-    import subprocess, time, re
-    if time.time() - _agy_usage["at"] < 300:
-        return _agy_usage
-    try:
-        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
-        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        if m_gem:
-            _agy_usage["pct"] = 100 - int(m_gem.group(1))
-        if m_cla:
-            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
-        _agy_usage["at"] = time.time()
-    except Exception:
-        pass
+    """agy's last /usage reading. Never waits for agy: the office and /api/metrics ask
+    while holding the daemon's lock and `agy -p` takes seconds. A reading older than
+    five minutes is refreshed on a thread, and a failed one is not retried sooner."""
+    if time.time() - _agy_usage["tried"] >= 300:
+        _agy_usage["tried"] = time.time()
+        threading.Thread(target=_agy_read, daemon=True).start()
     return _agy_usage
+
+
+def _agy_read():
+    try:
+        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return
+    m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+    m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+    if m_gem:
+        _agy_usage["pct"] = 100 - int(m_gem.group(1))
+    if m_cla:
+        _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
+    _agy_usage["at"] = time.time()
 
 
 # Unified Agent Adapter Table: launch command, screen-state detector,
@@ -12194,9 +12279,8 @@ def fleet(cfg, path, local, timeout=60):
     names = sorted(cfg.get("peers") or {})
     if not names:
         return [(host_name(cfg), local)]
-    with concurrent.futures.ThreadPoolExecutor(len(names)) as ex:
-        got = list(zip(names, ex.map(lambda n: peer_call(cfg, n, path, timeout=timeout), names)))
-    return [(host_name(cfg), local)] + [(n, r) for n, r in got if isinstance(r, dict)]
+    got = peers_ask(cfg, path, timeout)
+    return [(host_name(cfg), local)] + [(n, r) for n, r in got.items() if isinstance(r, dict)]
 
 
 def fleet_analysis(cfg, days):
@@ -14407,9 +14491,19 @@ async function send(topic, text) {
   setTimeout(poll, 700);
 }
 
+let polling = false, fails = 0;
 async function poll() {
+  // One request at a time, none while the tab is hidden, none that hangs for ever. A poll
+  // slower than the interval used to pile up behind itself, and every failure was
+  // swallowed, so a dead connection looked like a quiet night.
+  if (polling || document.hidden) return;
+  polling = true;
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 8000);
   try {
-    data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
+    const r = await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store', signal: ac.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    fails = 0;
     for (const [k, v] of Object.entries(data.looks || {})) LOOK[k] = Object.assign({}, look(k), v);
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
@@ -14417,12 +14511,18 @@ async function poll() {
     document.getElementById('srvs').innerHTML = sv.length > 1 ? sv.map(x =>
       '<span class="sdot" style="background:' + (x.ok ? '#3fb950' : '#f85149') + '"></span>' + esc(x.name)).join('') : '';
     const down = sv.filter(x => !x.ok);
-    document.getElementById('offline').innerHTML = down.length ? down.map(x =>
+    document.getElementById('offline').innerHTML = (data.stale ?
+      '⚠ nightmux is running older code than is on disk. Restart it to use the new version.<br>' : '') +
+      (down.length ? down.map(x =>
       '⚠ <b>' + esc(x.name) + '</b> is not answering — ' +
       (off.filter(r => r.server === x.name).map(r => esc(r.name.split(' · ')[0])).join(', ') || 'no topics') +
-      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '';
+      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '');
     render();
-  } catch (e) {}
+  } catch (e) {
+    if (++fails >= 2) document.getElementById('offline').textContent = "⚠ can't reach nightmux, retrying…";
+  }
+  clearTimeout(timer);
+  polling = false;
   document.getElementById('clock').textContent = hhmm();
 }
 
@@ -14477,6 +14577,7 @@ if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
+if (!DEMO && !REEL && !REPLAY) document.addEventListener('visibilitychange', poll);
 // The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
 // walk moves a pixel at a time instead of hopping two.
 let lastT = 0;
@@ -14617,7 +14718,8 @@ def peer_call(cfg, name, path, body=None, timeout=10):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
     except (OSError, ValueError) as e:
-        print(f"peer {name} /{path}: {e}", file=sys.stderr, flush=True)
+        if name not in _peer_down:        # logged once, when it went down
+            print(f"peer {name} /{path}: {e}", file=sys.stderr, flush=True)
         return None
     try:
         return json.loads(raw)
@@ -14625,11 +14727,43 @@ def peer_call(cfg, name, path, body=None, timeout=10):
         return raw
 
 
-def with_peers(cfg, path, data):
-    """Fold every peer's answer for the same route into this machine's.
+_peer_down = {}         # peer -> when it last failed (a time ahead while a probe is out)
+PEER_DOWN_FOR = 15
 
-    # ponytail: peers asked one after another, 3s each; parallel if anyone runs many.
+
+def peers_ask(cfg, path, timeout=3):
+    """{peer: its answer, or None when it is down}, every peer asked at once.
+
+    A peer that just failed is not waited on again: it answers None at once and, when
+    PEER_DOWN_FOR has passed, one background probe finds out whether it is back. A
+    dead peer used to put its whole timeout on every poll of the office and the
+    dashboard (the Android service polls every 15 s: on every one of its polls) and a
+    line in the log with it.
     """
+    def ask(name):
+        got = peer_call(cfg, name, path, timeout=timeout)
+        if got is None:
+            _peer_down[name] = time.time()
+        elif _peer_down.pop(name, None):
+            print(f"peer {name} is back", file=sys.stderr, flush=True)
+        return got
+
+    names, out, now = sorted(cfg.get("peers") or {}), {}, time.time()
+    for n in names:
+        if n in _peer_down:
+            out[n] = None
+            if now - _peer_down[n] >= PEER_DOWN_FOR:
+                _peer_down[n] = now + timeout        # no second probe while this one is out
+                threading.Thread(target=ask, args=(n,), daemon=True).start()
+    live = [n for n in names if n not in out]
+    if live:
+        with concurrent.futures.ThreadPoolExecutor(len(live)) as ex:
+            out.update(zip(live, ex.map(ask, live)))
+    return {n: out[n] for n in names}
+
+
+def with_peers(cfg, path, data):
+    """Fold every peer's answer for the same route into this machine's."""
     if not cfg.get("peers"):
         return data
     rows = data["rooms"] if isinstance(data, dict) else data
@@ -14637,8 +14771,7 @@ def with_peers(cfg, path, data):
         r["server"] = host_name(cfg)
     seen = [{"name": host_name(cfg), "ok": True}]
     names = cfg.get("topic_names") or {}
-    for name in sorted(cfg["peers"]):
-        got = peer_call(cfg, name, path.lstrip("/"), timeout=3)
+    for name, got in peers_ask(cfg, path.lstrip("/")).items():
         seen.append({"name": name, "ok": got is not None})
         if got is None:
             # Down is not gone: its topics still show, marked, instead of
@@ -14668,6 +14801,33 @@ def with_peers(cfg, path, data):
 # config as a peer and installs the service. Nobody edits JSON on either side.
 JOIN_FOR, PEER_PORT = 1800, 9091
 _joins = {}       # token -> expiry
+
+
+def office_url_problem(url):
+    """Why the office link will not open, or None. Only a definite answer counts: a
+    timeout or a name that does not resolve may be this machine's network, not the link."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        urllib.request.urlopen(url, timeout=4).close()
+    except urllib.error.HTTPError as e:
+        return None if e.code in (401, 403) else f"answers HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return "refuses the connection" if isinstance(e.reason, ConnectionRefusedError) else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def office_fix(cfg, url):
+    """What to do when the office link leads somewhere else. Usually the tailnet name's
+    port 443 already belongs to another service, and routing /office through a Funnel
+    would put the dashboard on the internet: a port of its own is tailnet only."""
+    port = cfg.get("webhook_port") or 9090
+    host = urllib.parse.urlsplit(url).hostname or "<this machine>.<tailnet>.ts.net"
+    return (f"give nightmux a port of its own, reachable from your tailnet only:\n"
+            f"  tailscale serve --bg --https={port} {port}\n"
+            f'then "office_url": "https://{host}:{port}/office" in the config and !reload')
 
 
 def public_base(cfg):
@@ -15541,8 +15701,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def reply(self, body, ctype):
         body = body.encode("utf-8")
+        gz = len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if gz:                  # the office page's 33 KB poll is 11 KB this way, the replay 556 KB far less
+            body = gzip.compress(body, 5)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -15727,8 +15893,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 lim = agent_limits(cfg, self.server.state)
             out = {"name": host_name(cfg), "server": server_metrics(), "limits": lim}
             if not self.peer:
-                out["peers"] = {n: peer_call(cfg, n, "api/metrics", timeout=3)
-                                for n in sorted(cfg.get("peers") or {})}
+                out["peers"] = peers_ask(cfg, "api/metrics")
             return self.reply(json.dumps(out), "application/json")
         if self.path.startswith("/api/analysis"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -15813,8 +15978,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             rows = [{"name": host_name(cfg), "me": True, "ok": True, "version": VERSION,
                      "agents": installed_agents(cfg),
                      "topics": sum(1 for t in cfg.get("topics", {}) if not peer_of(cfg, t))}]
+            asked = peers_ask(cfg, "api/agents")
             for n, p_ in sorted((cfg.get("peers") or {}).items()):
-                got = peer_call(cfg, n, "api/agents", timeout=3)
+                got = asked[n]
                 rows.append({"name": n, "me": False, "ok": isinstance(got, dict), "url": p_["url"],
                              "version": (got or {}).get("version") if isinstance(got, dict) else None,
                              "agents": (got or {}).get("installed") if isinstance(got, dict) else [],
@@ -15840,6 +16006,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
                         else office_snapshot)(self.server.cfg, self.server.state)
+            if self.path == "/api/office":
+                data["stale"] = code_newer_than(BOOT_AT)
             if not self.peer:
                 data = with_peers(self.server.cfg, self.path, data)
             return self.reply(json.dumps(data), "application/json")
@@ -16917,10 +17085,12 @@ def stubbed(**globs):
     """
     old = {k: globals()[k] for k in globs}
     globals().update(globs)
+    _peer_down.clear()
     try:
         yield
     finally:
         globals().update(old)
+        _peer_down.clear()
 
 
 def selfcheck():
@@ -18157,10 +18327,156 @@ def selfcheck():
         states = {d["agent"]: d["state"] for d in office_snapshot(ocfg, ostate)["rooms"][0]["desks"]}
         assert states == {"claude": "busy", "codex": "gone", "agy": "gone"}, states
     osent = []
-    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons)):
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons),
+                 office_url_problem=lambda u: None):
         assert "tailscale serve" in handle(dict(ocfg), {}, threading.Lock(), "5", "!office")
         handle(dict(ocfg, office_url="https://box.ts.net/office"), {}, threading.Lock(), "5", "!office")
         assert "https://box.ts.net/office" in osent[-1], osent
+    # A link that answers 404 (another service owns the address) gets the fix, not a button to nowhere.
+    osent.clear()
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons),
+                 office_url_problem=lambda u: "answers HTTP 404"):
+        fix_ = handle(dict(ocfg, office_url="https://box.ts.net/office", webhook_port=9090),
+                      {}, threading.Lock(), "5", "!office")
+    assert not osent and "answers HTTP 404" in fix_ and "tailscale serve --bg --https=9090 9090" in fix_ \
+        and '"office_url": "https://box.ts.net:9090/office"' in fix_, (osent, fix_)
+    # ...found by asking the link itself: 404 and 5xx and a refused connection are answers; 401/403
+    # (a login wall), a timeout or a name that does not resolve are not reasons to say it is broken.
+    import io
+    class Site_(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response({"/office": 200, "/gone": 404, "/auth": 403}.get(self.path, 502))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        def log_message(self, *a):
+            pass
+    site_ = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site_)
+    threading.Thread(target=site_.serve_forever, daemon=True).start()
+    base_ = f"http://127.0.0.1:{site_.server_address[1]}"
+    assert office_url_problem(base_ + "/office") is None and office_url_problem(base_ + "/auth") is None
+    assert office_url_problem(base_ + "/gone") == "answers HTTP 404"
+    assert office_url_problem(base_ + "/other") == "answers HTTP 502"
+    site_.shutdown()
+    site_.server_close()                                      # shutdown() stops serving; only closing the socket refuses
+    assert office_url_problem(base_ + "/office") == "refuses the connection"
+    assert office_url_problem("ftp://x/office") is None and office_url_problem("not a url") is None
+    # The office must not wait on what it only reads. `agy -p /usage` takes seconds and the page is
+    # asked while the daemon's lock is held: it is read on a thread, a failing agy is asked once per
+    # five minutes rather than per poll, and the ticks that only want rooms skip the usage bars.
+    real_sub_ = subprocess
+
+    class AgySub_:
+        def __init__(self, agy):
+            self.agy, self.calls = agy, 0
+        def __getattr__(self, k):
+            return getattr(real_sub_, k)
+        def run(self, argv, **kw):
+            if argv[0] != "agy":
+                return real_sub_.run(argv, **kw)
+            self.calls += 1
+            return self.agy()
+
+    def slow_agy_():
+        time.sleep(.6)
+        return type("R", (), {"stdout": "Gemini Models   Five Hour Limit Remaining   60%\n"
+                                        "Claude and GPT models  Five Hour Limit Remaining  25%\n"})()
+
+    def no_agy_():
+        raise FileNotFoundError("agy")
+    slow_ = AgySub_(slow_agy_)
+    _agy_usage.update(at=0, tried=0, pct=0, claude_pct=0)
+    _oc.update(tried=0, tok=0)
+    with stubbed(subprocess=slow_, live_sessions=lambda: {}):
+        t_ = time.time()
+        usage_ = office_snapshot(ocfg, ostate)["usage"]
+        assert time.time() - t_ < .5, "the office waited for agy"
+        assert {"five_hour", "seven_day", "agy_model", "oc_model", "agy_limit", "oc_limit"} <= set(usage_), usage_
+        assert "usage" not in office_snapshot(ocfg, ostate, usage=False)
+        time.sleep(1)
+        assert (_agy_usage["pct"], _agy_usage["claude_pct"], slow_.calls) == (40, 75, 1), (_agy_usage, slow_.calls)
+        office_snapshot(ocfg, ostate)
+        assert slow_.calls == 1                               # a fresh reading is not asked for again
+    broken_ = AgySub_(no_agy_)
+    _agy_usage.update(at=0, tried=0)
+    with stubbed(subprocess=broken_):
+        for _ in range(5):
+            agy_limits()
+        time.sleep(.3)
+        assert broken_.calls == 1, broken_.calls
+    _agy_usage.update(at=0, tried=time.time(), pct=0, claude_pct=0)   # nothing below needs the real agy
+    # Peers are asked together, and one that just failed is not waited on again: a dead peer used to
+    # put its whole timeout on every poll of the office and the dashboard, and a line in the log.
+    quick_ = []
+
+    def far_(c, n, p, b=None, timeout=10):
+        time.sleep(0 if n == "c" and quick_ else .4)          # the good peer is slow once, to prove they run together
+        return None if n in ("a", "b") else {"rooms": [{"topic": "9", "name": "far", "desks": []}]}
+    pcfg_ = {"peers": {n_: {"url": "http://x", "secret": "s"} for n_ in "abc"}}
+    with stubbed(peer_call=far_):
+        t_ = time.time()
+        got_ = peers_ask(pcfg_, "api/office")
+        assert got_["a"] is None and got_["b"] is None and got_["c"]["rooms"], got_
+        assert time.time() - t_ < .75, "peers are asked one after another"          # 1.2 s in turn
+        quick_.append(1)
+        t_ = time.time()
+        assert peers_ask(pcfg_, "api/office")["a"] is None and time.time() - t_ < .2
+        for n_ in "ab":                                       # the quiet period is over: one probe, no waiting
+            _peer_down[n_] = time.time() - PEER_DOWN_FOR - 1
+        t_ = time.time()
+        peers_ask(pcfg_, "api/office")
+        assert time.time() - t_ < .2 and all(_peer_down[n_] > time.time() for n_ in "ab"), _peer_down
+        time.sleep(.6)                                        # the probes fail: down again, from now
+        assert all(_peer_down[n_] <= time.time() for n_ in "ab"), _peer_down
+    # gzip: only when the client asks and the body is worth it; Content-Length is the compressed size.
+    class GzH_:
+        def __init__(self, enc):
+            self.headers = {"Accept-Encoding": enc} if enc else {}
+            self.h, self.wfile = {}, io.BytesIO()
+        def send_response(self, c):
+            pass
+        def send_header(self, k, v):
+            self.h[k] = v
+        def end_headers(self):
+            pass
+    big_ = json.dumps({"x": "abc" * 2000})
+    gh_ = GzH_("gzip, deflate")
+    WebhookHandler.reply(gh_, big_, "application/json")
+    raw_ = gh_.wfile.getvalue()
+    assert gh_.h["Content-Encoding"] == "gzip" and int(gh_.h["Content-Length"]) == len(raw_) < len(big_) / 4
+    assert gzip.decompress(raw_).decode() == big_
+    gh_ = GzH_(None)
+    WebhookHandler.reply(gh_, big_, "application/json")
+    assert "Content-Encoding" not in gh_.h and gh_.wfile.getvalue().decode() == big_
+    gh_ = GzH_("gzip")
+    WebhookHandler.reply(gh_, "{}", "application/json")
+    assert "Content-Encoding" not in gh_.h and gh_.wfile.getvalue() == b"{}"
+    # A deploy nobody restarted: told once, after it has lasted; not for the seconds an upgrade restarts in.
+    stale_sent_ = []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: stale_sent_.append((t, x)),
+                 BOOT_AT=time.time() + 3600):
+        assert not code_newer_than(BOOT_AT) and code_newer_than(0)
+        stale_tick({"topics": {"3": "s"}})
+        assert _stale["since"] == 0 and not stale_sent_
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: stale_sent_.append((t, x)),
+                 BOOT_AT=0):
+        _stale.update(since=0, told=False)
+        stale_tick({"topics": {"3": "s"}})
+        assert not stale_sent_                                # just noticed
+        _stale["since"] = time.time() - STALE_AFTER - 1
+        stale_tick({"topics": {"3": "s"}})
+        stale_tick({"topics": {"3": "s"}})
+        assert len(stale_sent_) == 1 and stale_sent_[0][0] == "3" and restart_hint() in stale_sent_[0][1], stale_sent_
+    _stale.update(since=0, told=False)
+    # A watcher that raises every tick: a few log lines for 400 ticks, and its topic told once.
+    wf_sent_, wf_err_ = [], io.StringIO()
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: wf_sent_.append((t, x))), \
+            contextlib.redirect_stderr(wf_err_):
+        _watch_errs.clear()
+        for _ in range(400):
+            watch_failed({}, "3", "sess", "KeyError: 'x' (f:1)")
+    _watch_errs.clear()
+    assert len([l for l in wf_err_.getvalue().splitlines() if l]) <= 4, wf_err_.getvalue()
+    assert len(wf_sent_) == 1 and wf_sent_[0][0] == "3" and "sess" in wf_sent_[0][1], wf_sent_
     # Dashboard extras: host metrics, limits per agent, and the chat analysis —
     # which must report counts and never a prompt.
     m_ = server_metrics()
@@ -18378,7 +18694,7 @@ def selfcheck():
     old_rp_ = dict(_replay)
     snap_ = [{"rooms": [{"topic": "1", "name": "api", "desks": [{"agent": "claude", "session": "api",
               "live": True, "state": "busy", "queued": 0, "screen": ["SECRET"]}]}]}]
-    with tempfile.TemporaryDirectory() as rd_, stubbed(STATE_DIR=rd_, office_snapshot=lambda c, s: snap_[0]):
+    with tempfile.TemporaryDirectory() as rd_, stubbed(STATE_DIR=rd_, office_snapshot=lambda c, s, usage=True: snap_[0]):
         _replay.update(frames=None, sig=None, at=0, tried=0, file_n=0)
         t0_ = time.time() - 3000
         replay_tick({}, {}, t0_)
@@ -18796,7 +19112,7 @@ def selfcheck():
         assert '"prompts_30d": 4' in lb_ and "would add" in lb_, lb_
     pcfg_ = {"public": {"token": "abc"}}
     assert public_ok(pcfg_, "abc") and not public_ok(pcfg_, "abd") and not public_ok({}, "")
-    with stubbed(office_snapshot=lambda c, s: {"rooms": [{"topic": "1", "name": "x", "desks": [
+    with stubbed(office_snapshot=lambda c, s, usage=True: {"rooms": [{"topic": "1", "name": "x", "desks": [
             {"agent": "claude", "state": "busy", "screen": ["secret"], "doing": "d"}]}], "usage": {}}):
         ps_ = public_snapshot(pcfg_, {})
         assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
@@ -21445,6 +21761,10 @@ def setup_checks(cfg=None):
     add("dashboard reachable from your phone", served or None,
         "" if served else (f"tailscale serve --bg {port}" if port else
                            'set "webhook_port": 9090, restart, then: tailscale serve --bg 9090'))
+    if cfg.get("office_url"):
+        why = office_url_problem(cfg["office_url"])
+        add("office link opens", why is None,
+            f"{cfg['office_url']} {why}: " + office_fix(cfg, cfg["office_url"]).replace("\n", " ") if why else "")
     try:                                                # optional: None, never ✗
         gh_ok = subprocess.run(["gh", "auth", "status"], capture_output=True,
                                timeout=20).returncode == 0 or None
@@ -21467,6 +21787,11 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
+    started = service_started() if active else None
+    if started:
+        newer = code_newer_than(started)
+        add("service runs the code on disk", not newer,
+            f"nightmux's files changed after it started: {restart_hint()}" if newer else "")
     drift = reader_drift()
     for a, why in drift:
         add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "

@@ -10,6 +10,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -32,6 +33,16 @@ final class Office {
         } finally {
             c.disconnect();
         }
+    }
+
+    /** What a failed fetch means for the person: a wrong address and an unreachable one need different fixes. */
+    static String problem(String base, Exception e) {
+        String m = String.valueOf(e.getMessage());
+        if (e instanceof FileNotFoundException || m.contains("response code: 404"))
+            return base + " answers 404: not the nightmux address. Pair this phone again";
+        if (m.contains("response code: 401") || m.contains("response code: 403"))
+            return base + " wants a login. Pair this phone again";
+        return "can't reach " + base;
     }
 
     /** Same request the office page makes when a button is tapped. */
