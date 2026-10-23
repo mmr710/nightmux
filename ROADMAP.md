@@ -11,13 +11,13 @@ Everything released so far is in the [changelog](CHANGELOG.md).
 - A Claude Code plugin: `/nightmux:wrapped` and `/nightmux:handoff` from inside Claude Code.
 - `nightmux up`: a first run with the dashboard alone, no Telegram bot.
 - `!budget $20`: a budget in dollars at API list prices, next to the one in tokens.
+- `!stopall`: interrupts every agent at once and holds everything until you lift it.
 - Safer dashboard pairing, an office that stays up when a peer is down, and `--doctor` checks for a dead office link or a service still running old code.
 
 ## Next
 
 1. **Code that is easy to read and change.** Split `nightmux.py` into modules and generate the single file from them, so installs do not change; move the self-check into `tests/`; add ruff, coverage and a macOS CI run.
 2. **Agent compatibility table.** Every night the drift guard starts the newest Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode and Aider and records how nightmux reads each first screen (`tests/live_agents.py`); its first run found Gemini CLI's folder trust dialog unread. Next: that table in the README, kept current by the job, and the screens after the first one.
-3. **Rails for unattended nights.** One command that stops every session at once.
 
 ## Later
 

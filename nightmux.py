@@ -1811,7 +1811,7 @@ def failover_tick(cfg, state, lock):
     for topic, sess in list(cfg.get("topics", {}).items()):
         st = state.get(sess) or {}
         if (st.get("limit_until", 0) > time.time() and st.get("queue")
-                and not st.get("failed_over")):
+                and not st.get("failed_over") and not st.get("stop_hold")):
             st["failed_over"] = True     # once per hold, whatever the outcome
             sav_add("failovers")
             send(cfg, topic, "⏭ auto-failover\n" + failover(cfg, state, lock, topic, key),
@@ -1992,7 +1992,7 @@ def harvest_tick(cfg, state, lock):
         sess = (cfg.get("topics") or {}).get(str(topic))
         st = state.get(sess) or {}
         if (not sess or st.get("mode") != "idle" or st.get("queue") or st.get("shift")
-                or st.get("limit_until", 0) > now
+                or st.get("limit_until", 0) > now or st.get("stop_hold")
                 or now - st.get("changed", 0) < HARVEST_IDLE):
             continue
         with lock:
@@ -2522,7 +2522,8 @@ def digest_report(cfg, state, topic, sess, since):
     t = token_tally([path] if path else [])
     spend = (f"~{int(sum(t[k] * w for k, w in WEIGHT.items())):,} tok, {t['turns']} turns"
              if t["turns"] else "no usage yet")
-    mode = "held" if st.get("limit_until", 0) > time.time() else st.get("mode", "?")
+    mode = ("stopped" if st.get("stop_hold") else
+            "held" if st.get("limit_until", 0) > time.time() else st.get("mode", "?"))
     ctx = f" · ctx {snap['ctx_pct']:.0f}%" if snap.get("ctx_pct") is not None else ""
     ask = (f"\n🟠 waiting: {st['asked'].splitlines()[0][:60]}"
            if mode == "waiting" and st.get("asked") else "")
@@ -2671,7 +2672,7 @@ def autocompact(cfg, state, topic, sess):
         for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
             st.pop(k, None)
         return
-    if st.get("mode") not in ("idle", "unknown") or st.get("queue"):
+    if st.get("mode") not in ("idle", "unknown") or st.get("queue") or st.get("stop_hold"):
         return
     if st.get("compacted"):
         # The keystrokes can be eaten -- a menu open, a turn starting on the same
@@ -2755,7 +2756,7 @@ def queue_blob(state):
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
         held = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                   "shift_total", "budget_hold") if st.get(k)}
+                                   "shift_total", "budget_hold", "stop_hold") if st.get(k)}
         if held.get("limit_until", 0) < time.time():
             held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
@@ -2794,7 +2795,7 @@ def load_queue(state):
         state.setdefault(sess, {}).update(held)
     _queued[0] = blob
     return {s: h for s, h in blob.items()
-            if h.get("queue") or h.get("sched") or h.get("shift")}
+            if h.get("queue") or h.get("sched") or h.get("shift") or h.get("stop_hold")}
 
 
 def drain(cfg, state, topic, sess):
@@ -2842,7 +2843,8 @@ def drain(cfg, state, topic, sess):
             st["resumed"] = True
         else:
             st["resumed"] = True     # the send below says "resumed", not "sending"
-    open_window = st.get("mode") == "idle" and time.time() >= st.get("limit_until", 0)
+    open_window = (st.get("mode") == "idle" and time.time() >= st.get("limit_until", 0)
+                   and not st.get("stop_hold"))
     q = st.get("queue")
     if q and open_window:
         held = st.pop("resumed", None)
@@ -3381,7 +3383,7 @@ def watchdog(cfg, state, topic, sess, alive):
         # cache of the old pane. Dropping them here deleted them from disk too,
         # on the next save, in the one case they exist to survive.
         state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                          "shift_total", "budget_hold") if st.get(k)}
+                                          "shift_total", "budget_hold", "stop_hold") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     if alive:
         st = state.setdefault(sess, {})          # the branch above rebinds it
@@ -4684,7 +4686,7 @@ def autoyes(cfg, state, topic, sess):
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
     st = state.get(sess) or {}
-    if not keys:
+    if not keys or st.get("stop_hold"):     # a stopped fleet approves nothing
         return
     ak = agent_key(cfg, topic, sess)
     if ak not in keys and "on" not in keys and "all" not in keys:
@@ -5062,7 +5064,8 @@ def status_report(cfg, state):
         # and nothing said so — it took a script to notice two topics were.
         tag += "" if snap else " [no status line]"
         q = len(st.get("queue") or [])
-        held = f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else ""
+        held = ("  🛑stopped" if st.get("stop_hold") else
+                f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else "")
         rows.append(f"{icon} {sess:<14} topic {topic}  {mode}  {age}s quiet{tag}"
                     + (f"  📥{q}" if q else "") + held + usage_line(cfg, snap))
     seen, dupes = set(), set()
@@ -5081,7 +5084,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover", "!cron",
               "!failover", "!voice",
@@ -5220,6 +5223,7 @@ HELP = [
         "!route auto|off|stats = send each task to the agent that fits it, "
         "learned from results",
         "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
+        "!stopall [off] = interrupt every agent and hold every queue, shift, goal and schedule until !stopall off",
         "!center [off] = this topic watches every session · !board = all at a glance",
         "!companion [agent] = a persona over every project: keeps its own memory, hands "
         "work to role agents, acts alone only where a !budget is set",
@@ -5685,6 +5689,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return board_report(cfg, state)
     if cmd == "!all":
         return broadcast(cfg, state, topic, arg)
+    if cmd == "!stopall":
+        return stop_all(cfg, state, arg)
     if cmd == "!digest" and str(topic) == str(cfg.get("center_topic") or ""):
         if arg:
             return "!digest here is report-only — schedule it from each session's own topic"
@@ -5952,6 +5958,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return f"dropped {len(q)} queued prompt(s)"
         if arg == "now":  # send it anyway, limit or not
             st.pop("limit_until", None)
+            st.pop("stop_hold", None)
             save_queue(state)
             return f"limit hold released, {len(q)} queued prompt(s) resume on idle"
         head = "\n".join(f"{i + 1}. {p.splitlines()[0][:70]}" for i, p in enumerate(q))
@@ -10809,7 +10816,7 @@ def goal_tick(cfg, state):
         # Not while it is busy, held, or has more of your prompts to get through:
         # the check is for the work as you left it, not half of it.
         if (topic in _goal_run or st.get("queue") or st.get("mode") != "idle"
-                or st.get("limit_until", 0) > now):
+                or st.get("limit_until", 0) > now or st.get("stop_hold")):
             continue
         _goal_due.pop(topic, None)
         run = _goal_run[topic] = {"sess": sess}
@@ -10899,6 +10906,10 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
     _loop.pop(topic, None)   # ...and whatever looked like a loop was before you
     if topic in _pair:
         _pair[topic]["rounds"] = 0
+    if st.get("stop_hold"):
+        st.setdefault("queue", []).append(text)
+        save_queue(state)
+        return f"📥 queued ({len(st['queue'])}) · everything is stopped\n!stopall off to go again"
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -10986,6 +10997,32 @@ def broadcast(cfg, state, topic, arg):
         if reply:
             send(cfg, t, reply, mode="plain")
     return None
+
+
+def stop_all(cfg, state, arg):
+    """!stopall: the brake for a night gone wrong. Every agent of every topic has
+    its turn interrupted, as the spend cap interrupts one, and nothing starts
+    again until !stopall off: prompts, shifts and schedules queue, goal loops,
+    failover, auto-yes and autocompact wait. A flag of its own, not a
+    limit_until: a usage window that resets must not lift it."""
+    if arg.strip().lower() == "off":
+        lifted = [s for s, o in list(state.items()) if o.pop("stop_hold", None)]
+        save_queue(state)
+        return (f"▶️ {len(lifted)} session(s) go again · queues resume on idle" if lifted
+                else "nothing was stopped")
+    if arg.strip():
+        return "usage: !stopall [off]"
+    hit = []
+    for s in sorted({s for t, m in cfg.get("topics", {}).items()
+                     for s in set(bench_of(cfg, t).values()) | {m}}):
+        state.setdefault(s, {})["stop_hold"] = True
+        if has_session(s) and pane_state(visible(s)) in ("busy", "waiting"):
+            tmux("send-keys", "-t", tgt(s), "C-c")
+            s += " (interrupted)"
+        hit.append(s)
+    save_queue(state)
+    return (f"🛑 stopped {len(hit)}: {', '.join(hit)}\nprompts, shifts and schedules queue; "
+            "goals, failover and auto-yes wait · !stopall off to go again" if hit else "no session to stop")
 
 
 def board_report(cfg, state):
@@ -20695,6 +20732,26 @@ def selfcheck():
             assert len(sav_data()["spent"]["b"]) == 1, sav_data()["spent"]
     finally:
         _sav.update(old_sav_)
+    # !stopall interrupts what is working, holds the rest, and only !stopall
+    # off lifts it: not a usage window that resets.
+    xkeys_ = []
+    xcfg_ = {"topics": {"1": "x1", "2": "x2"}, "bench": {"1": {"claude": "x1", "codex": "x1-codex"}}}
+    xst_ = {"x1": {"mode": "busy"}, "x2": {"mode": "idle", "queue": ["q"], "limit_until": time.time() - 1}}
+    with stubbed(save_queue=lambda s: None, has_session=lambda s: True, agentless=lambda s: False,
+                 visible=lambda s: [s], pane_state=lambda l: "busy" if l == ["x1"] else "idle",
+                 tmux=lambda *a: xkeys_.append(a) or "", snapshot_repo=lambda s: None,
+                 inject=lambda s, t: xkeys_.append(("inject", s, t)) or True,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: None):
+        out_ = handle(xcfg_, xst_, threading.Lock(), "2", "!stopall")
+        assert "stopped 3: x1 (interrupted), x1-codex, x2" in out_, out_
+        assert xkeys_ == [("send-keys", "-t", tgt("x1"), "C-c")], xkeys_
+        assert "!stopall off" in send_prompt(xcfg_, xst_, "1", "x1", "more") and xst_["x1"]["queue"] == ["more"]
+        drain(xcfg_, xst_, "2", "x2")
+        assert len(xkeys_) == 1 and "limit_until" not in xst_["x2"], xkeys_   # the window reset; still held
+        assert queue_blob(xst_)["x1-codex"] == {"stop_hold": True}            # and kept across a restart
+        assert "3 session(s) go again" in handle(xcfg_, xst_, threading.Lock(), "2", "!stopall off")
+        drain(xcfg_, xst_, "2", "x2")
+        assert xkeys_[-1] == ("inject", "x2", "q"), xkeys_
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag

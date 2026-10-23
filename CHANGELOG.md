@@ -19,6 +19,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - The daemon tells the center topic once when its own files changed on disk after it started (a `git checkout` or `pip install -U` that nobody restarted) and gives the restart command; `/office` shows the same warning. A deploy directory had been checked out six times over a week while the service kept running the first copy.
 - `android/keystore.sh`: makes the release key once and prints the two `gh secret set` commands. Without them every CI APK is signed with a throwaway key, and Android refuses to update an installed app over a differently signed one.
 - `!budget $20 [day|week|month]`: a budget in dollars at API list prices, next to the token one. Each usage record is priced at its own model's rate; a model nightmux has no price for counts at the dearest rates it knows, never as free.
+- `!stopall`: one command stops every agent of every topic. A working turn is interrupted, and nothing starts again until `!stopall off`: prompts, shifts and schedules queue, and goal loops, failover, auto-yes and autocompact wait. A usage window that resets does not lift it, and a restart keeps it.
 
 ### Changed
 - A new README and website: the benefits first, a 48-second video (on the website) with a 12-second cut at the top of the README, a new social card, and absolute links so the PyPI page shows its images. The PyPI summary, keywords and classifiers say what nightmux is now, not only the Telegram bridge it started as.
