@@ -68,6 +68,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!arena` = every race you judged: wins per agent, and who wins which kind of task
 - `!route` auto|off|stats = send each task to the agent that fits it, learned from results
 - `!all <sess1,sess2|--all> <prompt>` = one prompt to several sessions
+- `!stopall [off]` = interrupt every agent and hold every queue, shift, goal and schedule until `!stopall` off
 - `!center [off]` = this topic watches every session · `!board` = all at a glance
 - `!companion [agent]` = a persona over every project: keeps its own memory, hands work to role agents, acts alone only where a `!budget` is set
 - `!companion` night [01:00] [07:30] | night off = rounds every 2h through the night, a morning summary at the end
@@ -84,7 +85,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!ladder` on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles
 - `!fresh` now|on|off = after a green `!goal`: notes to memory, `/clear`, re-read
 - `!spendcap <turns|500k|2M|off>` = interrupt a runaway loop
-- `!budget <50M> [day|week|month]` | off = a token allowance for this project; once spent, new prompts wait for the next period
+- `!budget <50M|$20> [day|week|month]` | off = a token or dollar allowance for this project; once spent, new prompts wait for the next period
 - `!lint` on|off = hold a vague prompt for ✨ improve · `!coach` = what your first-try prompts have in common
 - `!memory [update|on|off]` = project notes every agent reads on start
 - `!stats [days]` = tokens, cache and prompts per agent · `!saved`

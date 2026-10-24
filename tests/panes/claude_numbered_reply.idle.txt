@@ -1,0 +1,12 @@
+● Committed and pushed. Your steps, in order:
+
+  1. Merge the pull request with Create a merge commit.
+  2. Run the release command from its description.
+  3. Upload the social card under Settings → Social preview.
+  4. Restart the service so it runs the new code.
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  user@host:/srv/project  ⛏ 5.4M
+  ⏵⏵ auto mode on (shift+tab to cycle)

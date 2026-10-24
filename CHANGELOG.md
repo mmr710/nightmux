@@ -6,6 +6,55 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-22
+
+### Added
+- A Claude Code plugin: `/plugin marketplace add mmr710/nightmux`, then `/plugin install nightmux@nightmux`. `/nightmux:wrapped` and `/nightmux:handoff` bring the two commands that need no bot into Claude Code, and the handoff has Claude write where it stopped into the brief.
+- The nightly drift guard starts the newest Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode and Aider in tmux and checks how nightmux reads each one's first screen (`tests/live_agents.py`). The run's summary lists each version and reading, and the screens are kept as an artifact, ready to become pane fixtures.
+- `nightmux up`: the first run with no Telegram bot. Checks for tmux, will not start a second copy when the dashboard port is already in use, starts the dashboard on this machine and says what a phone needs to reach it (`tailscale serve --bg <port>`, then **+ Pair phone**). Nothing is opened to the LAN or the internet.
+- `nightmux handoff [agent [instruction...]]`: the plain-CLI side of `!teleport`. Reads the newest Claude Code or Codex conversation that ran in the current repo, writes its last instruction, recent actions, `git status`, diffstat and recent commits to `.nightmux/HANDOFF.md`, and starts the agent you name on it (Claude Code, Codex, OpenCode, agy, Gemini, Qwen Code; any other gets the prompt to paste). No bot, token, config or daemon.
+- `nightmux wrapped [days]`: the Wrapped cards from your own agent logs alone — no bot, token, config or daemon. Prints what the tokens would cost at API list prices, tokens by agent and when you work, then writes a private card and a share card (projects as counts) to the current folder, as PNGs when Chromium is installed. Nothing is uploaded.
+- A dollar estimate, "at API list prices", in `!wrapped` and `nightmux wrapped`, from a built-in price table (Claude, GPT/Codex, Gemini; dated in the output). A model with no price is named and left out, never counted as free. `"prices": {"model": [input, output, cache read, cache write]}` in `~/.nightmux.json` adds or overrides a model.
+- Doctor checks (`!doctor`, `--doctor`, the setup panel): "office link opens" asks `office_url` itself and reports a 404, a 5xx or a refused connection with the fix; "service runs the code on disk" says when the service started before nightmux's own files last changed.
+- The daemon tells the center topic once when its own files changed on disk after it started (a `git checkout` or `pip install -U` that nobody restarted) and gives the restart command; `/office` shows the same warning. A deploy directory had been checked out six times over a week while the service kept running the first copy.
+- `android/keystore.sh`: makes the release key once and prints the two `gh secret set` commands. Without them every CI APK is signed with a throwaway key, and Android refuses to update an installed app over a differently signed one.
+- `!budget $20 [day|week|month]`: a budget in dollars at API list prices, next to the token one. Each usage record is priced at its own model's rate; a model nightmux has no price for counts at the dearest rates it knows, never as free.
+- `!stopall`: one command stops every agent of every topic. A working turn is interrupted, and nothing starts again until `!stopall off`: prompts, shifts and schedules queue, and goal loops, failover, auto-yes and autocompact wait. A usage window that resets does not lift it, and a restart keeps it.
+
+### Changed
+- README: an agent table lists the dialogs, usage windows and token counts nightmux reads for each agent, and which agents CI starts every night.
+- A new README and website: the benefits first, a 48-second video (on the website) with a 12-second cut at the top of the README, a new social card, and absolute links so the PyPI page shows its images. The PyPI summary, keywords and classifiers say what nightmux is now, not only the Telegram bridge it started as.
+- The `!teleport` / `!failover` packet lists the five latest commits, caps `git status` and the diffstat at 40 lines, leaves out git's own error text when the folder is not a repository, and reads only the tail of the transcript instead of the whole file (a long Claude Code session runs to hundreds of MB).
+- The Wrapped card's "agent sessions" cell is now "active days": agy counts every conversation record as a session, which made the number meaningless. A cell that would read `0%` or `$0.00` is left off.
+- `!office` asks the `office_url` before it sends the button. A link that answers 404 or 5xx, or refuses the connection (another service owns that address), gets the cause and a tailnet-only fix (`tailscale serve --bg --https=<port> <port>`, then `office_url` with that port) instead of a button that opens a blank page.
+- Peers are asked together, for the office, `/api/topics`, `/api/metrics`, `/api/servers` and fleet analysis, and a route a peer just failed on is not waited on again for 15 seconds (one background probe checks whether it answers again, and its failure is logged once). That is kept per route, so a peer too old for one route still shows everywhere else, and a failure no poll has looked at for a minute is asked again, so a report run now and then does not leave out a peer that is back. One unreachable peer used to add its whole 3-second timeout to every poll, and the Android service polls every 15 seconds.
+- `agy -p /usage` and the opencode token scan no longer run on the request thread. They refresh in the background (agy at most every 5 minutes, failures included; opencode every 10) and the office shows the last reading. A slow or missing `agy` used to hold the daemon's lock for seconds on every poll.
+- Responses over 1 KB are gzipped when the client accepts it: the office poll goes from about 33 KB to 11 KB.
+- The office page keeps one request in flight, pauses while the tab is hidden, gives up after 8 seconds and says "can't reach nightmux, retrying…" after two failures. It used to swallow every error, which looked like a quiet night.
+- Android: the alert service backs off from 15 seconds to 2 minutes while the daemon does not answer; the notification, the widget and the app say "answers 404, pair again" or "wants a login" when the address responds but is not the dashboard, not "can't reach", and any other HTTP error shows its status.
+- The installer no longer asks for a GitHub star. nightmux asks once, in the message for the first session it resumes after a usage limit on that machine.
+- `ROADMAP.md` is rewritten in plain words: what shipped, what comes next, and where help is welcome.
+- The high-context tip for Claude names `!autocompact 150k`, which makes Claude compact itself mid-turn near 120k tokens instead of 170k.
+
+### Fixed
+- A spent `!budget` said "!budget off or a bigger !budget to lift it", but a bigger budget did not lift the hold, and `!budget off` lifted it only for the topic's main agent: its other agents stayed held until the period ended. Both lift every agent of the topic now, and a new amount that is already spent holds again at once.
+- Aider's questions ("Add file to the chat? (Y)es/(N)o [Yes]:") read as unknown: no buttons, and prompts waited behind them. They read as waiting now, and `!y`, `!n` and auto-yes type the letter and the Enter Aider waits for. An answered one stays on screen and no longer counts.
+- Gemini CLI's folder trust dialog read as unknown: nothing reached the phone, and prompts waited behind it with only `!raw` to get past. A boxed row marked ● now counts as an option, so the dialog is waiting, with its three options as buttons. Auto-yes does not trust a folder by itself.
+- "Recent Agent Reasoning" in the `!teleport` packet also picked up text blocks from the person's own messages (hook output, pasted prompts). It reads the agent's messages only.
+- Claude Code token counts read each streamed response from its first log line, whose `output_tokens` is not final: output ran about 9% low over a month of real logs. The last line of each request is used now, so `!stats`, `!wrapped` and `!coach` show more output tokens than before.
+- Dashboard-only first run: the browser that opened at start-up redeemed the pairing code the terminal QR carries, so the QR was dead by the time anyone scanned it. The browser now opens the dashboard without a code.
+- Dashboard-only first run: with the dashboard on 127.0.0.1 and no `tailscale serve` mapping, the terminal printed a QR for the machine's LAN address, which refuses connections. It now says how to reach the dashboard from a phone instead, and still prints the QR when there is a route to it.
+- A watcher that raised on every tick wrote the same line about 170 times in six minutes and told nobody. It logs when the reason changes (and every 150 ticks), and the session's topic is told once after a minute of it.
+- The office's usage block swallowed every error with a bare `except:`; failures of the opencode scan now reach the log.
+- OpenCode prompts were never counted by the prompt lessons and `!coach`: the reader used `sqlite3` without importing it, and the error was swallowed.
+- A peer that answers 200 with something other than JSON (another app on that address) showed as a 500 for the whole office; it now shows as a peer that is down, and its log line says what answered. A peer cut off mid-answer counts as down too, instead of failing the request.
+- After a Discord gateway reconnect, the old connection's heartbeat thread read the new connection's state.
+- Auto-yes typed digits into a Claude prompt, up to 25 an hour, and they arrived in front of your next message. A topic that opted in for agy counted its Claude session as agy because Claude is the default agent, and a reply ending in a numbered list ("2. Run the release command") read as an open menu. The topic's one agent is now assumed only for a session nightmux knows nothing about, and a menu with the agent's input box drawn under it is part of the transcript, not a question.
+- `!y`, `!n`, auto-yes and the approval buttons counted every numbered line near the bottom of the screen as an option, so a numbered list in the reply above a dialog, or in the command it asks about, could be picked instead of the dialog's own "1. Yes". A dialog's options are now the last run numbered from 1.
+- The Stop and Notification hooks asked tmux for the current session without naming their pane, and outside tmux that is whichever session was used last: a Claude Code run in another terminal posted its reply, or its permission prompt with that session's buttons, in another session's topic. The hooks now look up their own pane and do nothing outside tmux.
+
+## [1.4.0] — 2026-10-22
+
 ### Added
 - Unified `AGENT_ADAPTERS` registry: launch commands, screen detectors, multi-schema transcript/usage readers, and limit readers for claude, agy, codex, opencode, gemini, and other agent CLIs.
 - Dual-schema OpenCode reader: parses both `session_message`/`session_v2` and legacy `message`/`session` schemas directly.
@@ -41,6 +90,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 - README cut to the essentials (quickstart, comparison, feature grid, install); the long form moved to [docs/GUIDE.md](docs/GUIDE.md). [docs/COMMANDS.md](docs/COMMANDS.md) is generated from `!help` by `nightmux --commands`, and selfcheck fails when it goes stale. Added ROADMAP, CODE_OF_CONDUCT and a PR template.
 - `!wrapped` card is taller and says more: tokens saved by compactions, how many projects you worked in and the top six with bars, a 24-hour chart of when you prompt (in your `tz_offset`), peak hour, share after midnight, longest daily streak, busiest day, cache hit, tokens per prompt and top model. The chat analysis now records each prompt's project folder and hour — never its text.
 - `!help` is now an index of eight sections (sessions, talking, overnight, several agents, tokens, git, watching, setup) with a button for each; `!help <section>` opens one, `!help <word>` finds every command that mentions it, `!help all` is the full list.
+- README and SECURITY.md say what the QR shortcut in `--setup` trusts (the maintainer's onboarding relay; paste a BotFather token to keep the token on your machine), list the alternatives (Happy, HAPI, ccbot, ccgram, claude-squad, Anthropic's Remote Control) in place of a comparison table, and drop claims nobody could check. The `--setup` prompt mentions the relay too.
 
 ### Fixed
 
@@ -48,6 +98,14 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 - The `/public` office never fetched anything since `!public` landed: a line inserted above the poll turned it into an `else`. Both offices poll again, and selfcheck pins it.
 - `POST /topic/<id>` now needs the `X-Nightmux` header like `/api/topic`. A plain-text POST needs no CORS preflight, so before this any web page opened on a device in your tailnet could type into your agents.
+- `GET /pair` crashed with `UnboundLocalError` (a local named `html` shadowed the module).
+- An unknown command-line option no longer starts the daemon on your real config: it prints the usage and exits 2. `nightmux --help` (or `-h`) prints it on request.
+
+### Security
+
+- Over loopback the dashboard answers only to this machine's own names (addresses, one-word names, `.local`, `.lan`, `.internal`, `.ts.net`), which stops DNS rebinding. A name of your own on a public domain goes in `"allowed_hosts"`. SECURITY.md has a new section on the dashboard's trust model.
+- `/pair` hands out a pairing code only to this machine or a device that is already paired, and a request a proxy says came from a public address (`tailscale funnel`, a tunnel) counts as remote. `/api/pair/code` and `/api/pair/revoke` need the `X-Nightmux` header like the other writes.
+- The option and ⏎ buttons under an approval prompt are pinned to a fingerprint of the prompt they were posted for. A tap on an older message, after the agent has moved on to another prompt, presses nothing and re-posts the one that is waiting. Typed `!1`/`!y`, the `!ctl` pad and the dashboard's buttons are not pinned and still answer whatever is on screen.
 
 ## [1.3.0] — 2026-10-08
 

@@ -29,7 +29,7 @@ them instead of discovering them:
   every project by token type
 
 Long-running agent sessions cost money and stall in ways chat never does. That is
-the part nobody else is watching.
+what nightmux watches for.
 
 **It attaches to sessions instead of owning them.** nightmux types into tmux. The
 session is still yours — SSH in, attach, type directly, and the bot keeps working
@@ -447,7 +447,9 @@ fewer tokens. The same report is `!stats [days]` in Telegram.
   re-read after compactions and fresh starts, turns worked between midnight
   and 7, queues resumed after limits, hand-offs, green checks, loops caught.
 - `!wrapped [days]` — the same as a 1200×675 card with your agent stats, and a
-  🐦 button that opens a ready-to-post tweet.
+  🐦 button that opens a ready-to-post tweet. `nightmux wrapped [days]` draws it
+  from the shell with no bot or config, and adds what the tokens would cost at
+  API list prices; `"prices"` in `~/.nightmux.json` adds a model's rates.
 - The night reel is signed with the repo link and gets the same 🐦 button.
 - `!public on` — a read-only office at `/public/<token>`: agent states only,
   no screen text, prompts or buttons. Tailnet-only until `!public expose`,
@@ -501,6 +503,12 @@ dashboard at http://127.0.0.1:9090/ opens projects with **+ project**, and each
 project's 💬 chat view (an installable PWA) is the channel — the same commands,
 buttons and replies you would get in a Telegram topic. Add a bot later by
 running `--setup` again.
+
+`nightmux up` is the short way in: it checks for tmux, will not start a second
+copy when the port is taken, and starts dashboard-only. The dashboard listens
+on this machine only. For a phone, run `tailscale serve --bg 9090` (Tailscale
+on both devices) and press **+ Pair phone**; until there is a route, the
+terminal prints that command instead of a QR that could not connect.
 
 ## The office
 
@@ -658,7 +666,9 @@ a new topic named after a directory start that project on its first message.
 agent hits a usage limit — the working tree and the cut-off instruction go to
 `codex` (or whoever) instead of waiting hours for the reset. Without it, the
 limit message offers the same thing as one-tap buttons; `!failover <agent>`
-does it by hand.
+does it by hand. Without the bot, `nightmux handoff <agent>` does the same from
+a terminal in the repo: it writes `.nightmux/HANDOFF.md` from the newest Claude
+Code or Codex conversation there and the git state, and starts the agent on it.
 
 `auto_update` (`true` = daily, or an interval like `"12h"`; off by default)
 runs each installed agent's own updater on that schedule — `claude update`,

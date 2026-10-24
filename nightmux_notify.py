@@ -30,7 +30,12 @@ def main():
     msg = (payload.get("message") or "").strip()
     if IDLE in msg.lower():
         return
-    sess = subprocess.run(("tmux", "display-message", "-p", "#S"),
+    # This pane's session. Without -t, tmux names the session used last, so a
+    # Claude Code run outside tmux posted its permission prompt, with that
+    # session's buttons, in another session's topic.
+    if not os.environ.get("TMUX_PANE"):
+        return
+    sess = subprocess.run(("tmux", "display-message", "-p", "-t", os.environ["TMUX_PANE"], "#S"),
                           capture_output=True, text=True).stdout.strip()
     if not sess:
         return
@@ -41,13 +46,13 @@ def main():
     topic = next((t for t, s in cfg.get("topics", {}).items() if s == sess), None)
     if not topic:
         return
-    lines = nightmux.visible(sess)
+    lines = nightmux.pane(sess)   # the capture a tap is checked against
     os.makedirs(nightmux.STATE_DIR, exist_ok=True)
     stamp = os.path.join(nightmux.STATE_DIR, f".notify-{sess}")
     open(stamp, "w").close()   # claim this prompt before sending, never after
     body = "\n".join(nightmux.strip_noise(lines[-15:], verbose=True)).strip()
     nightmux.send(cfg, topic, f"🟠 needs input {sess}\n{msg}\n{body}".strip(),
-               buttons=nightmux.menu_buttons(lines))
+               buttons=nightmux.menu_buttons(lines, bind=True))
 
 
 def selfcheck():

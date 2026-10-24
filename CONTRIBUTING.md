@@ -20,7 +20,7 @@ If you have a feature idea, an architectural change, or a major refactor in mind
 If you are submitting code, it must align with the core architectural decisions outlined in `ARCHITECTURE.md`:
 - **Zero dependencies:** Everything must run using the Python 3.8+ standard library. No exceptions.
 - **Local execution:** It must remain capable of running entirely on the user's local machine without requiring external cloud relays.
-- **Keep it small:** The daemon is a single file designed to be readable in an afternoon. Keep logic simple and explicitly document any cleverness.
+- **Keep it small:** The daemon is a single file and already large. Keep logic simple and explicitly document any cleverness.
 
 ### 3. Running it while you work
 - `python3 nightmux.py --demo` serves the office, dashboard and chat with a made-up night on http://127.0.0.1:8099 — no bot, no keys, nothing touched.

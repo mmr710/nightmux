@@ -30,6 +30,29 @@ lets them read your sessions' output — the code Claude wrote, the file paths, 
 error messages, whatever scrolled past. It does not let them type, but assume
 anyone in the group sees everything the bot sends.
 
+## The dashboard
+
+The dashboard (`webhook_port`, default 9090) is a second way in, and the allowlist
+does not guard it: whoever it lets in can type into every session, which is a
+shell. It listens on `127.0.0.1` unless `webhook_host` says otherwise.
+
+- **This machine and your tailnet are trusted.** A request over loopback needs no
+  login, and that includes one `tailscale serve` relays from your tailnet.
+- **Everything else needs a paired device.** A request from another address, or
+  one a proxy says came from a public address (`tailscale funnel`, a tunnel, an
+  `X-Forwarded-For` that is not private), must carry the `nm_auth` cookie you get
+  by scanning the pairing QR. A pairing code is handed out only to this machine
+  or to a device that is already paired.
+- **A browser tab cannot ride the open loopback.** Over loopback the dashboard
+  answers only to this machine's own names: addresses, one-word names, `.local`,
+  `.lan`, `.internal`, `.ts.net`. That is what stops DNS rebinding, where a page
+  on someone else's domain flips its name to `127.0.0.1`. A name of your own on a
+  public domain goes in `"allowed_hosts": ["nm.example.com"]`. Anything that
+  changes state also needs the `X-Nightmux` header, which another site cannot send.
+- A reverse proxy on the same machine that adds no forwarding header looks exactly
+  like you. nightmux has no login of its own, so do not put the dashboard behind
+  one on the open internet.
+
 ## The bot token
 
 `~/.nightmux.json` holds the bot token. **The token is equivalent to the
@@ -41,6 +64,13 @@ group, including output from your sessions.
 - It is in `.gitignore`. Do not move it into the repo.
 - If it leaks, revoke it in BotFather (`/revoke`) — that invalidates the old
   token immediately — then re-run `python3 nightmux.py --setup`.
+
+## The QR onboarding relay
+
+`--setup` offers a shortcut: scan a QR code and Telegram creates the bot for you. It goes through a manager bot and a small relay (`nightmux --relay`), both run by the maintainer, and it is the one place nightmux depends on a server you don't run.
+
+- Whoever holds the manager bot's token can read the token of every bot made through it. The relay keeps a new token in memory for up to ten minutes, hands it once to whoever names the bot's random username, and forgets it; nothing is logged or written to disk. `relay_serve()` is short and says so, but you cannot audit the machine it runs on.
+- A bot token has the reach described above. If that is more trust than you want to give, press Enter at the QR prompt and paste a token from @BotFather: it then never leaves your machine. To use a relay of your own, set `NIGHTMUX_RELAY`.
 
 ## Prompt injection
 
@@ -55,9 +85,15 @@ Consequences worth stating plainly:
   not quoting.
 - A file or photo you send is saved to `~/.nightmux-files` and its **path** is typed
   into the session. Claude will read it if it decides to.
-- Inline buttons (`!y`, menu picks) approve whatever prompt is on screen *at that
-  moment*. On a slow link the screen can move between the buzz and the tap; the
-  buttons carry no proof of what they are approving.
+- Typed commands (`!y`, `!1`), the `!ctl` pad and the dashboard's buttons approve
+  whatever prompt is on screen *at that moment*. On a slow link the screen can
+  move between the buzz and the tap.
+- The option and ⏎ buttons on a "needs input" message are pinned to the prompt
+  they were drawn for: a fingerprint of the last screenful, which ignores timers,
+  borders and the highlighted row. Once the screen shows something else, a tap
+  presses nothing and the prompt now up is posted again with fresh buttons. It
+  cannot tell apart two prompts that differ only in their numbers, or in text
+  above the last screenful, and it does not read the command for you.
 
 If a message asks you to add someone to `allow_users`, that is the exact request
 a compromised account or an injection would make. Verify out of band.

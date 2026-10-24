@@ -1,44 +1,34 @@
-# 🌙 nightmux Product Roadmap
+# Roadmap
 
-`nightmux` is the **Autonomous Hypervisor & Mobile Cockpit for CLI Coding Agents** (`claude`, `codex`, `agy`, `opencode`, `gemini`, `cursor`, `amp`, `goose`, `qwen`).
+nightmux keeps AI coding agents working while you are away: it runs them in tmux, resumes them when a usage limit resets, hands work from one agent to another, and lets you steer from Telegram, the dashboard or the Android app. This page says what comes next and where help is most welcome. The order is the plan; there are no dates.
 
-Want one of these sooner, or have a better idea? Open an [issue](https://github.com/mmr710/nightmux/issues/new/choose) — and say if you'd like to build it.
+Everything released so far is in the [changelog](CHANGELOG.md).
 
----
+## Just shipped (1.5.0)
 
-## Phase 1: Frictionless Onboarding, Super-Intents & Zero-Click Viral Sharing
-*Goal: Sub-60s time-to-first-prompt, zero memorized CLI flags on mobile, and 1-tap social cards that unfurl natively on X and Reddit.*
+- `nightmux wrapped`: your Wrapped report and a dollar estimate at API list prices, from the logs your agents already keep. No bot or config needed.
+- `nightmux handoff`: hands the work in a repo to another agent from the terminal, with a brief of what was done.
+- A Claude Code plugin: `/nightmux:wrapped` and `/nightmux:handoff` from inside Claude Code.
+- `nightmux up`: a first run with the dashboard alone, no Telegram bot.
+- `!budget $20`: a budget in dollars at API list prices, next to the one in tokens.
+- `!stopall`: interrupts every agent at once and holds everything until you lift it.
+- An agent table in the README: the dialogs, usage windows and tokens nightmux reads for each agent, and which agents CI starts every night.
+- Safer dashboard pairing, an office that stays up when a peer is down, and `--doctor` checks for a dead office link or a service still running old code.
 
-- [x] **5 Super-Intents Action Bar (`!vibe`):** Consolidate 70+ commands into a 1-tap mobile action bar (`🚀 Build`, `🌙 Night Shift`, `⚡ Race`, `🧬 Teleport`, `🌾 Harvest`, `🎁 Wrapped`).
-- [x] **Dynamic OpenGraph Social Cards (`/share` & `/share/card.svg`):** Stateless SVG/HTML OpenGraph card generator + Web Share API Level 2 (`navigator.share({ files })`) for native 1-tap photo/GIF sharing to X and Reddit without manual file attachment.
-- [ ] **Telegram-Free 60s First Run & QR Mobile Pairing (PR #128):** Boot straight into the mobile PWA via terminal QR code before configuring BotFather.
+## Next
 
-## Phase 2: Cross-Agent Context Teleportation & Subscription Quota Arbitrage
-*Goal: Zero wasted tokens on agent failover and zero wasted 5-hour subscription windows while you sleep.*
+1. **Code that is easy to read and change.** Split `nightmux.py` into modules and generate the single file from them, so installs do not change; move the self-check into `tests/`; add ruff, coverage and a macOS CI run.
+2. **Agent screens past the first one.** Every night the drift guard starts the newest Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode and Aider and checks how nightmux reads their first screen, and the README's agent table says what each agent gets. Screens after a sign-in, such as approvals and usage limits, need an account, so they come from recordings: a screenshot in an issue is enough to add one. Qwen Code's sign-in screen is the next to read.
 
-- [x] **Context Teleportation (`!teleport` & Smart Failover):** Extract recent transcript turns, tool calls, `git status/diff`, and `.nightmux/memory.md` into a structured `.nightmux/HANDOFF.md` packet so failover or switched agents continue mid-thought without re-exploring the codebase.
-- [x] **Unused Quota Window Harvester (`!harvest`):** Monitor 5-hour subscription quota windows; when a window is about to reset with unused capacity (`< 60m` left and below the safety ceiling, default `85%`), automatically wake idle sessions to run queued tech-debt, test, and cleanup tasks.
-- [ ] **Universal Agent Schema Adapters & Drift Guard (PR #111):** First-class structured transcript & limit readers across Claude Code, Codex, OpenCode, and Antigravity (`agy`).
+## Later
 
-## Phase 3: "Walkie-Talkie" & "Swipe-to-Ship" Mobile Vibe UX
-*Goal: True hands-free and thumb-native vibe coding away from a desk.*
+- The Stop and Notification hooks from the plugin instead of `--setup` editing `~/.claude/settings.json`, once the plugin and the daemon can agree on a version.
+- A voice note turned into a written plan you approve before an agent starts (voice notes are already transcribed with `transcribe_cmd`).
+- Reviewing a night's changes on the phone, one change at a time.
+- Installs that follow tagged releases instead of `main`.
 
-- [ ] **Walkie-Talkie Voice Supervisor:** Automatically route natural-language voice notes into multi-step overnight plans (`!shift`), test-verified loops (`!goal`), or multi-agent worktree races (`!race`).
-- [ ] **Swipe-to-Ship Visual Review Mini-App:** Mobile card stack combining per-turn git checkpoints, side-by-side visual diffs, and headless browser screenshots (`!shot`) with 1-tap Merge or Rollback (`!undo`).
-- [ ] **Prompt-to-PR Interactive Cartridges:** Shareable self-contained HTML replays combining the 20x Pixel Office time-lapse, token savings ledger, and winning prompt.
+## How to help
 
-## Phase 4: Modular Source Tree with Single-File Release Compiler
-*Goal: Preserve the zero-dependency 1-file stdlib magic for users while making contributor PRs effortless.*
-
-- [ ] **`src/` Modular Split + `build.py` Bundler:** Split daemon, token accounting, agent adapters, and embedded HTML/CSS/JS views into `src/` with a deterministic CI bundler that emits the single distributable `nightmux.py`.
-- [ ] **Cross-Peer Session Replay & Dollar Budgets:** Provider-priced dollar caps and unified replay scrubbing across peer machines.
-
----
-
-## Shipped Recently
-- **Companion Supervisor (`!companion`):** Cross-project autonomous night rounds, morning briefings, and tap-to-send idea ledger ([docs/COMPANION.md](docs/COMPANION.md)).
-- **Token Optimization Suite:** Tiered `!autocompact`, `!ladder` model/effort scaling, parked-session compaction, and fleet-wide `!wrapped` / `!coach` analytics.
-- **Multi-Server Mesh (`--join` / `!server`):** Run one bot and dashboard across multiple machines over Tailscale.
-- **Discord & Slack Experimental Bridge:** Native stdlib WebSocket gateway / Socket Mode support.
-
-Full history: [CHANGELOG.md](CHANGELOG.md).
+- Try nightmux with the agent you use, and [open an issue](https://github.com/mmr710/nightmux/issues/new/choose) when something does not work.
+- Issues labelled [good first issue](https://github.com/mmr710/nightmux/labels/good%20first%20issue) are a way in. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run it while you work and how to send a pull request.
+- Ideas and questions go to [Discussions](https://github.com/mmr710/nightmux/discussions).

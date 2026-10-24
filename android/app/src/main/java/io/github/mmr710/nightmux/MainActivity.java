@@ -22,6 +22,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -245,11 +246,20 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-            if (!r.isForMainFrame() || isFinishing()) return;
+            if (r.isForMainFrame()) failed("Can't reach nightmux", base() + "\n\n" + e.getDescription()
+                    + "\n\nIs the daemon running, and is this phone on the same tailnet?");
+        }
+
+        /** A 404 from the address itself is another service answering (a relay, a proxy), not a down daemon. */
+        @Override public void onReceivedHttpError(WebView v, WebResourceRequest r, WebResourceResponse res) {
+            if (r.isForMainFrame() && res.getStatusCode() == 404) failed("Not the nightmux address",
+                    base() + " answers HTTP 404.\n\nScan the pairing QR again (dashboard → Pair phone), or change server.");
+        }
+
+        void failed(String title, String message) {
+            if (isFinishing()) return;
             new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Can't reach nightmux")
-                    .setMessage(base() + "\n\n" + e.getDescription()
-                            + "\n\nIs the daemon running, and is this phone on the same tailnet?")
+                    .setTitle(title).setMessage(message)
                     .setPositiveButton("Retry", (d, w) -> web.reload())
                     .setNegativeButton("Change server", (d, w) -> askServer(base()))
                     .show();

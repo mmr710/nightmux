@@ -34,6 +34,7 @@ public class AlertService extends Service {
     final Map<String, String> last = new HashMap<>();
     boolean primed;
     String watching = "";
+    int fails;                   // polls in a row that failed: a phone off the tailnet backs off
 
     static void sync(Context c) {
         SharedPreferences p = c.getSharedPreferences("nightmux", MODE_PRIVATE);
@@ -94,10 +95,13 @@ public class AlertService extends Service {
                 nm.notify(ONGOING, ongoing(Office.summary(o)));
                 OfficeWidget.push(this, o);
                 diff(nm, base, o);
+                fails = 0;
             } catch (Exception e) {
-                nm.notify(ONGOING, ongoing("can't reach " + base));
+                fails++;
+                nm.notify(ONGOING, ongoing(Office.problem(base, e)));
             }
-            try { Thread.sleep(EVERY_MS); } catch (InterruptedException e) { return; }
+            // 15 s, then slower while nothing answers (up to 2 min): no radio wake-up every 15 s for a daemon that is not there.
+            try { Thread.sleep(EVERY_MS * Math.min(8, 1 + fails / 4)); } catch (InterruptedException e) { return; }
         }
     }
 

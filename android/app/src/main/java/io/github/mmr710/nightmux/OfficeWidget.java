@@ -15,7 +15,7 @@ public class OfficeWidget extends AppWidgetProvider {
         PendingResult pr = goAsync();
         new Thread(() -> {
             try { push(c, Office.fetch(base)); }
-            catch (Exception e) { show(c, null, base.isEmpty() ? "open the app to connect" : "can't reach nightmux"); }
+            catch (Exception e) { show(c, null, base.isEmpty() ? "open the app to connect" : Office.problem(base, e)); }
             pr.finish();
         }).start();
     }
