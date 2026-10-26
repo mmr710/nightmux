@@ -5172,6 +5172,7 @@ HELP = [
         "!teleport [<agent>] [prompt] = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought",
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
+        "!review = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff",
         "!update [agent] = run each agent's own updater · !version",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
         "who sent what",
@@ -5840,6 +5841,22 @@ def handle(cfg, state, lock, topic, text, mid=None):
                     + tmux_git(cwd, "diff")).strip() or f"no unstaged changes in {cwd}"
         return (f"{cwd}\n" + tmux_git(cwd, "status", "-sb") + "\n\n"
                 + tmux_git(cwd, "log", "--oneline", "-5"))
+    if cmd == "!review":
+        d = review_data(cfg, state, topic)
+        if d.get("error"):
+            return d["error"]
+        A, D = sum(f["add"] for f in d["files"]), sum(f["del"] for f in d["files"])
+        text = (f"🔍 {d['session']} on {d['branch']}: {len(d['files'])} files +{A} −{D} vs {d['base']}"
+                + (f", {len(d['untracked'])} new untracked" if d["untracked"] else "")
+                + (f"\nPR #{d['pr']['number']} {d['pr']['state']}, checks {d['pr']['checks']}" if d["pr"] else "")
+                + "\n" + "\n".join(f"{f['path']}  +{f['add']} −{f['del']}" for f in d["files"][:15])
+                + "\n!ship opens the PR · !undo takes it back")
+        base_ = (cfg.get("office_url") or "").rsplit("/office", 1)[0]
+        if base_.startswith("http"):
+            send(cfg, topic, text, mode="plain", buttons=json.dumps({"inline_keyboard": [[
+                {"text": "🔍 review the diff", "url": f"{base_}/review/{topic}"}]]}))
+            return None
+        return text + "\nwith office_url set, this becomes a page with the full diff (!office)"
     if cmd == "!worktrees":
         cwd = sess_cwd(sess)
         root = tmux_git(cwd, "rev-parse", "--show-toplevel")
@@ -15709,6 +15726,99 @@ def term_lines(cfg, state, topic, agent="", n=2000):
             "mode": (state.get(sess) or {}).get("mode") if lines else "gone"}
 
 
+REVIEW_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux review</title><link rel="icon" href="/icon.svg">
+<style>
+:root{--bg:#0b0e14;--fg:#c0caf5;--mut:#7a83a6;--bar:#11151f;--acc:#f5c542;--add:#2ea043;--del:#f85149;--hunk:#58a6ff}
+@media (prefers-color-scheme:light){:root{--bg:#fafafa;--fg:#1f2335;--mut:#6b7089;--bar:#eceef4;--acc:#9a6b00;--add:#1a7f37;--del:#cf222e;--hunk:#0969da}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:2;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 16px;background:var(--bar)}
+header b{color:var(--acc)}.mut{color:var(--mut);font-size:13px}
+button{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--mut);border-radius:6px;padding:3px 10px}
+main{padding:12px 16px 60px;max-width:1100px;margin:auto}
+details{border:1px solid var(--bar);border-radius:8px;margin:8px 0;background:var(--bar)}
+summary{padding:8px 12px;cursor:pointer;font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.a{color:var(--add)}.d{color:var(--del)}
+pre{margin:0;padding:8px 12px;overflow-x:auto;background:var(--bg);font:12px/1.45 ui-monospace,Menlo,Consolas,monospace}
+pre i{display:block;font-style:normal;white-space:pre}
+i.p{color:var(--add);background:#2ea04318}i.m{color:var(--del);background:#f8514918}i.h{color:var(--hunk)}
+code{background:var(--bar);padding:1px 6px;border-radius:4px}
+</style></head><body>
+<header><b>🌙 review</b><span id="who" class="mut"></span><span id="sum"></span><button id="re">refresh</button></header>
+<main><p id="meta" class="mut">loading…</p><div id="files"></div><p id="next" class="mut"></p></main>
+<script>
+const topic = location.pathname.split('/')[2];
+const esc = s => s.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+function line(l) {
+  const c = l[0] === '+' && !l.startsWith('+++') ? 'p' : l[0] === '-' && !l.startsWith('---') ? 'm' : l[0] === '@' ? 'h' : '';
+  return '<i class="' + c + '">' + esc(l) + '</i>';
+}
+async function load() {
+  const meta = document.getElementById('meta');
+  try {
+    const d = await (await fetch('/api/review/' + topic, {cache: 'no-store'})).json();
+    document.getElementById('who').textContent = (d.session || '') + (d.branch ? ' · ' + d.branch : '');
+    if (d.error) { meta.textContent = d.error; document.getElementById('files').innerHTML = ''; return; }
+    const A = d.files.reduce((n, f) => n + f.add, 0), D = d.files.reduce((n, f) => n + f.del, 0);
+    document.getElementById('sum').innerHTML = d.files.length + ' files <span class="a">+' + A + '</span> <span class="d">−' + D + '</span>';
+    meta.innerHTML = 'against <code>' + esc(d.base || '?') + '</code>' + (d.commits.length ? ' · ' + d.commits.length + ' commit(s): ' + esc(d.commits.join(' · ')) : '') +
+      (d.pr ? ' · PR <a href="' + esc(d.pr.url) + '">#' + d.pr.number + '</a> ' + esc(d.pr.state) + ', checks: ' + esc(d.pr.checks) : '');
+    document.getElementById('files').innerHTML = d.files.map((f, i) =>
+      '<details' + (d.files.length < 4 ? ' open' : '') + '><summary>' + esc(f.path) + ' <span class="a">+' + f.add + '</span> <span class="d">−' + f.del + '</span></summary><pre>' +
+      f.diff.split('\n').map(line).join('') + (f.cut ? '<i class="h">… ' + f.cut + ' more lines (git diff in the folder)</i>' : '') + '</pre></details>').join('') +
+      (d.untracked.length ? '<p class="mut">new, not tracked yet: ' + d.untracked.map(u => '<code>' + esc(u) + '</code>').join(' ') + '</p>' : '');
+    document.getElementById('next').innerHTML = 'Happy? Send <code>!ship</code> to commit, push and open a PR (CI watched, never merged), then <code>!watch merge</code>. Wrong? <code>!undo</code>.';
+  } catch (e) { meta.textContent = 'offline'; }
+}
+document.getElementById('re').onclick = load; load();
+</script></body></html>"""
+
+
+def review_data(cfg, state, topic):
+    """What a topic's agent changed, against where its branch left the main line:
+    per-file counts and diffs (redacted, capped), commits, and the PR when gh has one."""
+    sess = cfg.get("topics", {}).get(topic)
+    if not sess:
+        return {"files": [], "error": "topic not bound"}
+    cwd = sess_cwd(sess)
+    root = tmux_git(cwd, "rev-parse", "--show-toplevel")
+    if not root or root.startswith("fatal"):
+        return {"files": [], "session": sess, "error": f"{cwd} is not a git repo"}
+    branch = tmux_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    base = mb = ""
+    for ref in (tmux_git(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"),
+                "origin/main", "origin/master", "main", "master"):
+        mb = ref and tmux_git(root, "merge-base", "HEAD", ref)
+        if mb and not mb.startswith(("fatal", "error")):
+            base = ref
+            break
+    if not base:
+        mb = base = "HEAD"        # no main line to compare with: just what is uncommitted
+    files = []
+    for row in tmux_git(root, "diff", "--numstat", mb).split("\n")[:80]:
+        a, _, rest = row.partition("\t")
+        d, _, path = rest.partition("\t")
+        if not path:
+            continue
+        diff = [redact(l) for l in tmux_git(root, "diff", "--no-color", mb, "--", path).split("\n")]
+        files.append({"path": path, "add": int(a) if a.isdigit() else 0, "del": int(d) if d.isdigit() else 0,
+                      "diff": "\n".join(diff[:300]), "cut": max(0, len(diff) - 300)})
+    out = {"session": sess, "branch": branch, "base": base, "files": files,
+           "untracked": [u for u in tmux_git(root, "ls-files", "--others", "--exclude-standard").split("\n") if u][:30],
+           "commits": [l for l in tmux_git(root, "log", "--oneline", "-n", "10", f"{mb}..HEAD").split("\n") if l]
+                      if mb != "HEAD" else [], "pr": None}
+    if branch not in ("HEAD", base.split("/")[-1]):
+        try:
+            v = json.loads(gh(root, "pr", "view", "--json", "number,state,url,statusCheckRollup", timeout=15))
+            res = [c.get("conclusion") or c.get("status") or "?" for c in v.get("statusCheckRollup") or []]
+            out["pr"] = {"number": v["number"], "state": v["state"].lower(), "url": v["url"],
+                         "checks": (f"{res.count('SUCCESS')}/{len(res)} green" if res else "none")}
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            pass                  # no gh, no PR, offline: the diff is the point
+    return out
+
+
 APP_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nightmux app</title><link rel="icon" href="/icon.svg">
@@ -16064,6 +16174,20 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps(term_lines(cfg, st_, topic, (qq.get("agent") or [""])[0],
                                                     (qq.get("lines") or ["2000"])[0])),
                               "application/json")
+        if self.path.startswith("/review/"):
+            return self.reply(REVIEW_HTML, "text/html; charset=utf-8")
+        if self.path.startswith("/api/review/"):
+            topic = urllib.parse.urlsplit(self.path).path[len("/api/review/"):].strip("/")
+            cfg = self.server.cfg
+            peer = None if self.peer else peer_of(cfg, topic)
+            if peer:
+                got = peer_call(cfg, peer, f"api/review/{topic}", timeout=20)
+                return self.reply(json.dumps(got if isinstance(got, dict) else
+                                             {"files": [], "error": f"{peer} not answering"}),
+                                  "application/json")
+            with self.server.lock:
+                st_ = dict(self.server.state)
+            return self.reply(json.dumps(review_data(cfg, st_, topic)), "application/json")
         if self.path == "/api/setup":
             return self.reply(json.dumps([{"label": l, "ok": ok, "fix": fix}
                                           for l, ok, fix in setup_checks(self.server.cfg)]),
@@ -21122,6 +21246,27 @@ def selfcheck():
     assert wt == os.path.join(f"{repo}-wt", "feature-a") and os.path.isdir(wt), wt
     assert tmux_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/feature-a")
     assert worktree_path(repo, "feature-a") == wt        # already there: reused, not redone
+
+    # !review / review_data: a changed file, an untracked one, a clean repo
+    with open(os.path.join(repo, "f"), "w") as f:
+        f.write("two\n")
+    with open(os.path.join(repo, "new.txt"), "w") as f:
+        f.write("x")
+    with stubbed(sess_cwd=lambda s: repo, has_session=lambda s: True, real_session=lambda s: s):
+        rd_ = review_data({"topics": {"9": "revs"}}, {}, "9")
+        assert [(f["path"], f["add"], f["del"]) for f in rd_["files"]] == [("f", 1, 1)], rd_
+        assert rd_["untracked"] == ["new.txt"] and rd_["session"] == "revs" and rd_["pr"] is None, rd_
+        assert "+two" in rd_["files"][0]["diff"] and "-one" in rd_["files"][0]["diff"], rd_
+        assert review_data({"topics": {}}, {}, "9")["error"] == "topic not bound"
+        sent_ = []
+        with stubbed(send=lambda *a, **k: sent_.append((a, k))):
+            c9_ = dict(cfg2, topics={"9": "revs"}, office_url=None)
+            txt_ = handle(c9_, {}, lk, "9", "!review")
+            assert "1 files +1 −1" in txt_ and "f  +1 −1" in txt_ and "new untracked" in txt_, txt_
+            assert handle(dict(c9_, office_url="https://b.ts.net:9090/office"), {}, lk, "9", "!review") is None
+            assert "https://b.ts.net:9090/review/9" in sent_[-1][1]["buttons"], sent_
+    subprocess.run(["git", "-C", repo, "checkout", "-q", "--", "f"], check=True)
+    os.remove(os.path.join(repo, "new.txt"))
 
     globals()["has_session"] = lambda s: False
     # No dir: a folder of its own under projects_root, never loose in $HOME.
