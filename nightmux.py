@@ -5326,6 +5326,7 @@ WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
               "!brain",    # types prompts on its own
+              "!po",       # starts agents on its own
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
@@ -5433,6 +5434,8 @@ HELP = [
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
+        "!po <product goal> | edit <notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, "
+        "then it runs each item as its own topic under !brain",
         "!brain [n] <mission> | resume | off = a supervisor reads every finished turn and sends "
         "the next step, or asks you when it needs a human",
         "!goal [n] <check> | off = run a check (tests, build) after every turn "
@@ -5902,6 +5905,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return routed          # not addressed to anyone: falls through as text
     if cmd == "!idea":
         return idea_cmd(cfg, state, lock, topic, arg)
+    if cmd == "!po":
+        return po_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!template":
         return template_cmd(cfg, state, lock, topic, arg)
     if cmd == "!new" or cmd[1:] in agents(cfg):
@@ -11168,11 +11173,18 @@ _brain = {}       # topic -> {"steps", "log", "paused"}: in memory
 _brain_run = {}   # topic -> {"sess", and "out" once the decision is in}
 
 
-def brain_decide(prompt):
+def claude_once(prompt, model="haiku", timeout=120):
+    """One headless, tool-less, sessionless answer from the user's own Claude login."""
     try:
-        out = subprocess.run(BRAIN_CMD, input=prompt, capture_output=True, text=True,
-                             timeout=120).stdout
+        return subprocess.run(BRAIN_CMD[:3] + [model] + BRAIN_CMD[4:], input=prompt, capture_output=True,
+                              text=True, timeout=timeout).stdout
     except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def brain_decide(prompt):
+    out = claude_once(prompt)
+    if out is None:
         return "ASK: the brain could not run (is `claude` installed and logged in?)"
     m = re.search(r"^(NEXT|DONE|ASK):\s*(.+)", out, re.M | re.S)
     return f"{m.group(1)}: {m.group(2).strip()}" if m else "ASK: unclear answer: " + out.strip()[:300]
@@ -11217,6 +11229,10 @@ def brain_tick(cfg, state):
         bs["paused"] = True
         send(cfg, topic, (f"🧠 mission done: {text}" if kind == "DONE" else f"🧠 needs you: {text}"
                           "\n\n!brain resume continues · !brain off stops it"), mode="plain")
+        par = (cfg.get("fan_kids") or {}).get(topic)
+        if par:                         # a roadmap item: the owner topic hears too
+            send(cfg, par, f"🧠 {run['sess']} {'done' if kind == 'DONE' else 'needs you'}: {text[:300]}",
+                 mode="plain")
 
 
 def brain_cmd(cfg, lock, topic, arg):
@@ -11246,6 +11262,118 @@ def brain_cmd(cfg, lock, topic, arg):
             out = f"🧠 brain set: {mission.strip()[:200]}\nI send each next step; you get asked only when it needs you"
         save_cfg(cfg)
     return out
+
+
+PO_PROMPT = """You are the product owner of this product. The owner is away and will approve your roadmap.
+PRODUCT GOAL: {goal}
+{extra}
+README:
+{readme}
+Project memory:
+{memory}
+Recent commits:
+{log}
+
+Write the roadmap: 3 to 8 items, most valuable first, each shippable on its own git branch by one coding agent
+without waiting for the others. Output ONLY lines of this exact form, nothing else:
+- <short title> | <agent: {agents}> | <the full mission for that agent: what to build, what done looks like, how to verify it>
+Prefer cheap, high-impact items. No deploys, releases or spending."""
+PO_FEEDBACK = "\nCurrent roadmap:\n{road}\nThe owner's notes on it (revise accordingly): {notes}"
+
+
+def po_text(po):
+    return "\n".join(f"{i}. {'✅ ' if it.get('topic') else ''}{it['title']} · {it['agent']}\n   {it['mission'][:200]}"
+                      for i, it in enumerate(po["items"], 1))
+
+
+def po_draft(cfg, topic, cwd, goal, notes, lock):
+    def rd(*parts):
+        try:
+            with open(os.path.join(cwd, *parts), errors="replace") as f:
+                return f.read()[:3000]
+        except OSError:
+            return "(none)"
+    old = (cfg.get("po") or {}).get(topic)
+    out = claude_once(PO_PROMPT.format(
+        goal=goal, readme=rd("README.md"), memory=rd(".nightmux", "memory.md"),
+        log=run("git", "-C", cwd, "log", "--oneline", "-15") or "(none)", agents=" / ".join(agents(cfg)),
+        extra=PO_FEEDBACK.format(road=po_text(old), notes=notes) if old and notes else ""),
+        model="sonnet", timeout=300)
+    items = []
+    for m in re.finditer(r"^- (.+?) \| (\w+) \| (.+)$", out or "", re.M):
+        key = m.group(2).lower()
+        items.append({"title": m.group(1).strip()[:60], "mission": m.group(3).strip(),
+                      "agent": key if key in agents(cfg) else default_agent(cfg)})
+    if not items:
+        send(cfg, topic, "🗺️ the product owner could not write a roadmap"
+             + ("" if out is not None else " (is `claude` installed and logged in?)"), mode="plain")
+        return
+    with lock:
+        cfg.setdefault("po", {})[topic] = {"goal": goal, "items": items}
+        save_cfg(cfg)
+    send(cfg, topic, f"🗺️ roadmap for: {goal[:150]}\n\n{po_text(cfg['po'][topic])}\n\n"
+         "!po edit <notes> revises it · !po go [1,3] approves all or some", mode="plain",
+         buttons=kb([[("✅ Approve all", "!po go"), ("❌ Drop", "!po off")]]))
+
+
+def po_go(cfg, state, lock, topic, pick):
+    po = (cfg.get("po") or {}).get(topic)
+    if not po:
+        return "no roadmap here — !po <product goal> first"
+    want = {int(n) for n in re.findall(r"\d+", pick)} or set(range(1, len(po["items"]) + 1))
+    rows = []
+    for i, it in enumerate(po["items"], 1):
+        if i not in want or it.get("topic"):
+            continue
+        before = set(cfg.get("fan_kids") or {})
+        _fan[topic] = [(it["agent"], it["mission"], "")]
+        out = fan_go(cfg, state, lock, topic)
+        new = [k for k in (cfg.get("fan_kids") or {}) if k not in before]
+        if not new:
+            rows.append(f"✕ {it['title']}: {out[:120]}")
+            continue
+        it["topic"] = new[0]
+        brain_cmd(cfg, lock, new[0], f"{it['title']}: {it['mission']}")      # saves cfg too
+        rows.append(f"✅ {it['title']} ← {it['agent']}")
+    return "🧭 started under the brain:\n" + "\n".join(rows or ["nothing new to start"])
+
+
+def po_status(cfg, topic):
+    po = (cfg.get("po") or {}).get(topic)
+    if not po:
+        return ("no roadmap. !po <product goal> — the brain drafts a roadmap for you to approve, then "
+                "runs each item as its own topic.\n!po edit <notes> revises · !po go [1,3] approves · "
+                "!po off drops it")
+    rows = []
+    for i, it in enumerate(po["items"], 1):
+        bs = _brain.get(it.get("topic")) or {}
+        state_ = ("not started" if not it.get("topic") else "paused" if bs.get("paused")
+                  else f"step {bs.get('steps', 0)}")
+        rows.append(f"{i}. {it['title']} · {it['agent']} · {state_}")
+    return f"🗺️ {po['goal'][:150]}\n" + "\n".join(rows)
+
+
+def po_cmd(cfg, state, lock, topic, sess, arg):
+    topic = str(topic)
+    a, _, rest = arg.partition(" ")
+    if a == "go":
+        return po_go(cfg, state, lock, topic, rest)
+    if a == "off":
+        with lock:
+            gone = (cfg.get("po") or {}).pop(topic, None)
+            save_cfg(cfg)
+        return "roadmap dropped" if gone else "no roadmap here"
+    if not arg:
+        return po_status(cfg, topic)
+    cwd = (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess else "")
+    if not cwd:
+        return "this topic has no project folder"
+    goal = (cfg.get("po") or {}).get(topic, {}).get("goal") if a == "edit" else arg
+    if not goal:
+        return "nothing to edit — !po <product goal> first"
+    threading.Thread(target=po_draft, args=(cfg, topic, cwd, goal, rest if a == "edit" else "", lock),
+                     daemon=True).start()
+    return "🗺️ the product owner is drafting the roadmap, about a minute…"
 
 
 def goal_cmd(cfg, lock, topic, arg):
@@ -19626,6 +19754,23 @@ def selfcheck():
         brain_round()
         assert "mission done: login page shipped" in bsaid_[-1]
         assert brain_cmd(bcfg_, glk_, "5", "off") == "brain off" and not bcfg_["brains"]
+    # !po: roadmap parsed from the model's lines, approved, one topic+brain per item.
+    psaid_, pcfg_, pst_ = [], {"topics": {"6": "p"}, "agents": {}}, {}
+    ROAD_ = ("noise\n- Add login | claude | build login with tests\n"
+             "- Dark mode | nope | add a theme toggle\n")
+    with tempfile.TemporaryDirectory() as pd_, stubbed(
+            save_cfg=lambda c: None, claude_once=lambda p, model="haiku", timeout=120: ROAD_,
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: psaid_.append(x),
+            fan_go=lambda c, st, lk, t: (c.setdefault("fan_kids", {}).update({"k%d" % len(c.get("fan_kids", {})): t}),
+                                         "ok")[1]):
+        po_draft(pcfg_, "6", pd_, "a todo app", "", glk_)
+        its_ = pcfg_["po"]["6"]["items"]
+        assert [i["title"] for i in its_] == ["Add login", "Dark mode"], its_
+        assert its_[1]["agent"] == default_agent(pcfg_) and "roadmap for: a todo app" in psaid_[-1]
+        assert "started" in po_go(pcfg_, pst_, glk_, "6", "1") and its_[0]["topic"] and not its_[1].get("topic")
+        assert pcfg_["brains"][its_[0]["topic"]]["mission"].startswith("Add login:")
+        assert "step 0" in po_status(pcfg_, "6") and "not started" in po_status(pcfg_, "6")
+        assert po_cmd(pcfg_, pst_, glk_, "6", "p", "off") == "roadmap dropped"
     # !preview finds what the session's own processes serve over HTTP — by
     # process tree, not port guessing — and links it on the tailnet.
     if shutil.which("ss"):

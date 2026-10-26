@@ -47,6 +47,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 
 `!help night`
 
+- `!po <product goal>` | edit &lt;notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, then it runs each item as its own topic under `!brain`
 - `!brain [n] <mission>` | resume | off = a supervisor reads every finished turn and sends the next step, or asks you when it needs a human
 - `!goal [n] <check>` | off = run a check (tests, build) after every turn and send failures back until it passes
 - `!shift` then one prompt per line = a sequential overnight plan
