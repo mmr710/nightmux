@@ -6,6 +6,10 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+### Added
+- `!review` and a `/review/<topic>` page: what the agent changed against main, per file, with the PR's checks.
+- `!sandbox on|off` (or `--nm-sandbox` on a new session): the agent runs in a Docker container that sees only its folder and its own login files, with every capability dropped. Build the image with `docker build -t nightmux-agent -f docker/agent.Dockerfile docker`.
+
 ## [1.5.0] — 2026-10-22
 
 ### Added
