@@ -4074,8 +4074,63 @@ def default_agent(cfg):
     return cfg.get("agent") or "claude"
 
 
+SANDBOX_HOME = "/home/agent"
+SANDBOX_KEEP = ("~/.claude", "~/.claude.json", "~/.codex", "~/.gemini", "~/.config/opencode",
+                "~/.aider.conf.yml", "~/.gitconfig")        # the agents' logins and settings
+
+
+def sandboxed(cfg, name):
+    sb = cfg.get("sandbox") or {}
+    return bool(sb.get("all")) or name in (sb.get("names") or [])
+
+
+def sandbox_cmd(cfg, name, cwd, cmdline, tty=True):
+    """cmdline run inside a throwaway container instead of on the host.
+
+    The agent sees its project folder and its own login files and nothing else:
+    no other project, no ~/.ssh, no cloud credentials, no host processes. The
+    container drops every capability and cannot gain new ones. Network stays on
+    (the agent has to reach its API); "network": "none" in cfg["sandbox"] cuts it.
+    Login files are mounted read-write because the agents refresh them there.
+    """
+    sb = cfg.get("sandbox") or {}
+    args = ["docker", "run", "--rm", "--name", "nm-" + re.sub(r"[^\w.-]", "-", name),
+            "-u", f"{os.getuid()}:{os.getgid()}", "-e", f"HOME={SANDBOX_HOME}",
+            "-e", "TERM=xterm-256color", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--pids-limit", str(sb.get("pids") or 512), "-v", f"{cwd}:{cwd}", "-w", cwd]
+    if tty:
+        args.insert(2, "-it")
+    if sb.get("memory"):
+        args += ["--memory", str(sb["memory"])]
+    if sb.get("network") == "none":
+        args += ["--network", "none"]
+    for m in sb.get("mounts") or SANDBOX_KEEP:
+        src = os.path.expanduser(m)
+        if os.path.exists(src):
+            args += ["-v", f"{src}:{SANDBOX_HOME}/{os.path.relpath(src, os.path.expanduser('~'))}"]
+    args += [sb.get("image") or "nightmux-agent", "sh", "-c", cmdline]
+    return " ".join(shlex.quote(a) for a in args)
+
+
+def sandbox_cmd_status(cfg, name):
+    """!sandbox with no argument: is it on for this session, and can docker run it."""
+    sb = cfg.get("sandbox") or {}
+    image = sb.get("image") or "nightmux-agent"
+    if not shutil.which("docker"):
+        return "docker is not installed here, so there is nothing to sandbox with"
+    have = "[" not in run("docker", "image", "inspect", "--format", "ok", image, timeout=20) and \
+        run("docker", "image", "inspect", "--format", "ok", image, timeout=20) == "ok"
+    return (f"🧱 {name}: sandbox {'ON' if sandboxed(cfg, name) else 'off'}"
+            f"{' for every session' if sb.get('all') else ''} · image {image} "
+            f"{'ready' if have else 'NOT built: docker build -t ' + image + ' -f docker/agent.Dockerfile docker'}\n"
+            "!sandbox on|off for this session, then !restore · inside it the agent sees only its "
+            "folder and its own login files; no ~/.ssh, other projects or cloud keys")
+
+
 def spawn(name, cwd, cmdline, cfg=None):
     """Detached tmux session in cwd with cmdline typed at its shell.
+
+    A sandboxed session (see sandbox_cmd) types the docker run instead.
 
     With a token autocompact, Claude Code is also told to compact itself there
     mid-turn: nightmux only compacts idle sessions, so one long task used to run
@@ -4086,6 +4141,8 @@ def spawn(name, cwd, cmdline, cfg=None):
     tok_at = cfg and compact_at(cfg)[1]
     if tok_at:
         env = ["-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % max(NATIVE_MIN, tok_at)]
+    if cfg and sandboxed(cfg, name):
+        cmdline = sandbox_cmd(cfg, name, cwd, cmdline)
     tmux("new-session", "-d", "-s", name, "-c", cwd, *env)
     tmux("send-keys", "-t", name, "-l", "--", cmdline)
     tmux("send-keys", "-t", name, "Enter")
@@ -4906,13 +4963,21 @@ def start_session(cfg, state, lock, topic, arg, key):
         except Exception as e:
             return f"could not create dir {cwd}: {e}"
     note = ""
+    if re.search(r"(?:^|\s)--nm-sandbox(?:\s|$)", flags):
+        flags = re.sub(r"(?:^|\s)--nm-sandbox(?=\s|$)", "", flags).strip()
+        with lock:
+            names = cfg.setdefault("sandbox", {}).setdefault("names", [])
+            if name not in names:
+                names.append(name)
+            save_cfg(cfg)
+        note += " in a sandbox"
     m = re.search(r"(?:^|\s)@(\S+)", flags)
     if m:
         branch, flags = m.group(1), (flags[:m.start()] + flags[m.end():]).strip()
         wt = worktree_path(cwd, branch)
         if not wt:
             return f"{cwd} is not a git repo — @{branch} needs a worktree to live in"
-        cwd, note = wt, f" @{branch}"
+        cwd, note = wt, note + f" @{branch}"
     
     # Another topic's session in this directory is a collision; this topic's own
     # is not. A topic restarting itself, or benching a second agent on its own
@@ -5081,7 +5146,7 @@ def status_report(cfg, state):
 # is the other half and is caught separately, being everything that is not a
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
+WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
               "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
@@ -5172,6 +5237,7 @@ HELP = [
         "!teleport [<agent>] [prompt] = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought",
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
+        "!sandbox [on|off] = run this session's agent in a Docker container that sees only its folder and its own login (!restore to apply)",
         "!review = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff",
         "!update [agent] = run each agent's own updater · !version",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
@@ -5857,6 +5923,16 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 {"text": "🔍 review the diff", "url": f"{base_}/review/{topic}"}]]}))
             return None
         return text + "\nwith office_url set, this becomes a page with the full diff (!office)"
+    if cmd == "!sandbox":
+        if arg in ("on", "off"):
+            with lock:
+                sb = cfg.setdefault("sandbox", {})
+                names = [n for n in sb.get("names") or [] if n != sess]
+                sb["names"] = names + [sess] if arg == "on" else names
+                save_cfg(cfg)
+            return (f"🧱 {sess}: sandbox {arg} from its next start — !restore now, or !new it. "
+                    + sandbox_cmd_status(cfg, sess).split("\n")[0])
+        return sandbox_cmd_status(cfg, sess)
     if cmd == "!worktrees":
         cwd = sess_cwd(sess)
         root = tmux_git(cwd, "rev-parse", "--show-toplevel")
@@ -21247,6 +21323,14 @@ def selfcheck():
     assert tmux_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/feature-a")
     assert worktree_path(repo, "feature-a") == wt        # already there: reused, not redone
 
+    # sandbox_cmd: shape of the docker line, mounts only what exists, off by default
+    sbc_ = {"sandbox": {"names": ["box"], "mounts": ["~/.claude", "/no/such/thing"], "network": "none", "image": "img"}}
+    assert sandboxed(sbc_, "box") and not sandboxed(sbc_, "other") and sandboxed({"sandbox": {"all": 1}}, "x")
+    line_ = sandbox_cmd(sbc_, "bo.x", repo, "claude --foo", tty=False)
+    assert line_.startswith("docker run --rm --name nm-bo.x -u ") and "--cap-drop ALL" in line_, line_
+    assert "--network none" in line_ and "no/such" not in line_ and line_.endswith("img sh -c 'claude --foo'"), line_
+    assert f"-v {repo}:{repo} -w {repo}" in line_ and "-it" not in line_, line_
+    assert "docker run --rm -it " in sandbox_cmd(sbc_, "b", repo, "x") or "-it" in sandbox_cmd(sbc_, "b", repo, "x")
     # !review / review_data: a changed file, an untracked one, a clean repo
     with open(os.path.join(repo, "f"), "w") as f:
         f.write("two\n")
