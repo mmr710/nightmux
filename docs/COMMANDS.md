@@ -19,6 +19,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!server [peer|local]` = which machine runs this topic, or move it
 - `!worktrees` = git worktrees of this repo, and who is in each
 - `!sandbox [on|off]` = run this session's agent in a Docker container that sees only its folder and its own login (`!restore` to apply)
+- `!kanban` = every topic as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline
 - `!review` = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff
 - `!update [agent]` = run each agent's own updater · `!version`
 - `!team [<user id> watch|prompt|admin]` = roles for a shared group · `!audit [n]` = who sent what

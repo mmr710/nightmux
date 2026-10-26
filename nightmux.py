@@ -5238,6 +5238,7 @@ HELP = [
         "!server [peer|local] = which machine runs this topic, or move it",
         "!worktrees = git worktrees of this repo, and who is in each",
         "!sandbox [on|off] = run this session's agent in a Docker container that sees only its folder and its own login (!restore to apply)",
+        "!kanban = every topic as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline",
         "!review = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff",
         "!update [agent] = run each agent's own updater · !version",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
@@ -5563,6 +5564,13 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return (f"🔀 this topic runs here again ({me})" if target == "local" else
                 f"🔀 this topic now runs on {target}: everything typed here goes there.\n"
                 "!new <name> <dir> starts a session on it")
+    if cmd == "!kanban":
+        base_ = (cfg.get("office_url") or "").rsplit("/office", 1)[0]
+        if not base_.startswith("http"):
+            return "📋 the kanban needs office_url (!office shows how); locally: http://127.0.0.1:%s/board" % cfg.get("webhook_port", 9090)
+        send(cfg, topic, "📋 every topic as a card: needs you, running, queued, waiting, idle",
+             mode="plain", buttons=json.dumps({"inline_keyboard": [[{"text": "📋 open kanban", "url": base_ + "/board"}]]}))
+        return None
     if cmd == "!office":
         url = cfg.get("office_url")
         if not url:
@@ -13332,7 +13340,7 @@ h2.fold::before { content: "\25BE"; order: 0; } h2.fold.shut::before { content: 
 </style></head>
 <body>
 <header><div class="hbar"><h1><svg width="20" height="20" viewBox="0 0 16 16"><path d="M11 1a7 7 0 1 0 4 12A6 6 0 0 1 11 1z" fill="#e0af68"/></svg>nightmux</h1>
-<nav class="top"><a href="/office">🏢 office</a><a href="/share">🎁 share</a><a href="/app">📱 app</a></nav>
+<nav class="top"><a href="/board">📋 board</a><a href="/office">🏢 office</a><a href="/share">🎁 share</a><a href="/app">📱 app</a></nav>
 <div id="pulse"></div></div></header>
 <main>
 <div id="setup"></div><div id="toast"></div>
@@ -15895,6 +15903,49 @@ def review_data(cfg, state, topic):
     return out
 
 
+BOARD_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nightmux board</title><link rel="icon" href="/icon.svg">
+<style>
+:root{--bg:#0b0e14;--fg:#c0caf5;--mut:#7a83a6;--bar:#11151f;--acc:#f5c542;--card:#161b27}
+@media (prefers-color-scheme:light){:root{--bg:#fafafa;--fg:#1f2335;--mut:#6b7089;--bar:#eceef4;--acc:#9a6b00;--card:#fff}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
+header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--bar)}header b{color:var(--acc)}
+header a{color:var(--mut);text-decoration:none}.mut{color:var(--mut);font-size:12px}
+main{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;padding:12px 16px 40px;align-items:start}
+section{background:var(--bar);border-radius:10px;padding:8px}
+h2{margin:2px 6px 8px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+h2 span{color:var(--acc)}
+.c{background:var(--card);border-radius:8px;padding:8px 10px;margin:6px 0;border-left:3px solid var(--acc)}
+.c b{display:block;word-break:break-word}.c a{color:var(--acc);text-decoration:none;margin-right:10px;font-size:12px}
+</style></head><body>
+<header><b>🌙 board</b><a href="/">dashboard</a><a href="/office">office</a><span class="mut" id="st"></span></header>
+<main id="m"></main>
+<script>
+const COLS = [['needs', '🙋 needs you'], ['running', '⚙️ running'], ['queued', '📥 queued'],
+              ['held', '⏳ waiting for limit'], ['idle', '✅ idle · review'], ['off', '💤 offline']];
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+function col(r) {
+  if (r.mode === 'offline' || r.unreachable || !r.alive) return 'off';
+  if (r.mode === 'waiting') return 'needs';
+  if (r.held_until) return 'held';
+  if (r.mode === 'busy') return 'running';
+  return r.queued ? 'queued' : 'idle';
+}
+async function load() {
+  try {
+    const rows = await (await fetch('/api/topics', {cache: 'no-store'})).json();
+    const by = {}; for (const r of rows) (by[col(r)] = by[col(r)] || []).push(r);
+    document.getElementById('m').innerHTML = COLS.map(([k, t]) => '<section><h2>' + t + ' <span>' + (by[k] || []).length + '</span></h2>' +
+      (by[k] || []).map(r => '<div class="c"><b>' + esc(r.name || r.session) + '</b><span class="mut">' + esc([r.agent, r.server, r.queued ? r.queued + ' queued' : '', r.budget].filter(Boolean).join(' · ')) + '</span><br>' +
+        '<a href="/review/' + esc(r.topic) + '">diff</a><a href="/term/' + esc(r.topic) + '">terminal</a><a href="/chat/' + esc(r.topic) + '">chat</a></div>').join('') + '</section>').join('');
+    document.getElementById('st').textContent = rows.length + ' topics';
+  } catch (e) { document.getElementById('st').textContent = 'offline'; }
+}
+load(); setInterval(() => { if (!document.hidden) load(); }, 4000);
+</script></body></html>"""
+
+
 APP_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nightmux app</title><link rel="icon" href="/icon.svg">
@@ -16250,6 +16301,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return self.reply(json.dumps(term_lines(cfg, st_, topic, (qq.get("agent") or [""])[0],
                                                     (qq.get("lines") or ["2000"])[0])),
                               "application/json")
+        if self.path == "/board":
+            return self.reply(BOARD_HTML, "text/html; charset=utf-8")
         if self.path.startswith("/review/"):
             return self.reply(REVIEW_HTML, "text/html; charset=utf-8")
         if self.path.startswith("/api/review/"):
@@ -21331,6 +21384,13 @@ def selfcheck():
     assert "--network none" in line_ and "no/such" not in line_ and line_.endswith("img sh -c 'claude --foo'"), line_
     assert f"-v {repo}:{repo} -w {repo}" in line_ and "-it" not in line_, line_
     assert "docker run --rm -it " in sandbox_cmd(sbc_, "b", repo, "x") or "-it" in sandbox_cmd(sbc_, "b", repo, "x")
+    # the board: page served, !board without and with office_url
+    assert "/api/topics" in BOARD_HTML and "'needs'" in BOARD_HTML
+    sent_b = []
+    with stubbed(send=lambda *a, **k: sent_b.append((a, k))):
+        assert "kanban needs office_url" in handle(dict(cfg2, office_url=None), {}, lk, "9", "!kanban")
+        assert handle(dict(cfg2, office_url="https://b.ts.net:9090/office"), {}, lk, "9", "!kanban") is None
+        assert "https://b.ts.net:9090/board" in sent_b[-1][1]["buttons"], sent_b
     # !review / review_data: a changed file, an untracked one, a clean repo
     with open(os.path.join(repo, "f"), "w") as f:
         f.write("two\n")

@@ -7,6 +7,7 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 ## [Unreleased]
 
 ### Added
+- `!kanban` and a `/board` page: every topic (on every server) as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline. Derived from live state, nothing to maintain.
 - `!review` and a `/review/<topic>` page: what the agent changed against main, per file, with the PR's checks.
 - `!sandbox on|off` (or `--nm-sandbox` on a new session): the agent runs in a Docker container that sees only its folder and its own login files, with every capability dropped. Build the image with `docker build -t nightmux-agent -f docker/agent.Dockerfile docker`.
 
