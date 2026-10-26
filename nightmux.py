@@ -3346,6 +3346,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
             speak_turn(cfg, topic, body)
             sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
+            brain_capture(cfg, topic, sess, body)
             loop_capture(cfg, topic, sess, body)
             mem_capture(cfg, topic, sess)
             pair_capture(cfg, topic, sess, body)
@@ -3757,6 +3758,7 @@ def watcher(cfg, state, lock):
             failover_tick(cfg, state, lock)
             harvest_tick(cfg, state, lock)
             goal_tick(cfg, state)
+            brain_tick(cfg, state)
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
@@ -5323,6 +5325,7 @@ WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill
               "!failover", "!ship",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
+              "!brain",    # types prompts on its own
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
@@ -5430,6 +5433,8 @@ HELP = [
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
+        "!brain [n] <mission> | resume | off = a supervisor reads every finished turn and sends "
+        "the next step, or asks you when it needs a human",
         "!goal [n] <check> | off = run a check (tests, build) after every turn "
         "and send failures back until it passes",
         "!shift then one prompt per line = a sequential overnight plan",
@@ -5630,6 +5635,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return stats_report(fleet_analysis(cfg, days))
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!brain":
+        out = brain_cmd(cfg, lock, topic, arg)
+        if out.startswith("🧠 brain set"):      # a new mission starts the work
+            state.setdefault(sess, {}).setdefault("queue", []).append(
+                (cfg.get("brains") or {})[topic]["mission"])
+        return out
     if cmd == "!briefing":
         return briefing_cmd(cfg, state, lock, topic, arg)
     if cmd == "!deps":
@@ -11138,6 +11149,103 @@ def goal_tick(cfg, state):
             "weaken or delete the check or its tests. Stop when it passes.")
         send(cfg, topic, f"🔁 goal round {gs['rounds']}/{top}: {cmd} failed "
              f"(exit {run['rc']}) — sent back to {run['sess']}", mode="plain")
+
+
+BRAIN_STEPS = 12
+BRAIN_CMD = ["claude", "-p", "--model", "haiku", "--tools", "", "--no-session-persistence"]
+BRAIN_PROMPT = """You supervise a coding agent working toward a mission for its owner, who is away.
+MISSION: {mission}
+Steps already sent: {log}
+The agent's last reply:
+{body}
+
+Answer with exactly one line:
+NEXT: <the exact next instruction for the agent>
+DONE: <one-line summary>   (only when the mission is fully met and verified)
+ASK: <question for the owner>   (needs a human decision, credentials, money, or anything risky or irreversible)
+Never approve deploys, deletes, force-pushes or spending. Do not repeat a step already sent."""
+_brain = {}       # topic -> {"steps", "log", "paused"}: in memory
+_brain_run = {}   # topic -> {"sess", and "out" once the decision is in}
+
+
+def brain_decide(prompt):
+    try:
+        out = subprocess.run(BRAIN_CMD, input=prompt, capture_output=True, text=True,
+                             timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "ASK: the brain could not run (is `claude` installed and logged in?)"
+    m = re.search(r"^(NEXT|DONE|ASK):\s*(.+)", out, re.M | re.S)
+    return f"{m.group(1)}: {m.group(2).strip()}" if m else "ASK: unclear answer: " + out.strip()[:300]
+
+
+def brain_capture(cfg, topic, sess, body):
+    b = (cfg.get("brains") or {}).get(topic)
+    bs = _brain.setdefault(topic, {"steps": 0, "log": []})
+    if not b or bs.get("paused") or topic in _brain_run:
+        return
+    run = _brain_run[topic] = {"sess": sess}
+    prompt = BRAIN_PROMPT.format(mission=b["mission"], body=body[-3000:],
+                                 log="; ".join(x[:150] for x in bs["log"][-6:]) or "none")
+
+    def go():
+        run["out"] = brain_decide(prompt)
+    threading.Thread(target=go, daemon=True).start()
+
+
+def brain_tick(cfg, state):
+    for topic, run in list(_brain_run.items()):
+        if "out" not in run:
+            continue
+        _brain_run.pop(topic, None)
+        b, bs = (cfg.get("brains") or {}).get(topic), _brain.get(topic)
+        if not b or not bs:
+            continue
+        kind, _, text = run["out"].partition(": ")
+        q = state.setdefault(run["sess"], {}).setdefault("queue", [])
+        if kind == "NEXT" and q:
+            continue                    # you spoke first; the next turn asks again
+        top = b.get("max") or BRAIN_STEPS
+        bs["steps"] += 1
+        if kind == "NEXT" and (text in bs["log"] or bs["steps"] > top):
+            kind, text = "ASK", ("it is repeating itself" if text in bs["log"]
+                                 else f"{top} steps used") + f", next would be: {text[:300]}"
+        if kind == "NEXT":
+            bs["log"].append(text)
+            q.append(text)
+            send(cfg, topic, f"🧠 step {bs['steps']}/{top} → {run['sess']}: {text[:300]}", mode="plain")
+            continue
+        bs["paused"] = True
+        send(cfg, topic, (f"🧠 mission done: {text}" if kind == "DONE" else f"🧠 needs you: {text}"
+                          "\n\n!brain resume continues · !brain off stops it"), mode="plain")
+
+
+def brain_cmd(cfg, lock, topic, arg):
+    brains = cfg.get("brains") or {}
+    b, bs = brains.get(topic), _brain.get(topic) or {}
+    if not arg:
+        if not b:
+            return ("no brain here. !brain <mission> starts the work and supervises it: after every "
+                    "finished turn it sends the next step, or asks you.\n!brain 20 ship the login page "
+                    "(20 steps instead of %d)" % BRAIN_STEPS)
+        return (f"🧠 {b['mission']}\nstep {bs.get('steps', 0)}/{b.get('max') or BRAIN_STEPS}"
+                + (" · paused" if bs.get("paused") else ""))
+    with lock:
+        if arg == "off":
+            brains.pop(topic, None)
+            _brain.pop(topic, None)
+            out = "brain off"
+        elif arg == "resume" and b:
+            _brain[topic] = {"steps": 0, "log": []}
+            out = "🧠 resumed, fresh step budget; it decides at the end of the next turn"
+        else:
+            m = re.match(r"(\d+)\s+(.+)", arg, re.S)
+            n, mission = (int(m.group(1)), m.group(2)) if m else (None, arg)
+            brains[topic] = {"mission": mission.strip(), **({"max": n} if n else {})}
+            cfg["brains"] = brains
+            _brain.pop(topic, None)
+            out = f"🧠 brain set: {mission.strip()[:200]}\nI send each next step; you get asked only when it needs you"
+        save_cfg(cfg)
+    return out
 
 
 def goal_cmd(cfg, lock, topic, arg):
@@ -19492,6 +19600,32 @@ def selfcheck():
         goal_round()
         assert "✅ goal green: true" in gsaid_ and "/clear" in gst_["g"]["queue"], gsaid_[-2:]
         assert goal_cmd(gcfg_, glk_, "4", "off") == "goal off" and not gcfg_["goals"]
+    # !brain: NEXT queues the step, a repeat or DONE or ASK pauses and tells you.
+    bsaid_, bcfg_, bst_ = [], {"topics": {"5": "b"}}, {"b": {"mode": "idle"}}
+    with stubbed(save_cfg=lambda c: None, brain_decide=lambda p: BRAIN_ANS_[0],
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: bsaid_.append(x)):
+        BRAIN_ANS_ = ["NEXT: write the tests"]
+        assert brain_cmd(bcfg_, glk_, "5", "3 ship it").startswith("🧠 brain set")
+
+        def brain_round():
+            brain_capture(bcfg_, "5", "b", "did a thing")
+            for _ in range(200):
+                if "out" in (_brain_run.get("5") or {}):
+                    break
+                time.sleep(0.02)
+            brain_tick(bcfg_, bst_)
+        brain_round()
+        assert bst_["b"]["queue"] == ["write the tests"] and "step 1/3" in bsaid_[-1], bsaid_
+        bst_["b"]["queue"] = []
+        brain_round()                                   # same step again: it is looping
+        assert "repeating itself" in bsaid_[-1] and _brain["5"]["paused"] and not bst_["b"]["queue"]
+        brain_capture(bcfg_, "5", "b", "x")             # paused: nothing runs
+        assert "5" not in _brain_run
+        assert "resumed" in brain_cmd(bcfg_, glk_, "5", "resume")
+        BRAIN_ANS_[0] = "DONE: login page shipped"
+        brain_round()
+        assert "mission done: login page shipped" in bsaid_[-1]
+        assert brain_cmd(bcfg_, glk_, "5", "off") == "brain off" and not bcfg_["brains"]
     # !preview finds what the session's own processes serve over HTTP — by
     # process tree, not port guessing — and links it on the tailnet.
     if shutil.which("ss"):
