@@ -34,7 +34,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!vibe` = 1-tap Super-Intent cockpit (Build, Goal, Race, Teleport, Harvest, Wrapped)
 - `!1`..`!9` menu pick | `!y` `!n` `!esc` `!int` `!enter` `!up` `!down` `!tab` `!mode`
 - `!keys <tmux keys>` | `!raw <text>` (types even with a menu open)
-- `!model <name>` | `!effort <low|medium|high>` (opencode: `!model` lists, `!model <part>` searches and picks)
+- `!model <name>` | `!effort <low|medium|high>` (`!model` alone: the agent's models as buttons)
 - `!p [name] [args]` = saved prompts as buttons (review, fix-tests, spec, explain, tidy, ship); `!p` save &lt;name> &lt;text>
 - `!autoyes <agent|off>` = answer that agent's permission menus for it
 - `!cron <m h dom mon dow> <prompt>` = recurring prompt on a crontab schedule (see `!sched`)
