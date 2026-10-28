@@ -926,6 +926,11 @@ MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>●]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)
 # ways across versions. The esc half is deliberately not widened to "esc to
 # cancel" — BUSY already claims that phrasing for a working pane.
 ARROWED = re.compile(r"↑↓\s*select|enter (?:to )?confirm|esc dismiss", re.I)
+# opencode's questions form: tabs across the top, one per question plus Submit.
+# Its footer is "⇆ tab  enter submit  esc dismiss"; the review tab lists
+# "Symptom: answer" rows, no number or arrow marker, so nothing else saw it open
+# and the pane read idle with the form waiting on Enter.
+FORM = re.compile(r"⇆\s*tab\b.*\benter\s+(?:submit|next|select)", re.I)
 # Whatever the TUI paints on the row the arrows are currently on.
 PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -1239,7 +1244,7 @@ def pane_state(lines):
     joined = "\n".join(tail)
     asks = [m.start() for m in WAITING.finditer(joined)]
     box = [m.start() for m in INPUT_BOX.finditer(joined)]
-    if (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
+    if FORM.search(joined) or (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
                                   and any(BOXED.match(l) or CHOICE.match(l)
                                           for l in tail)):
         return "waiting"
@@ -1377,6 +1382,10 @@ def menu_buttons(lines, sess=None, bind=False):
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    if FORM.search("\n".join(plain(l) for l in lines[-25:])):
+        rows.append([("esc", tap("esc")), ("⇆", tap("tab")), ("↑", tap("up")),
+                     ("↓", tap("down")), ("⏎", tap("enter", True))])
+        return kb(rows)
     rows.append([("esc", tap("esc")), ("←", tap("left")),
                  ("→", tap("right")), ("⏎", tap("enter", True))] if bar else
                 [("esc", tap("esc")), ("↑", tap("up")),
@@ -4239,6 +4248,13 @@ def agent(cfg, key):
     return spec[0], (spec[1] if len(spec) > 1 else "")
 
 
+def claude_has_chat(cwd):
+    """Does Claude Code have a saved conversation for this folder? It files them
+    under ~/.claude/projects/<cwd with every non-alphanumeric char as '-'>."""
+    d = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.expanduser(cwd))))
+    return bool(glob.glob(os.path.join(d, "*.jsonl")))
+
+
 def default_agent(cfg):
     return cfg.get("agent") or "claude"
 
@@ -5157,6 +5173,10 @@ def start_session(cfg, state, lock, topic, arg, key):
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
+    # `claude --continue` in a folder with no saved conversation prints "No
+    # conversation found to continue" and exits, leaving a bare shell behind.
+    if prog == "claude" and "--continue" in flags.split() and not claude_has_chat(cwd):
+        flags = " ".join(f for f in flags.split() if f != "--continue")
     spawn(name, cwd, f"{prog} {flags}".strip(), cfg)
     with lock:
         cfg["topics"][topic] = name
@@ -18320,6 +18340,12 @@ def selfcheck():
           "  ┃  3. Scaffold-only",
           "  ┃  ↑↓ select  enter submit  esc dismiss"]
     assert pane_state(oc) == "waiting"
+    form = ["  ┃  Questions", "  ┃  Symptom  APK type  Phone side  Setup  Submit",
+            "  ┃  Symptom: Icon not in AA launcher", "  ┃  APK type: Not sure",
+            "  ┃  ⇆ tab  enter submit  esc dismiss", "", "  ╹▀▀▀▀▀▀▀▀▀▀▀▀"]
+    assert pane_state(form) == "waiting"
+    assert [b["text"] for b in json.loads(menu_buttons(form))["inline_keyboard"][-1]] == \
+        ["esc", "⇆", "↑", "↓", "⏎"]
     assert [r[0]["callback_data"]
             for r in json.loads(menu_buttons(oc))["inline_keyboard"][:-1]] == \
         ["!1", "!2", "!3"]                                    # prose 5. dropped
@@ -21303,6 +21329,16 @@ def selfcheck():
 
     cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
     assert agent(cfg2, "claude") == ("claude", "--continue")
+    with tempfile.TemporaryDirectory() as pj_:
+        old_pj_ = PROJECTS
+        globals()["PROJECTS"] = pj_
+        try:
+            assert not claude_has_chat("/www/agent")
+            os.makedirs(os.path.join(pj_, "-www-agent"))
+            open(os.path.join(pj_, "-www-agent", "s.jsonl"), "w").close()
+            assert claude_has_chat("/www/agent") and not claude_has_chat("/www/other")
+        finally:
+            globals()["PROJECTS"] = old_pj_
     assert agent(cfg2, "opencode") == ("opencode", "--resume")    # added by config
     assert agent(cfg2, "nope") == ("nope", "")   # one-off: the key is the command
     assert default_agent(cfg2) == "claude"
