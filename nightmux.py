@@ -637,14 +637,181 @@ def settle(sess, needle, timeout=2.0):
 PICKER = "esc Go back / Clear search"
 
 
+# opencode's own lists -- sessions, models, variants, agents, the ctrl+p
+# palette -- ask nothing and number nothing: a title row ending in "esc", then
+# a search box that takes every key. A prompt typed while one was up landed in
+# that search ("Sessions … No sessions found", the prompt's tail in the box)
+# and Enter picked whatever row was on top. Its questions and permission
+# dialogs end "esc dismiss" and stay with WAITING.
+OC_DIALOG = re.compile(r"^ {2,}\S.*?\S {3,}esc\s*$")
+OC_BAR = re.compile(r"╹▀{5,}")        # opencode's input box bottom edge
+
+
 def close_picker(sess):
-    """Leave agy's conversation picker: Esc clears its search, the next goes back.
+    """Leave agy's conversation picker or an opencode list: Esc clears agy's
+    search, the next goes back; opencode can stack two (model, then variant).
     Stops the moment it is gone -- one Esc too many interrupts a running turn."""
     for _ in range(3):
-        if not any(PICKER in line for line in visible(sess)):
+        if not any(PICKER in line or OC_DIALOG.match(line) for line in visible(sess)):
             return
         tmux("send-keys", "-t", tgt(sess), "Escape")
         time.sleep(0.3)
+
+
+def oc_rows(lines):
+    """(title, rows) of the opencode list on screen, or None. The list is drawn
+    over the chat, so each row is cut to the title's columns to drop what
+    shows through on either side."""
+    for i, l in enumerate(lines):
+        if OC_DIALOG.match(l):
+            a, b = len(l) - len(l.lstrip()), len(l.rstrip())
+            rows = [r[max(a - 2, 0):b].strip().lstrip("● ").strip() for r in lines[i + 1:]]
+            rows = [r for r in rows if r][1:]          # the first is the search box
+            rows = [re.sub(r"\s{2,}", " · ", r) for r in rows if r and not re.search(r"ctrl\+\w$", r)]
+            return l[a:b - 3].strip(), rows
+    return None
+
+
+def oc_model(sess, query):
+    """!model on opencode. Its /models takes no argument -- it opens a search
+    list, and a model with variants opens a second list after it -- so typing
+    "/model x" left the pane sat in a dialog that ate the next prompt. Search
+    for the name, take the top row, Enter through the variant list (the
+    current one is preselected) and report what the footer then says."""
+    if pane_state(visible(sess)) == "busy":
+        return f"{sess} is working — !model when it is idle"
+    close_picker(sess)
+    at = tgt(sess)
+    tmux("send-keys", "-t", at, "-l", "--", "/models")
+    time.sleep(0.5)
+    tmux("send-keys", "-t", at, "Enter")
+    if not settle(sess, "Select model esc", 4):
+        close_picker(sess)
+        return "opencode did not open its model list — !pane to look"
+    if not query:
+        rows = (oc_rows(visible(sess)) or ("", []))[1]
+        close_picker(sess)
+        return [r.replace(" · ", " ") for r in rows if r not in ("Recent", "Favorites")]
+    tmux("send-keys", "-t", at, "-l", "--", query)
+    settle(sess, query)
+    time.sleep(0.6)                      # the filter redraws after the echo
+    got = oc_rows(visible(sess))
+    if not got or not got[1] or got[1][0].startswith("No results"):
+        close_picker(sess)
+        return f"no opencode model matches '{query}' — !model alone lists them"
+    # The filter is fuzzy and floats the current model up: "kimi k3" put
+    # "Kimi K3.1 Pro" above "Kimi K3". An exact name wins, then a prefix.
+    key = lambda r: re.sub(r"\W+", "", r.lower())
+    q = key(query)
+    down = next((i for i, r in enumerate(got[1]) if key(r) == q), None)
+    if down is None:
+        down = next((i for i, r in enumerate(got[1]) if key(r).startswith(q)), 0)
+    if down:
+        tmux("send-keys", "-t", at, *["Down"] * down)
+    for _ in range(2):                   # the model, then its variant list
+        tmux("send-keys", "-t", at, "Enter")
+        time.sleep(0.8)
+        if not any(OC_DIALOG.match(l) for l in visible(sess)):
+            break
+    close_picker(sess)
+    now = next((m.group(1) for m in map(re.compile(r"^\s*┃\s+\S.*? · (.+?)\s*$").match,
+                                       reversed(visible(sess))) if m), "?")
+    return f"🧠 opencode model: {now}"
+
+
+# Every agent's /model is a picker of its own -- Claude Code and codex number
+# theirs, agy's is bare -- so "!model x" typed "/model x" and, everywhere but
+# Claude Code, left a dialog open that ate the next prompt. These read the
+# picker instead: its rows become buttons, and a tap walks the highlight there.
+MODEL_HEAD = re.compile(r"^\s*(?:Select model|Select Model and Effort|Switch Model)\s*$")
+MODEL_ROW = re.compile(r"^\s*([❯›>]?)\s*(?:↓\s*)?(\d+\.\s+)?(\S.*?)\s*$")
+MODEL_END = re.compile(r"[Ee]ffort\b|[Ee]nter (?:to|select)|Keyboard:|…\s*\+\d")
+# What a picker says while it is still up, the follow-up included (codex asks
+# for a reasoning level after the model).
+PICK_OPEN = re.compile(r"esc (?:back|Go Back)|Esc to cancel")
+
+
+def model_rows(lines):
+    """([model names], index of the highlighted one or None) of the /model
+    picker on screen, or None."""
+    head = next((i for i, l in enumerate(lines) if MODEL_HEAD.match(l)), None)
+    if head is None:
+        return None
+    rows = []
+    for l in lines[head + 1:]:
+        if MODEL_END.search(l):
+            break
+        m = MODEL_ROW.match(l)
+        if m and not m.group(3).startswith(("Search:", "─")):
+            rows.append(m.groups())
+    if any(n for _, n, _ in rows):       # numbered: the prose above it is no row
+        rows = [r for r in rows if r[1]]
+    names = [re.sub(r"\s*\((?:default|recommended|current)\)|✔", "",
+                    re.split(r"\s{2,}", t)[0], flags=re.I).strip() for _, _, t in rows]
+    at = [i for i, r in enumerate(rows) if r[0]]
+    return names, (at[0] if len(at) == 1 else None)
+
+
+def close_models(sess):
+    for _ in range(3):
+        if not PICK_OPEN.search("\n".join(visible(sess))):
+            return
+        tmux("send-keys", "-t", tgt(sess), "Escape")
+        time.sleep(0.3)
+
+
+def model_cmd(sess, query):
+    """!model: no argument, the agent's own models as a list (made buttons by
+    the caller); with one, pick it in the agent's picker. A str is the reply."""
+    scr = visible(sess)
+    if pane_state(scr) == "busy":
+        return f"{sess} is working — !model when it is idle"
+    if any(OC_BAR.search(l) for l in scr):
+        return oc_model(sess, query)
+    close_picker(sess)
+    at = tgt(sess)
+    tmux("send-keys", "-t", at, "-l", "--", "/model")
+    time.sleep(0.5)
+    tmux("send-keys", "-t", at, "Enter")
+    end, got = time.time() + 4, None
+    while time.time() < end and not (got and got[0]):
+        time.sleep(0.25)
+        got = model_rows(visible(sess))
+    if not (got and got[0]):
+        close_models(sess)
+        if query:      # Claude Code also takes a name the picker does not list
+            inject(sess, f"/model {query}")
+            return None
+        return f"no model picker came up on {sess} — !pane to look"
+    names, cur = got
+    if not query:
+        close_models(sess)
+        return names
+    key = lambda r: re.sub(r"\W+", "", r.lower())
+    q = key(query)
+    want = next((i for i, n in enumerate(names) if key(n) == q),
+                next((i for i, n in enumerate(names) if q in key(n)), None))
+    if want is None or cur is None:
+        close_models(sess)
+        return (f"'{query}' is not in {sess}'s model list — !model shows it" if want is None
+                else f"can't tell which row {sess}'s picker is on — !pane to look")
+    if want != cur:
+        tmux("send-keys", "-t", at, *["Down" if want > cur else "Up"] * abs(want - cur))
+        time.sleep(0.4)
+        if (model_rows(visible(sess)) or [0, None])[1] != want:
+            close_models(sess)
+            return f"could not move {sess}'s picker onto {names[want]} — !pane to look"
+    for _ in range(3):   # the model, then codex's reasoning level
+        scr = "\n".join(visible(sess))
+        if not PICK_OPEN.search(scr):
+            break
+        # "s" keeps the pick to this session where the picker offers it:
+        # Enter saves it as the default for every session started after.
+        session = re.search(r"\bs (?:to use this )?session", scr)
+        tmux("send-keys", "-t", at, "s" if session else "Enter")
+        time.sleep(0.8)
+    close_models(sess)
+    return f"🧠 {sess}: {names[want]}"
 
 
 def inject(sess, text):
@@ -759,6 +926,11 @@ MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>●]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)
 # ways across versions. The esc half is deliberately not widened to "esc to
 # cancel" — BUSY already claims that phrasing for a working pane.
 ARROWED = re.compile(r"↑↓\s*select|enter (?:to )?confirm|esc dismiss", re.I)
+# opencode's questions form: tabs across the top, one per question plus Submit.
+# Its footer is "⇆ tab  enter submit  esc dismiss"; the review tab lists
+# "Symptom: answer" rows, no number or arrow marker, so nothing else saw it open
+# and the pane read idle with the form waiting on Enter.
+FORM = re.compile(r"⇆\s*tab\b.*\benter\s+(?:submit|next|select)", re.I)
 # Whatever the TUI paints on the row the arrows are currently on.
 PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -1072,7 +1244,7 @@ def pane_state(lines):
     joined = "\n".join(tail)
     asks = [m.start() for m in WAITING.finditer(joined)]
     box = [m.start() for m in INPUT_BOX.finditer(joined)]
-    if (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
+    if FORM.search(joined) or (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
                                   and any(BOXED.match(l) or CHOICE.match(l)
                                           for l in tail)):
         return "waiting"
@@ -1210,6 +1382,10 @@ def menu_buttons(lines, sess=None, bind=False):
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    if FORM.search("\n".join(plain(l) for l in lines[-25:])):
+        rows.append([("esc", tap("esc")), ("⇆", tap("tab")), ("↑", tap("up")),
+                     ("↓", tap("down")), ("⏎", tap("enter", True))])
+        return kb(rows)
     rows.append([("esc", tap("esc")), ("←", tap("left")),
                  ("→", tap("right")), ("⏎", tap("enter", True))] if bar else
                 [("esc", tap("esc")), ("↑", tap("up")),
@@ -5263,7 +5439,7 @@ HELP = [
         "!vibe = 1-tap Super-Intent cockpit (Build, Goal, Race, Teleport, Harvest, Wrapped)",
         "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode",
         "!keys <tmux keys> | !raw <text> (types even with a menu open)",
-        "!model <name> | !effort <low|medium|high>",
+        "!model <name> | !effort <low|medium|high> (!model alone: the agent's models as buttons)",
         "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
         "explain, tidy, ship); !p save <name> <text>",
         "!autoyes <agent|off> = answer that agent's permission menus for it",
@@ -6165,6 +6341,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
         started(cfg, state, topic, sess, mid)
         return None
     if cmd in ("!model", "!effort"):  # sugar: type the slash command for you
+        if cmd == "!model":
+            got = model_cmd(sess, arg)
+            if isinstance(got, list):
+                rows = [(n, f"!model {n}") for n in got if len(f"!model {n}".encode()) <= 64][:24]
+                send(cfg, topic, f"🧠 models on {sess} — tap one", mode="plain",
+                     buttons=kb([rows[i:i + 2] for i in range(0, len(rows), 2)]) if rows else None)
+                return None
+            return got
         text = f"/{cmd[1:]} {arg}".strip()
     elif cmd.startswith("!"):
         plugin = run_plugin(sess_cwd(sess), cmd[1:], arg)
@@ -17920,6 +18104,12 @@ def selfcheck():
           "  ┃  3. Scaffold-only",
           "  ┃  ↑↓ select  enter submit  esc dismiss"]
     assert pane_state(oc) == "waiting"
+    form = ["  ┃  Questions", "  ┃  Symptom  APK type  Phone side  Setup  Submit",
+            "  ┃  Symptom: Icon not in AA launcher", "  ┃  APK type: Not sure",
+            "  ┃  ⇆ tab  enter submit  esc dismiss", "", "  ╹▀▀▀▀▀▀▀▀▀▀▀▀"]
+    assert pane_state(form) == "waiting"
+    assert [b["text"] for b in json.loads(menu_buttons(form))["inline_keyboard"][-1]] == \
+        ["esc", "⇆", "↑", "↓", "⏎"]
     assert [r[0]["callback_data"]
             for r in json.loads(menu_buttons(oc))["inline_keyboard"][:-1]] == \
         ["!1", "!2", "!3"]                                    # prose 5. dropped
@@ -21857,6 +22047,64 @@ def selfcheck():
                  tmux=lambda *a: keys_.append(a)):
         close_picker("x")
     assert [a[-1] for a in keys_] == ["Escape", "Escape"], keys_   # two, never a third
+    # opencode's lists (captured from v2.0.24): the session switcher a prompt
+    # was typed into, and the model list over the chat it is drawn on.
+    ocs_ = ["      Sessions for proj                                   esc",
+            "      rsonal data. Reply with one line: memory updated.Update",
+            "      No sessions found",
+            "      delete ctrl+d  rename ctrl+r            all projects ctrl+a",
+            "   ┃  Build · GLM-5.3-Flash Free OpenCode · high",
+            "   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀"]
+    screens_, keys_ = [ocs_, ocs_[4:]], []
+    with stubbed(visible=lambda s_: screens_.pop(0) if len(screens_) > 1 else screens_[0],
+                 tmux=lambda *a: keys_.append(a)):
+        close_picker("x")
+    assert [a[-1] for a in keys_] == ["Escape"], keys_
+    assert not any(OC_DIALOG.match(l) for l in ["  ┃  ↑↓ select  enter submit  esc dismiss",
+                                               "  ⬝⬝⬝ working   esc interrupt"])
+    ocm_ = ["                    Select model                                     esc",
+            "                    glm 5.2",
+            "                    GLM-5.2                                         Z.AI",
+            "         ┃          GLM-5.2                                  OpenCode Go",
+            "         ╹▀▀▀▀▀▀    Iceman Contributor Free                         Free    ▀▀▀",
+            "                    Connect an integration ctrl+a  Favorite ctrl+f"]
+    assert oc_rows(ocm_) == ("Select model", ["GLM-5.2 · Z.AI", "GLM-5.2 · OpenCode Go",
+                                              "Iceman Contributor Free · Free"]), oc_rows(ocm_)
+    assert oc_rows(ocs_[4:]) is None
+    keys_ = []                           # "glm-5.2 opencode go" is the second row
+    with stubbed(visible=lambda s_: ocm_ + ["   ┃  Build · GLM-5.2 OpenCode Go"], settle=lambda *a: True,
+                 close_picker=lambda s_: None, tmux=lambda *a: keys_.append(a[3:]), tgt=lambda s_: s_):
+        assert oc_model("x", "glm-5.2 opencode go") == "🧠 opencode model: GLM-5.2 OpenCode Go"
+    assert ("Down",) in keys_ and keys_.index(("Down",)) < keys_.index(("Enter",), 2), keys_
+    # The /model pickers, captured: Claude Code (numbered, ❯), codex (›), agy (bare >).
+    cl_ = ["  Select model", "  Switch between Claude models. Your pick becomes the default",
+           "  specify with --model.",
+           "    1.  Default (recommended)  Opus 5.5 · Best for everyday",
+           "  ❯ 2.  Opus 5.5 ✔             For complex work",
+           "    3.  Sonnet 5.5             Most efficient",
+           "  ↓ 4.  Opus 4.8               Best for everyday", "     … +3 models",
+           "  ◐ Medium effort (default) ←/→ to adjust",
+           "  Enter to set as default · s to use this session only · Esc to cancel"]
+    assert model_rows(cl_) == (["Default", "Opus 5.5", "Sonnet 5.5", "Opus 4.8"], 1), model_rows(cl_)
+    cx_ = ["  /model - choose what model and reasoning effort to use", "  Select Model and Effort",
+           "› 1. GPT-6-Luna (default)  Fast and affordable model.",
+           "  2. GPT-5.6-Terra         Older balanced model.", "  enter select · esc back"]
+    assert model_rows(cx_) == (["GPT-6-Luna", "GPT-5.6-Terra"], 0), model_rows(cx_)
+    ag_ = ["> /model", "Switch Model", "  Search:", "          ────────────", "  Gemini 4 Argon",
+           "> Gemini 3.8 Flash      (current)", "  Claude Opus 5.5",
+           "  Effort  ◂        ●━━━━━━━●━━━━━◉", "Keyboard: ↑/↓ Navigate  enter Select  esc Go Back"]
+    assert model_rows(ag_) == (["Gemini 4 Argon", "Gemini 3.8 Flash", "Claude Opus 5.5"], 1), model_rows(ag_)
+    assert model_rows(["❯ ", "  Select model and go"]) is None
+    keys_, scr_ = [], [cl_]       # tap "Sonnet 5.5": one Down, then this-session-only
+    def ft_(*a):
+        keys_.append(a[3:])
+        if a[3:] == ("Down",):
+            scr_[0] = [l.replace("  ❯ 2.", "    2.").replace("    3.  Sonnet", "  ❯ 3.  Sonnet") for l in cl_]
+        if a[3:] == ("s",):
+            scr_[0] = ["❯ "]
+    with stubbed(visible=lambda s_: scr_[0], tmux=ft_, tgt=lambda s_: s_, close_picker=lambda s_: None):
+        assert model_cmd("x", "sonnet 5.5") == "🧠 x: Sonnet 5.5"
+    assert keys_[-2:] == [("Down",), ("s",)], keys_
     # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
     typed = []
     with stubbed(send=lambda *a, **k: None, inject=lambda s_, t: typed.append(t),
