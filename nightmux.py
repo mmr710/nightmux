@@ -4246,6 +4246,13 @@ def agent(cfg, key):
     return spec[0], (spec[1] if len(spec) > 1 else "")
 
 
+def claude_has_chat(cwd):
+    """Does Claude Code have a saved conversation for this folder? It files them
+    under ~/.claude/projects/<cwd with every non-alphanumeric char as '-'>."""
+    d = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.expanduser(cwd))))
+    return bool(glob.glob(os.path.join(d, "*.jsonl")))
+
+
 def default_agent(cfg):
     return cfg.get("agent") or "claude"
 
@@ -5164,6 +5171,10 @@ def start_session(cfg, state, lock, topic, arg, key):
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
+    # `claude --continue` in a folder with no saved conversation prints "No
+    # conversation found to continue" and exits, leaving a bare shell behind.
+    if prog == "claude" and "--continue" in flags.split() and not claude_has_chat(cwd):
+        flags = " ".join(f for f in flags.split() if f != "--continue")
     spawn(name, cwd, f"{prog} {flags}".strip(), cfg)
     with lock:
         cfg["topics"][topic] = name
@@ -21039,6 +21050,16 @@ def selfcheck():
 
     cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
     assert agent(cfg2, "claude") == ("claude", "--continue")
+    with tempfile.TemporaryDirectory() as pj_:
+        old_pj_ = PROJECTS
+        globals()["PROJECTS"] = pj_
+        try:
+            assert not claude_has_chat("/www/agent")
+            os.makedirs(os.path.join(pj_, "-www-agent"))
+            open(os.path.join(pj_, "-www-agent", "s.jsonl"), "w").close()
+            assert claude_has_chat("/www/agent") and not claude_has_chat("/www/other")
+        finally:
+            globals()["PROJECTS"] = old_pj_
     assert agent(cfg2, "opencode") == ("opencode", "--resume")    # added by config
     assert agent(cfg2, "nope") == ("nope", "")   # one-off: the key is the command
     assert default_agent(cfg2) == "claude"
