@@ -280,10 +280,28 @@ def chat_log(topic, who, text, buttons=None):
     del log[:-CHAT_KEEP]
 
 
+# What still rings the phone inside !quiet hours: a question, a reminder of
+# one, an agent that died, a stop. Everything else lands silently.
+QUIET_RINGS = ("🟠", "⏰", "💀", "🛑")
+
+
+def quiet_now(cfg, ts=None):
+    """Inside the !quiet window (cfg["quiet"] = ["23:00", "07:00"], phone time)?"""
+    q = cfg.get("quiet")
+    if not q:
+        return False
+    t = local_time(cfg, time.time() if ts is None else ts)
+    now = t.tm_hour * 60 + t.tm_min
+    a, b = (int(x[:2]) * 60 + int(x[3:]) for x in q)
+    return a <= now < b if a <= b else now >= a or now < b
+
+
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
+    if not quiet and quiet_now(cfg) and not text.lstrip().startswith(QUIET_RINGS):
+        quiet = True
     chat_log(topic, "bot", text, buttons)
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
     parts, mid = chunks(text), None
@@ -1382,6 +1400,9 @@ def menu_buttons(lines, sess=None, bind=False):
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    # Yes, and remember this exact request for this session (!rules)
+    if bind and menu_digit(lines, YES_NO["!y"]):
+        rows.append([("♾ always", tap("always", True))])
     if FORM.search("\n".join(plain(l) for l in lines[-25:])):
         rows.append([("esc", tap("esc")), ("⇆", tap("tab")), ("↑", tap("up")),
                      ("↓", tap("down")), ("⏎", tap("enter", True))])
@@ -3791,7 +3812,7 @@ def watcher(cfg, state, lock):
 # ---------- commands ----------
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
-        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
+        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n", "!always": "y"}
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 
 # The dialogs disagree about Enter. Claude Code's permission prompt acts on the
@@ -3811,6 +3832,7 @@ YES_NO = {
         re.I,
     ),
 }
+YES_NO["!always"] = YES_NO["!y"]     # yes, and saved as a rule (see autoyes)
 
 
 def dialog_id(lines):
@@ -4925,11 +4947,12 @@ def autoyes(cfg, state, topic, sess):
     it stops after AUTOYES_MAX in an hour so a dialog loop cannot run all night.
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
+    rules = (cfg.get("always") or {}).get(sess) or {}
     st = state.get(sess) or {}
-    if not keys or st.get("stop_hold"):     # a stopped fleet approves nothing
+    if not (keys or rules) or st.get("stop_hold"):     # a stopped fleet approves nothing
         return
     ak = agent_key(cfg, topic, sess)
-    if ak not in keys and "on" not in keys and "all" not in keys:
+    if keys and ak not in keys and "on" not in keys and "all" not in keys:
         bound = cfg.get("topics", {}).get(str(topic))
         live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
         if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
@@ -4938,6 +4961,8 @@ def autoyes(cfg, state, topic, sess):
         # one nightmux started as Claude is not agy because Claude is the default.
         elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and not live_key:
             ak = keys[0]
+        elif rules:
+            keys = []           # not opted in: only a learned rule answers
         else:
             return
     if st.get("mode") != "waiting":
@@ -4959,6 +4984,10 @@ def autoyes(cfg, state, topic, sess):
                  "answer it yourself, or !autoyes off", mode="plain")
         return
     lines = visible(sess)
+    # ♾ always: the exact request (prompt_fp) was approved with "always" before
+    learned = not keys and prompt_fp(pane(sess)) in rules
+    if not keys and not learned:
+        return
     digit = menu_digit(lines, YES_NO["!y"])
     if not digit:
         tail = [plain(l) for l in (lines[-15:] if lines else [])]
@@ -4980,8 +5009,9 @@ def autoyes(cfg, state, topic, sess):
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
     question = next((l for l in non_empty if WAITING.search(l)), non_empty[0] if non_empty else "?")
-    send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
-         "!autoyes off to stop", mode="plain")
+    send(cfg, topic, (f"♾ always {sess} → {digit}\n{question[:160]}\n!rules to list or drop"
+                      if learned else f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
+                      "!autoyes off to stop"), mode="plain")
     res = pick(sess, digit)
     if res is None:             # not an arrow menu: the digit is the answer
         press(sess, digit, confirm=True)
@@ -4989,6 +5019,44 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def rules_cmd(cfg, lock, sess, arg):
+    """!rules [clear|<n> off]: the requests ♾ always answers for this session."""
+    with lock:
+        rules = cfg.setdefault("always", {}).setdefault(sess, {})
+        a = arg.split()
+        if a == ["clear"]:
+            rules.clear()
+        elif len(a) == 2 and a[0].isdigit() and a[1] == "off" and 0 < int(a[0]) <= len(rules):
+            rules.pop(list(rules)[int(a[0]) - 1])
+        elif a:
+            return "usage: !rules [clear|<n> off]"
+        save_cfg(cfg)
+        rows = list(rules.values())
+    if not rows:
+        return (f"no ♾ always rules for {sess}\n"
+                "tap ♾ always on an approval: that exact request is answered yes from then on")
+    return (f"♾ always in {sess} (answered yes, risky list still wins):\n"
+            + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
+            + "\n!rules <n> off · !rules clear")
+
+
+def quiet_cmd(cfg, lock, arg):
+    """!quiet [HH:MM-HH:MM|off]: messages land silently, questions still ring."""
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)", arg.strip())
+    with lock:
+        if arg.strip() == "off":
+            cfg.pop("quiet", None)
+        elif m:
+            cfg["quiet"] = [m.group(0)[:5], m.group(0)[6:]]
+        elif arg.strip():
+            return "usage: !quiet 23:00-07:00 | off"
+        save_cfg(cfg)
+    q = cfg.get("quiet")
+    return (f"quiet {q[0]}-{q[1]} ({'now' if quiet_now(cfg) else 'not now'}): "
+            "updates land silently; questions, nudges, exits and stops still ring"
+            if q else "quiet hours off · !quiet 23:00-07:00")
 
 
 def policy_cmd(cfg, lock, topic, arg):
@@ -5334,7 +5402,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
+              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy", "!rules", "!quiet",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
@@ -5447,6 +5515,8 @@ HELP = [
         "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
         "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
         "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
+        "♾ always (button) = yes, and the same request is answered yes from then on · !rules [clear|<n> off]",
+        "!quiet 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -5903,6 +5973,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return voice_cmd(cfg, lock, topic, arg)
     if cmd == "!policy":
         return policy_cmd(cfg, lock, topic, arg)
+    if cmd == "!quiet":
+        return quiet_cmd(cfg, lock, arg)
+    if cmd == "!rules":
+        s_ = cfg.get("topics", {}).get(str(topic))
+        return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -6209,6 +6284,18 @@ def handle(cfg, state, lock, topic, text, mid=None):
             if bound != prompt_fp(lines):
                 return stale_tap(cfg, state, lock, sess, lines)
         key = KEYS[cmd]
+        if cmd == "!always":
+            lines = pane(sess)
+            hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+            if hit:
+                return f"'{hit[:60]}' is on the risky list — answer it with !y each time"
+            label = " · ".join(plain(l).strip() for l in strip_noise(lines[-15:], verbose=True)
+                               if l.strip() and not MENU.match(l))
+            with lock:
+                if pane_state(visible(sess)) != "waiting":
+                    return f"nothing is asking in {sess} right now — no rule saved"
+                cfg.setdefault("always", {}).setdefault(sess, {})[prompt_fp(lines)] = label[-120:]
+                save_cfg(cfg)
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
         with lock:
@@ -18242,6 +18329,37 @@ def selfcheck():
     # A session suffix on every button: a mirrored copy in the command center
     # has no topic binding to resolve a bare "!1" against.
     qmenu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes", "  2. No"], "api")
+    # ♾ always: a pinned yes/no menu offers it, the tap saves that exact request,
+    # and autoyes then answers that request (and no other) with !autoyes off.
+    dlg = ["Bash command", "  npm test", "Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    texts_ = lambda m: [b["text"] for r in json.loads(m)["inline_keyboard"] for b in r]
+    assert "♾ always" in texts_(menu_buttons(dlg, bind=True))
+    assert "♾ always" not in texts_(menu_buttons(dlg))
+    acfg, ast_, alk, said_ = {"topics": {"1": "s"}, "chat_id": -1}, {}, threading.Lock(), []
+    scr_ = list(dlg)
+    with stubbed(has_session=lambda x: True, visible=lambda x: list(scr_), pane=lambda x: list(scr_),
+                 pane_state=lambda l: "waiting", press=lambda *a, **k: None,
+                 pick=lambda s_, d: "", resolve_ask=lambda *a: None, save_cfg=lambda c: None,
+                 send=lambda c, t, x, **k: said_.append(x)):
+        assert handle(acfg, ast_, alk, "1", "!always") is None
+        assert "npm test" in list(acfg["always"]["s"].values())[0], acfg
+        autoyes(acfg, ast_, "1", "s")
+        assert said_ and said_[-1].startswith("♾ always s → 1"), said_
+        scr_[1], ast_["s"]["autoyes_at"] = "  make deploy", 0
+        n_ = len(said_)
+        autoyes(acfg, ast_, "1", "s")
+        assert len(said_) == n_, said_            # a different request: left to you
+        scr_[1] = "  rm -rf build"
+        assert "risky" in handle(acfg, ast_, alk, "1", "!always")
+        assert "1. " in rules_cmd(acfg, alk, "s", "") and "no ♾" in rules_cmd(acfg, alk, "s", "1 off")
+    # !quiet: silent inside the window (wrapping midnight or not), phone time
+    qcfg = {"tz_offset": 0}
+    with stubbed(save_cfg=lambda c: None):
+        assert "usage" in quiet_cmd(qcfg, alk, "late")
+        quiet_cmd(qcfg, alk, "23:00-07:00")
+    assert qcfg["quiet"] == ["23:00", "07:00"] and quiet_now(qcfg, 3600) and not quiet_now(qcfg, 43200)
+    qcfg["quiet"] = ["09:00", "17:00"]
+    assert quiet_now(qcfg, 43200) and not quiet_now(qcfg, 3600) and not quiet_now({}, 3600)
     # An answer key sent to a pane that is not asking is typed in as text and
     # queued by the agent, which is how five taps became "33333" in a prompt box.
     kcfg, klk = {"topics": {"1": "s"}, "chat_id": -1}, threading.Lock()

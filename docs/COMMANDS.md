@@ -41,6 +41,8 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!voice [on|off]` = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)
 - `!ship [notes]` = commit, push, open a PR, then watch CI and fix red checks until green (never merges)
 - `!policy [on|off|deny <regex>]` = dialogs auto-yes must leave to you (rm -rf, push, sudo...)
+- ♾ always (button) = yes, and the same request is answered yes from then on · `!rules [clear|<n> off]`
+- `!quiet` 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
