@@ -23,7 +23,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!review` = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff
 - `!update [agent]` = run each agent's own updater · `!version`
 - `!team [<user id> watch|prompt|admin]` = roles for a shared group · `!audit [n]` = who sent what
-- `!upgrade [here]` = update nightmux itself, here and on every peer, and restart (agents keep running)
+- `!upgrade [all]` = update nightmux on this machine and restart (agents keep running); all = every peer too
 
 ## 💬 Talking to the agent
 

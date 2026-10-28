@@ -5430,8 +5430,8 @@ HELP = [
         "!update [agent] = run each agent's own updater · !version",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
         "who sent what",
-        "!upgrade [here] = update nightmux itself, here and on every peer, and restart "
-        "(agents keep running)",
+        "!upgrade [all] = update nightmux on this machine and restart (agents keep running); "
+        "all = every peer too",
     ]),
     ("talk", "💬 Talking to the agent", [
         "anything else, and /slash commands -> typed into the agent",
@@ -13041,7 +13041,9 @@ def upgrade_cmd(cfg, topic, arg):
     def go():
         with _upgrading:
             rows = []
-            if arg != "here":
+            # Peers only on request: each one restarts, and a deploy here
+            # should not cost the other machines a restart they did not ask for.
+            if arg == "all":
                 for name in sorted(cfg.get("peers") or {}):
                     r = peer_call(cfg, name, "upgrade", {}, timeout=330)
                     rows.append(f"{name}: " + (r.get("msg", "?") if isinstance(r, dict) else
@@ -13053,7 +13055,7 @@ def upgrade_cmd(cfg, topic, arg):
             if changed:
                 restart_self()
     threading.Thread(target=go, daemon=True).start()
-    return "⬆️ upgrading nightmux" + ("" if arg == "here" or not cfg.get("peers") else " here and on every peer") + "…"
+    return "⬆️ upgrading nightmux" + (" here and on every peer" if arg == "all" and cfg.get("peers") else "") + "…"
 
 
 def setup_chat(upd):
@@ -21126,7 +21128,7 @@ def selfcheck():
     with stubbed(self_upgrade=lambda: (True, "a → b"), restart_self=lambda: ure_.append(1),
                  peer_call=lambda c, n, p, b=None, timeout=10: {"msg": "1.3 → 1.4 · restarting"} if n == "box" else None,
                  send=lambda c, t, x, mode="mono", buttons=None, quiet=False: usaid_.append(x)):
-        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "")
+        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "all")
         for _ in range(100):
             if usaid_:
                 break
