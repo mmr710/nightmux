@@ -974,7 +974,7 @@ const V3 = (() => {
     const glow = {busy: color(d.agent), waiting: '#e0af68', limit: '#f7768e', shell: '#9ece6a'}[st];
     if (glow) glows.push({p: [M.x, M.y + .6, M.z], c: glow, r: 1.1});
     if (d.live) glows.push({p: [dx, 0.02, dz + .4], c: '#ffd596', r: 1.9, floor: 1});
-    for (let q = 0; q < Math.min(d.queued || 0, 5); q++) box(M, -.28 + q * .14, 1.0, .02, .1, .1, ['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], {emit: 1});
+    for (let q = 0; q < Math.min(d.queued || 0, 5); q++) box(M, -.28 + q * .14, 1.0, .02, .1, .1, .06, ['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], {emit: 1});
     if (st !== 'busy' && st !== 'waiting') box(X, -.78, .8, -.1, .12, .1, .12, '#e6e9f2');          // mug
     const away = d.away;
     const C = {x: dx - .3, y: 0, z: dz + .9, ry: 0};                                                // chair
