@@ -1,0 +1,8 @@
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+› 1. GPT-6-Luna (default)  Fast and affordable model.
+  2. GPT-6-Terra           Balanced.
+  3. GPT-6-Sol             Most capable.
+
+  Press enter to select reasoning effort, or esc to dismiss.

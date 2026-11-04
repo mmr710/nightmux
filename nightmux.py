@@ -873,7 +873,7 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 # prints one is not waiting for anything. The pane then sat "waiting" forever,
 # swallowing typed text and nudging about an answer nobody owed.
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
-                     r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
+                     r"[❯>›]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes / › 1. (Codex)
                      r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
                      # A dialog's question, only with its options under it: an agent's
                      # answer ending "Do you want me to restart X?" held the queue for hours.
@@ -1256,8 +1256,8 @@ def pane_state(lines):
 
 
 IDLE = re.compile(
-    r"^\s*[│┃]?\s*[❯>]\s*$|"          # bare prompt
-    r"^\s*[│┃]?\s*[❯>]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
+    r"^\s*[│┃]?\s*[❯>›]\s*$|"          # bare prompt (› is Codex's)
+    r"^\s*[│┃]?\s*[❯>›]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
     r"^\s*[\w.-]+@[a-zA-Z0-9.-]+:[~/\w.-]+[#$%>]\s*$|" # typical shell prompt
     r"╹▀{5,}",                           # opencode bottom bar
     re.M
@@ -3976,7 +3976,7 @@ TG_SLASH = {"ctl": "!ctl", "vibe": "!vibe", "teleport": "!teleport", "harvest": 
             "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
-            "spendcap": "!spendcap", "tmstats": "!stats"}
+            "spendcap": "!spendcap", "tmstats": "!stats", "tokens": "!tokens"}
 TG_DESC = {"ctl": "button panel for this session",
            "vibe": "1-tap super-intent cockpit (build, goal, race, teleport, harvest, wrapped)",
            "teleport": "package live context (.nightmux/HANDOFF.md) & switch agents mid-thought",
@@ -3996,7 +3996,8 @@ TG_DESC = {"ctl": "button panel for this session",
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
            "idlectx": "flag parked sessions above N% context, or off",
-           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent"}
+           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent",
+           "tokens": "tokens and dollars per agent, cache savings, daily pace"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -5505,6 +5506,8 @@ HELP = [
         "first-try prompts have in common",
         "!memory [update|on|off] = project notes every agent reads on start",
         "!stats [days] = tokens, cache and prompts per agent · !saved",
+        "!tokens [days] = tokens and API-list dollars per agent, what the cache saved, "
+        "today's pace, costly habits",
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
@@ -5648,6 +5651,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if ("fleet", days) not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
         return stats_report(fleet_analysis(cfg, days))
+    if cmd == "!tokens":
+        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 7
+        if ("fleet", days) not in _analysis:
+            send(cfg, topic, f"🔢 reading {days} days of transcripts…", mode="plain")
+        return tokens_report(fleet_analysis(cfg, days), cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!briefing":
@@ -8580,6 +8588,59 @@ def fleet_cost(agents, extra=None):
         if rest > 0:
             out["left_out"]["(no model name)"] = out["left_out"].get("(no model name)", 0) + rest
     return out
+
+
+def tokens_report(r, extra=None, now=None):
+    """!tokens: what the last N days consumed, in tokens and API list dollars.
+
+    Per agent: tokens, cost, cache hit, what the cache saved against paying full
+    input price, and dollars per prompt. Then the daily context carried, today's
+    pace, and the habits that cost the most. A model with no price is named, not
+    counted as free (see fleet_cost)."""
+    ag = r.get("agents") or {}
+    if not ag:
+        return f"no agent transcripts in the last {r.get('days', '?')} days"
+    cost = fleet_cost(ag, extra)
+    saved, rows, day = {}, [], {}
+    for a, s in ag.items():
+        for m, t in (s.get("by_model") or {}).items():
+            p = price_of(m, extra)
+            if p:
+                saved[a] = saved.get(a, 0) + t[1] * max(0, p[0] - p[2]) / 1e6
+        for d, (c, q) in (s.get("daily") or {}).items():
+            day[d] = day.get(d, 0) + c
+    out = [f"🔢 tokens · last {r.get('days')}d" + (f" · {', '.join(r['servers'])}" if r.get("servers") else ""),
+           "", f"{'agent':<9}{'tokens':>8}{'$ list':>9}{'cache':>6}{'saved':>8}{'$/prompt':>9}"]
+    for a, s in sorted(ag.items(), key=lambda kv: -cost["agents"].get(kv[0], 0)):
+        tk = sum((s.get("tokens") or {}).get(k, 0) for k in ("input", "cache_read", "cache_write", "output"))
+        c, n = cost["agents"].get(a), s.get("prompts") or 0
+        ch = s.get("cache_hit")
+        rows.append((a, tk))
+        out.append(f"{a[:8]:<9}{_k(tk):>8}{(_usd(c) if c is not None else '?'):>9}"
+                   f"{(f'{ch:.0%}' if ch is not None else '-'):>6}{_usd(saved.get(a, 0)):>8}"
+                   f"{(_usd(c / n) if c is not None and n else '-'):>9}")
+    tot = sum(t for _, t in rows)
+    out.append(f"{'total':<9}{_k(tot):>8}{_usd(cost['total']):>9}{'':>6}{_usd(sum(saved.values())):>8}")
+    if day:
+        days = sorted(day)[-7:]
+        peak = max(day[d] for d in days) or 1
+        out += ["", "context carried per day (UTC)"]
+        out += [f"{d[5:]:<6}{'█' * max(1, int(day[d] / peak * 16)):<17}{_k(day[d]):>7}" for d in days]
+        now = now if now is not None else time.time()
+        gone = now % 86400
+        if len(day) > 1 and time.strftime("%Y-%m-%d", time.gmtime(now)) == days[-1] and gone > 3600:
+            avg = sum(day[d] for d in days[:-1]) / len(days[:-1])
+            pace = day[days[-1]] * 86400 / gone
+            out.append(f"today's pace {_k(int(pace))} vs {_k(int(avg))} a day ({pace / avg:.1f}x)" if avg else f"today's pace {_k(int(pace))}")
+    for a, s in sorted(ag.items()):
+        if s.get("cache_hit") is not None and s["cache_hit"] < .8 and (s.get("requests") or 0) > 50:
+            out.append(f"⚠ {a}: cache hit {s['cache_hit']:.0%} — gaps over 5 min expire it; keep sessions busy or !new")
+        if (s.get("avg_ctx") or 0) > 150000:
+            out.append(f"⚠ {a}: {_k(s['avg_ctx'])} context per call — !compact or !new cuts every later call")
+    if cost["left_out"]:
+        out.append("not priced: " + ", ".join(sorted(cost["left_out"])[:4]))
+    out.append("API list prices, not your bill; cache writes at the 5-min rate")
+    return "\n".join(out)
 
 
 def wrapped_data(cfg, days):
@@ -19617,6 +19678,15 @@ def selfcheck():
         assert price_of("Claude-Opus-5-5[1m]") == PRICES["claude-opus-5-5"] == (4, 20, .2, 5)
         assert price_of("claude-x") is price_of("gpt-5.5-pro") is price_of("") is None
         assert price_of("mine", {"mine": [1, 2]}) == (1, 2, 1, 1)
+        # !tokens: dollars, what the cache saved, pace, habits; an unpriced model is named, not free
+        tk_ = tokens_report({"days": 7, "agents": {
+            "claude": {"tokens": {"input": 1000000, "cache_read": 9000000, "cache_write": 0, "output": 100000},
+                       "by_model": {"claude-sonnet-5-5": [1000000, 9000000, 0, 100000], "mystery-1": [5, 5, 5, 5]},
+                       "prompts": 10, "requests": 100, "cache_hit": .7, "avg_ctx": 200000,
+                       "daily": {"2026-11-01": [100, 1], "2026-11-02": [200, 1]}}}}, now=1793600000)
+        assert "$3.90" in tk_ and "$0.39" in tk_ and "$17.10" in tk_, tk_   # cost, $/prompt, cache saved
+        assert "cache hit 70%" in tk_ and "!compact" in tk_ and "not priced: mystery-1" in tk_, tk_
+        assert tokens_report({"days": 7, "agents": {}}).startswith("no agent transcripts")
         assert price_of("gpt-5.5", {"gpt-5.5": [3, 4, 5, 6]}) == (3, 4, 5, 6)
         for junk_ in ("junk", [1], [1, -2], [1, float("nan")], [1, 2, 3, 4, 5], 7):
             assert price_of("gpt-5.5", {"gpt-5.5": junk_}) is None, junk_
