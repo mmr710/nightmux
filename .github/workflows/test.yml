@@ -41,11 +41,11 @@ jobs:
         run: python tests/test_panes.py
 
       # The 3D office is a renderer inside a Python string: nothing else notices
-      # when a desk state it cannot draw blanks the page. One version is enough.
+      # when a desk state it cannot draw blanks the page. One version is enough; the
+      # runner image ships google-chrome.
       - name: office render
         if: matrix.python == '3.12'
         run: |
-          sudo apt-get install -y chromium-browser || true
           python tests/test_office.py
 
       # The pitch is "clone and run, no dependencies". A stray import should fail
