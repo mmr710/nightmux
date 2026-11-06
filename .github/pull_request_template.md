@@ -5,7 +5,7 @@
 ## Checklist
 
 - [ ] `python3 nightmux.py --selfcheck` passes
-- [ ] New behaviour has an `assert` in `selfcheck()`
+- [ ] New behaviour has an `assert` in `selfcheck()` (`tests/selfcheck.py`)
 - [ ] Changed `HELP`? `python3 nightmux.py --commands > docs/COMMANDS.md`
 - [ ] User-visible change? A line in `CHANGELOG.md` under Unreleased
 - [ ] Still stdlib-only (no new dependency)

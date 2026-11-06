@@ -24,7 +24,7 @@ If you are submitting code, it must align with the core architectural decisions 
 
 ### 3. Running it while you work
 - `python3 nightmux.py --demo` serves the office, dashboard and chat with a made-up night on http://127.0.0.1:8099 — no bot, no keys, nothing touched.
-- `python3 nightmux.py --selfcheck` is the whole test suite: plain `assert`s, a few minutes, no fixtures.
+- `python3 nightmux.py --selfcheck` is the whole test suite: plain `assert`s, a few minutes, no fixtures. The code is in `tests/selfcheck.py`; `--selfcheck` runs it inside nightmux's namespace so it can stub any global.
 - Changed a line in `HELP`? Run `python3 nightmux.py --commands > docs/COMMANDS.md`; selfcheck fails until you do.
 - The Android app lives in `android/` (plain Java, no Kotlin, no AndroidX beyond the platform): `gradle -p android assembleDebug`.
 - New to the code? Issues labelled [good first issue](https://github.com/mmr710/nightmux/labels/good%20first%20issue) are small and self-contained; [ROADMAP.md](ROADMAP.md) is what is planned.
