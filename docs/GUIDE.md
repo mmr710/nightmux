@@ -489,11 +489,31 @@ Send a voice note and, with a transcriber configured, the agent gets the
 words (shown back to you as 🎙 so you can check them). You choose where your
 voice goes — any command that takes the audio path last and prints text:
 
+**1. `whisper.cpp` (local — audio stays on this machine)**
+
 ```json
 "transcribe_cmd": "sh -c 'ffmpeg -loglevel quiet -y -i \"$0\" -ar 16000 /tmp/nm.wav && whisper-cli -m ~/models/ggml-base.en.bin -nt -np -f /tmp/nm.wav'"
 ```
 
-(whisper.cpp, fully local.) Without one, the agent gets the audio file's path.
+**2. `faster-whisper` via Python (local — audio stays on this machine)**
+
+```json
+"transcribe_cmd": "python3 -c 'import sys; from faster_whisper import WhisperModel; s, _ = WhisperModel(\"base.en\", device=\"cpu\", compute_type=\"int8\").transcribe(sys.argv[1]); print(\" \".join(x.text.strip() for x in s))'"
+```
+
+**3. macOS `mlx-whisper` / Homebrew `openai-whisper` (local — audio stays on your Mac)**
+
+```json
+"transcribe_cmd": "sh -c 'mlx_whisper --model mlx-community/whisper-base.en-mlx --output-format txt --output-dir /tmp \"$0\" >/dev/null && cat \"/tmp/$(basename \"${0%.*}\").txt\"'"
+```
+
+**4. OpenAI-compatible `/v1/audio/transcriptions` endpoint (remote or local server — audio is uploaded to the configured URL)**
+
+```json
+"transcribe_cmd": "sh -c 'curl -sS https://api.openai.com/v1/audio/transcriptions -H \"Authorization: Bearer $OPENAI_API_KEY\" -F model=whisper-1 -F response_format=text -F file=@\"$0\"'"
+```
+
+Without `"transcribe_cmd"`, the agent gets the audio file's path.
 
 ## Without Telegram
 
@@ -771,3 +791,4 @@ Invite the bot to a channel (`/invite @nightmux`); that channel is a topic.
 
 Not yet: files you send from Discord arrive as links and from Slack not at all; voice notes
 are Telegram-only.
+
