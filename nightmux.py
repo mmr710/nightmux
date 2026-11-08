@@ -1009,6 +1009,31 @@ RESET_AT = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:[ap]m)?)", 
 HOOK_DIR = os.path.expanduser("~/.nightmux-hooked")
 HOOK_FRESH = 900  # a Stop hook seen this recently owns delivery for that session
 STATE_DIR = os.path.expanduser("~/.nightmux-state")
+
+
+def harden_state():
+    """The state dir holds queued prompts, pane snapshots and paired-device tokens:
+    private to this user. It used to be created 0775 with 0664 files, readable by
+    every other account on a shared box. Closing the directory covers every file in it."""
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        if os.stat(STATE_DIR).st_mode & 0o077:
+            os.chmod(STATE_DIR, 0o700)
+    except OSError:
+        pass
+
+
+# What `!get` will not send: the files that are the keys to everything else.
+SECRET_FILES = (".nightmux.json", ".nightmux-relay.env", ".ssh", ".gnupg", ".aws", ".netrc",
+                ".git-credentials", ".config/gh", ".nightmux-state")
+
+
+def is_secret_path(p):
+    real = os.path.realpath(p)
+    home = os.path.realpath(os.path.expanduser("~"))
+    return os.path.basename(real) == ".env" or any(
+        real == os.path.join(home, s) or real.startswith(os.path.join(home, s) + os.sep)
+        for s in SECRET_FILES)
 # The status line only redraws while a session is active, so an idle one goes
 # quiet. Its transcript path stays valid the whole time — only the usage numbers
 # in it go stale — hence two ages: one to trust the path, a shorter one to act
@@ -6096,6 +6121,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         p = os.path.join(sess_cwd(sess), os.path.expanduser(arg))
         if not os.path.isfile(p):
             return f"no file {p}"
+        if is_secret_path(p):
+            return "🔒 that file holds credentials; !get will not send it"
         mb = os.path.getsize(p) / 1048576
         if mb > 45:  # bots may upload 50MB
             return f"{p} is {mb:.0f}MB, over Telegram's 50MB upload cap"
@@ -17056,6 +17083,9 @@ def inject_telemetry(cfg, html):
         ping = f'<script data-goatcounter="https://{tid}.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>'
     return html.replace("</head>", ping + "</head>")
 
+MAX_POST = 64 * 1024 * 1024    # the biggest legitimate body is a phone upload
+
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     peer = False   # this request came from another nightmux, through /peer/
 
@@ -17452,7 +17482,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self.auth_gate():
             return
-        length = int(self.headers.get('Content-Length', 0))
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            length = -1
+        if not 0 <= length <= MAX_POST:      # unbounded, one request could exhaust memory
+            self.send_response(413)
+            self.end_headers()
+            return
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
         if self.path == "/api/pair/revoke":
@@ -17742,6 +17779,7 @@ def up_cli(args):
 
 
 def main():
+    harden_state()
     added = widen_path()
     if added:
         print(f"PATH += {os.pathsep.join(added)}", flush=True)
@@ -18515,6 +18553,19 @@ def selfcheck():
     assert "\n".join(chunks(big)) == big
 
     assert common_prefix(["a", "b", "c"], ["a", "b", "z"]) == 2
+
+    # Hardening: credentials are never sent by !get, and the state dir is private.
+    home_ = os.path.expanduser("~")
+    for p_ in (".nightmux.json", ".ssh/id_ed25519", ".nightmux-relay.env", ".aws/credentials",
+               "proj/.env", ".nightmux-state/paired_tokens.json"):
+        assert is_secret_path(os.path.join(home_, p_)), p_
+    assert not is_secret_path(os.path.join(home_, "proj", "README.md"))
+    with stubbed(STATE_DIR=os.path.join(__import__("tempfile").mkdtemp(), "st")):
+        harden_state()
+        assert os.stat(STATE_DIR).st_mode & 0o777 == 0o700
+        os.chmod(STATE_DIR, 0o775)
+        harden_state()
+        assert os.stat(STATE_DIR).st_mode & 0o777 == 0o700
 
     # Something that always blocks. `tmux wait-for` only blocks once a server is
     # already running, so this passed on a machine with sessions open and let a
