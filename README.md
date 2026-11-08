@@ -125,7 +125,7 @@ Python standard library only, nothing to `pip install`.
 | 🤝 **Several agents** | Claude Code, Codex, agy, opencode, Gemini, Cursor, Amp, Goose, Qwen, aider · one topic, a bench of agents · `!failover` · `!consult` · `!pair` reviews · `!race` |
 | 💸 **Tokens** | live context % and limit windows · `!cost` · `!ctx` · auto-compact · `!stats` with what to change · `!saved` · `!wrapped` card |
 | 🔧 **Code** | `!git` / `!diff` / `!undo` snapshots · issues in, PRs out · CI and preview watchers · dependency health |
-| 👀 **See it** | dashboard · chat PWA · pixel-art office · Android app with alerts and a widget · GIF of the night |
+| 👀 **See it** | dashboard · chat PWA · 3D office (pixel rooms on tap) · Android app with alerts and a widget · GIF of the night |
 | 🖥 **Two servers** | one bot, several machines; move a topic between them |
 | 🧩 **Yours** | stdlib only, no dependencies · plugins · webhook API · runs without Telegram |
 
