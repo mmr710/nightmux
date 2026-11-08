@@ -23,7 +23,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!review` = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff
 - `!update [agent]` = run each agent's own updater · `!version`
 - `!team [<user id> watch|prompt|admin]` = roles for a shared group · `!audit [n]` = who sent what
-- `!upgrade [here]` = update nightmux itself, here and on every peer, and restart (agents keep running)
+- `!upgrade [all]` = update nightmux on this machine and restart (agents keep running); all = every peer too
 
 ## 💬 Talking to the agent
 
@@ -41,6 +41,8 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!voice [on|off]` = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)
 - `!ship [notes]` = commit, push, open a PR, then watch CI and fix red checks until green (never merges)
 - `!policy [on|off|deny <regex>]` = dialogs auto-yes must leave to you (rm -rf, push, sudo...)
+- ♾ always (button) = yes, and the same request is answered yes from then on · `!rules [clear|<n> off]`
+- `!quiet` 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
@@ -94,6 +96,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!lint` on|off = hold a vague prompt for ✨ improve · `!coach` = what your first-try prompts have in common
 - `!memory [update|on|off]` = project notes every agent reads on start
 - `!stats [days]` = tokens, cache and prompts per agent · `!saved`
+- `!tokens [days]` = tokens and API-list dollars per agent, what the cache saved, today's pace, costly habits
 
 ## 🔧 Git, PRs and production
 

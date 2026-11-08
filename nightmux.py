@@ -280,10 +280,28 @@ def chat_log(topic, who, text, buttons=None):
     del log[:-CHAT_KEEP]
 
 
+# What still rings the phone inside !quiet hours: a question, a reminder of
+# one, an agent that died, a stop. Everything else lands silently.
+QUIET_RINGS = ("🟠", "⏰", "💀", "🛑")
+
+
+def quiet_now(cfg, ts=None):
+    """Inside the !quiet window (cfg["quiet"] = ["23:00", "07:00"], phone time)?"""
+    q = cfg.get("quiet")
+    if not q:
+        return False
+    t = local_time(cfg, time.time() if ts is None else ts)
+    now = t.tm_hour * 60 + t.tm_min
+    a, b = (int(x[:2]) * 60 + int(x[3:]) for x in q)
+    return a <= now < b if a <= b else now >= a or now < b
+
+
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
+    if not quiet and quiet_now(cfg) and not text.lstrip().startswith(QUIET_RINGS):
+        quiet = True
     chat_log(topic, "bot", text, buttons)
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
     parts, mid = chunks(text), None
@@ -873,7 +891,7 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 # prints one is not waiting for anything. The pane then sat "waiting" forever,
 # swallowing typed text and nudging about an answer nobody owed.
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
-                     r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
+                     r"[❯>›]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes / › 1. (Codex)
                      r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
                      # A dialog's question, only with its options under it: an agent's
                      # answer ending "Do you want me to restart X?" held the queue for hours.
@@ -926,6 +944,11 @@ MENU = re.compile(r"^\s*[│┃]?\s*(?:(?:[❯>●]\s*)?(?:\[?\(?(\d+)[.)\]]\s+)
 # ways across versions. The esc half is deliberately not widened to "esc to
 # cancel" — BUSY already claims that phrasing for a working pane.
 ARROWED = re.compile(r"↑↓\s*select|enter (?:to )?confirm|esc dismiss", re.I)
+# opencode's questions form: tabs across the top, one per question plus Submit.
+# Its footer is "⇆ tab  enter submit  esc dismiss"; the review tab lists
+# "Symptom: answer" rows, no number or arrow marker, so nothing else saw it open
+# and the pane read idle with the form waiting on Enter.
+FORM = re.compile(r"⇆\s*tab\b.*\benter\s+(?:submit|next|select)", re.I)
 # Whatever the TUI paints on the row the arrows are currently on.
 PICKED = re.compile(r"[❯▸➤]|[✓✔]\s*$")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -1239,7 +1262,7 @@ def pane_state(lines):
     joined = "\n".join(tail)
     asks = [m.start() for m in WAITING.finditer(joined)]
     box = [m.start() for m in INPUT_BOX.finditer(joined)]
-    if (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
+    if FORM.search(joined) or (asks and (not box or box[-1] < asks[-1])) or (ARROWED.search(joined)
                                   and any(BOXED.match(l) or CHOICE.match(l)
                                           for l in tail)):
         return "waiting"
@@ -1251,8 +1274,8 @@ def pane_state(lines):
 
 
 IDLE = re.compile(
-    r"^\s*[│┃]?\s*[❯>]\s*$|"          # bare prompt
-    r"^\s*[│┃]?\s*[❯>]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
+    r"^\s*[│┃]?\s*[❯>›]\s*$|"          # bare prompt (› is Codex's)
+    r"^\s*[│┃]?\s*[❯>›]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
     r"^\s*[\w.-]+@[a-zA-Z0-9.-]+:[~/\w.-]+[#$%>]\s*$|" # typical shell prompt
     r"╹▀{5,}",                           # opencode bottom bar
     re.M
@@ -1377,6 +1400,13 @@ def menu_buttons(lines, sess=None, bind=False):
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    # Yes, and remember this exact request for this session (!rules)
+    if bind and menu_digit(lines, YES_NO["!y"]):
+        rows.append([("♾ always", tap("always", True))])
+    if FORM.search("\n".join(plain(l) for l in lines[-25:])):
+        rows.append([("esc", tap("esc")), ("⇆", tap("tab")), ("↑", tap("up")),
+                     ("↓", tap("down")), ("⏎", tap("enter", True))])
+        return kb(rows)
     rows.append([("esc", tap("esc")), ("←", tap("left")),
                  ("→", tap("right")), ("⏎", tap("enter", True))] if bar else
                 [("esc", tap("esc")), ("↑", tap("up")),
@@ -3784,7 +3814,7 @@ def watcher(cfg, state, lock):
 # ---------- commands ----------
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
-        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
+        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n", "!always": "y"}
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 
 # The dialogs disagree about Enter. Claude Code's permission prompt acts on the
@@ -3804,6 +3834,7 @@ YES_NO = {
         re.I,
     ),
 }
+YES_NO["!always"] = YES_NO["!y"]     # yes, and saved as a rule (see autoyes)
 
 
 def dialog_id(lines):
@@ -3969,7 +4000,7 @@ TG_SLASH = {"ctl": "!ctl", "vibe": "!vibe", "teleport": "!teleport", "harvest": 
             "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
-            "spendcap": "!spendcap", "tmstats": "!stats"}
+            "spendcap": "!spendcap", "tmstats": "!stats", "tokens": "!tokens"}
 TG_DESC = {"ctl": "button panel for this session",
            "vibe": "1-tap super-intent cockpit (build, goal, race, teleport, harvest, wrapped)",
            "teleport": "package live context (.nightmux/HANDOFF.md) & switch agents mid-thought",
@@ -3989,7 +4020,8 @@ TG_DESC = {"ctl": "button panel for this session",
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
            "idlectx": "flag parked sessions above N% context, or off",
-           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent"}
+           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent",
+           "tokens": "tokens and dollars per agent, cache savings, daily pace"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -4237,6 +4269,13 @@ def agent(cfg, key):
     one-off `!opencode foo` works before anyone edits the config."""
     spec = agents(cfg).get(key) or [key]
     return spec[0], (spec[1] if len(spec) > 1 else "")
+
+
+def claude_has_chat(cwd):
+    """Does Claude Code have a saved conversation for this folder? It files them
+    under ~/.claude/projects/<cwd with every non-alphanumeric char as '-'>."""
+    d = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.expanduser(cwd))))
+    return bool(glob.glob(os.path.join(d, "*.jsonl")))
 
 
 def default_agent(cfg):
@@ -4911,11 +4950,12 @@ def autoyes(cfg, state, topic, sess):
     it stops after AUTOYES_MAX in an hour so a dialog loop cannot run all night.
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
+    rules = (cfg.get("always") or {}).get(sess) or {}
     st = state.get(sess) or {}
-    if not keys or st.get("stop_hold"):     # a stopped fleet approves nothing
+    if not (keys or rules) or st.get("stop_hold"):     # a stopped fleet approves nothing
         return
     ak = agent_key(cfg, topic, sess)
-    if ak not in keys and "on" not in keys and "all" not in keys:
+    if keys and ak not in keys and "on" not in keys and "all" not in keys:
         bound = cfg.get("topics", {}).get(str(topic))
         live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
         if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
@@ -4924,6 +4964,8 @@ def autoyes(cfg, state, topic, sess):
         # one nightmux started as Claude is not agy because Claude is the default.
         elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and not live_key:
             ak = keys[0]
+        elif rules:
+            keys = []           # not opted in: only a learned rule answers
         else:
             return
     if st.get("mode") != "waiting":
@@ -4945,6 +4987,10 @@ def autoyes(cfg, state, topic, sess):
                  "answer it yourself, or !autoyes off", mode="plain")
         return
     lines = visible(sess)
+    # ♾ always: the exact request (prompt_fp) was approved with "always" before
+    learned = not keys and prompt_fp(pane(sess)) in rules
+    if not keys and not learned:
+        return
     digit = menu_digit(lines, YES_NO["!y"])
     if not digit:
         tail = [plain(l) for l in (lines[-15:] if lines else [])]
@@ -4966,8 +5012,9 @@ def autoyes(cfg, state, topic, sess):
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
     question = next((l for l in non_empty if WAITING.search(l)), non_empty[0] if non_empty else "?")
-    send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
-         "!autoyes off to stop", mode="plain")
+    send(cfg, topic, (f"♾ always {sess} → {digit}\n{question[:160]}\n!rules to list or drop"
+                      if learned else f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
+                      "!autoyes off to stop"), mode="plain")
     res = pick(sess, digit)
     if res is None:             # not an arrow menu: the digit is the answer
         press(sess, digit, confirm=True)
@@ -4975,6 +5022,44 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def rules_cmd(cfg, lock, sess, arg):
+    """!rules [clear|<n> off]: the requests ♾ always answers for this session."""
+    with lock:
+        rules = cfg.setdefault("always", {}).setdefault(sess, {})
+        a = arg.split()
+        if a == ["clear"]:
+            rules.clear()
+        elif len(a) == 2 and a[0].isdigit() and a[1] == "off" and 0 < int(a[0]) <= len(rules):
+            rules.pop(list(rules)[int(a[0]) - 1])
+        elif a:
+            return "usage: !rules [clear|<n> off]"
+        save_cfg(cfg)
+        rows = list(rules.values())
+    if not rows:
+        return (f"no ♾ always rules for {sess}\n"
+                "tap ♾ always on an approval: that exact request is answered yes from then on")
+    return (f"♾ always in {sess} (answered yes, risky list still wins):\n"
+            + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
+            + "\n!rules <n> off · !rules clear")
+
+
+def quiet_cmd(cfg, lock, arg):
+    """!quiet [HH:MM-HH:MM|off]: messages land silently, questions still ring."""
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)", arg.strip())
+    with lock:
+        if arg.strip() == "off":
+            cfg.pop("quiet", None)
+        elif m:
+            cfg["quiet"] = [m.group(0)[:5], m.group(0)[6:]]
+        elif arg.strip():
+            return "usage: !quiet 23:00-07:00 | off"
+        save_cfg(cfg)
+    q = cfg.get("quiet")
+    return (f"quiet {q[0]}-{q[1]} ({'now' if quiet_now(cfg) else 'not now'}): "
+            "updates land silently; questions, nudges, exits and stops still ring"
+            if q else "quiet hours off · !quiet 23:00-07:00")
 
 
 def policy_cmd(cfg, lock, topic, arg):
@@ -5157,6 +5242,10 @@ def start_session(cfg, state, lock, topic, arg, key):
     if cwd in active_cwds and active_cwds[cwd] != name:
         return f"collision: session '{active_cwds[cwd]}' is already running in {cwd}. Use @branch for a separate git worktree instead."
 
+    # `claude --continue` in a folder with no saved conversation prints "No
+    # conversation found to continue" and exits, leaving a bare shell behind.
+    if prog == "claude" and "--continue" in flags.split() and not claude_has_chat(cwd):
+        flags = " ".join(f for f in flags.split() if f != "--continue")
     spawn(name, cwd, f"{prog} {flags}".strip(), cfg)
     with lock:
         cfg["topics"][topic] = name
@@ -5316,7 +5405,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
+              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy", "!rules", "!quiet",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
@@ -5414,8 +5503,8 @@ HELP = [
         "!update [agent] = run each agent's own updater · !version",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
         "who sent what",
-        "!upgrade [here] = update nightmux itself, here and on every peer, and restart "
-        "(agents keep running)",
+        "!upgrade [all] = update nightmux on this machine and restart (agents keep running); "
+        "all = every peer too",
     ]),
     ("talk", "💬 Talking to the agent", [
         "anything else, and /slash commands -> typed into the agent",
@@ -5431,6 +5520,8 @@ HELP = [
         "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
         "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
         "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
+        "♾ always (button) = yes, and the same request is answered yes from then on · !rules [clear|<n> off]",
+        "!quiet 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
@@ -5493,6 +5584,8 @@ HELP = [
         "first-try prompts have in common",
         "!memory [update|on|off] = project notes every agent reads on start",
         "!stats [days] = tokens, cache and prompts per agent · !saved",
+        "!tokens [days] = tokens and API-list dollars per agent, what the cache saved, "
+        "today's pace, costly habits",
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
@@ -5636,6 +5729,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if ("fleet", days) not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
         return stats_report(fleet_analysis(cfg, days))
+    if cmd == "!tokens":
+        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 7
+        if ("fleet", days) not in _analysis:
+            send(cfg, topic, f"🔢 reading {days} days of transcripts…", mode="plain")
+        return tokens_report(fleet_analysis(cfg, days), cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!brain":
@@ -5897,6 +5995,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return voice_cmd(cfg, lock, topic, arg)
     if cmd == "!policy":
         return policy_cmd(cfg, lock, topic, arg)
+    if cmd == "!quiet":
+        return quiet_cmd(cfg, lock, arg)
+    if cmd == "!rules":
+        s_ = cfg.get("topics", {}).get(str(topic))
+        return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -6205,6 +6308,18 @@ def handle(cfg, state, lock, topic, text, mid=None):
             if bound != prompt_fp(lines):
                 return stale_tap(cfg, state, lock, sess, lines)
         key = KEYS[cmd]
+        if cmd == "!always":
+            lines = pane(sess)
+            hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+            if hit:
+                return f"'{hit[:60]}' is on the risky list — answer it with !y each time"
+            label = " · ".join(plain(l).strip() for l in strip_noise(lines[-15:], verbose=True)
+                               if l.strip() and not MENU.match(l))
+            with lock:
+                if pane_state(visible(sess)) != "waiting":
+                    return f"nothing is asking in {sess} right now — no rule saved"
+                cfg.setdefault("always", {}).setdefault(sess, {})[prompt_fp(lines)] = label[-120:]
+                save_cfg(cfg)
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
         with lock:
@@ -8576,6 +8691,59 @@ def fleet_cost(agents, extra=None):
         if rest > 0:
             out["left_out"]["(no model name)"] = out["left_out"].get("(no model name)", 0) + rest
     return out
+
+
+def tokens_report(r, extra=None, now=None):
+    """!tokens: what the last N days consumed, in tokens and API list dollars.
+
+    Per agent: tokens, cost, cache hit, what the cache saved against paying full
+    input price, and dollars per prompt. Then the daily context carried, today's
+    pace, and the habits that cost the most. A model with no price is named, not
+    counted as free (see fleet_cost)."""
+    ag = r.get("agents") or {}
+    if not ag:
+        return f"no agent transcripts in the last {r.get('days', '?')} days"
+    cost = fleet_cost(ag, extra)
+    saved, rows, day = {}, [], {}
+    for a, s in ag.items():
+        for m, t in (s.get("by_model") or {}).items():
+            p = price_of(m, extra)
+            if p:
+                saved[a] = saved.get(a, 0) + t[1] * max(0, p[0] - p[2]) / 1e6
+        for d, (c, q) in (s.get("daily") or {}).items():
+            day[d] = day.get(d, 0) + c
+    out = [f"🔢 tokens · last {r.get('days')}d" + (f" · {', '.join(r['servers'])}" if r.get("servers") else ""),
+           "", f"{'agent':<9}{'tokens':>8}{'$ list':>9}{'cache':>6}{'saved':>8}{'$/prompt':>9}"]
+    for a, s in sorted(ag.items(), key=lambda kv: -cost["agents"].get(kv[0], 0)):
+        tk = sum((s.get("tokens") or {}).get(k, 0) for k in ("input", "cache_read", "cache_write", "output"))
+        c, n = cost["agents"].get(a), s.get("prompts") or 0
+        ch = s.get("cache_hit")
+        rows.append((a, tk))
+        out.append(f"{a[:8]:<9}{_k(tk):>8}{(_usd(c) if c is not None else '?'):>9}"
+                   f"{(f'{ch:.0%}' if ch is not None else '-'):>6}{_usd(saved.get(a, 0)):>8}"
+                   f"{(_usd(c / n) if c is not None and n else '-'):>9}")
+    tot = sum(t for _, t in rows)
+    out.append(f"{'total':<9}{_k(tot):>8}{_usd(cost['total']):>9}{'':>6}{_usd(sum(saved.values())):>8}")
+    if day:
+        days = sorted(day)[-7:]
+        peak = max(day[d] for d in days) or 1
+        out += ["", "context carried per day (UTC)"]
+        out += [f"{d[5:]:<6}{'█' * max(1, int(day[d] / peak * 16)):<17}{_k(day[d]):>7}" for d in days]
+        now = now if now is not None else time.time()
+        gone = now % 86400
+        if len(day) > 1 and time.strftime("%Y-%m-%d", time.gmtime(now)) == days[-1] and gone > 3600:
+            avg = sum(day[d] for d in days[:-1]) / len(days[:-1])
+            pace = day[days[-1]] * 86400 / gone
+            out.append(f"today's pace {_k(int(pace))} vs {_k(int(avg))} a day ({pace / avg:.1f}x)" if avg else f"today's pace {_k(int(pace))}")
+    for a, s in sorted(ag.items()):
+        if s.get("cache_hit") is not None and s["cache_hit"] < .8 and (s.get("requests") or 0) > 50:
+            out.append(f"⚠ {a}: cache hit {s['cache_hit']:.0%} — gaps over 5 min expire it; keep sessions busy or !new")
+        if (s.get("avg_ctx") or 0) > 150000:
+            out.append(f"⚠ {a}: {_k(s['avg_ctx'])} context per call — !compact or !new cuts every later call")
+    if cost["left_out"]:
+        out.append("not priced: " + ", ".join(sorted(cost["left_out"])[:4]))
+    out.append("API list prices, not your bill; cache writes at the 5-min rate")
+    return "\n".join(out)
 
 
 def wrapped_data(cfg, days):
@@ -13257,7 +13425,9 @@ def upgrade_cmd(cfg, topic, arg):
     def go():
         with _upgrading:
             rows = []
-            if arg != "here":
+            # Peers only on request: each one restarts, and a deploy here
+            # should not cost the other machines a restart they did not ask for.
+            if arg == "all":
                 for name in sorted(cfg.get("peers") or {}):
                     r = peer_call(cfg, name, "upgrade", {}, timeout=330)
                     rows.append(f"{name}: " + (r.get("msg", "?") if isinstance(r, dict) else
@@ -13269,7 +13439,7 @@ def upgrade_cmd(cfg, topic, arg):
             if changed:
                 restart_self()
     threading.Thread(target=go, daemon=True).start()
-    return "⬆️ upgrading nightmux" + ("" if arg == "here" or not cfg.get("peers") else " here and on every peer") + "…"
+    return "⬆️ upgrading nightmux" + (" here and on every peer" if arg == "all" and cfg.get("peers") else "") + "…"
 
 
 def setup_chat(upd):
@@ -14449,6 +14619,13 @@ body.demo header,body.demo main,body.demo #sheet{display:none}
 body.demo h1{margin:0 0 24px;font-size:32px;font-weight:900;color:#fff;letter-spacing:6px;text-transform:uppercase;
 background:linear-gradient(135deg, #a371f7, #3fb950);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 0 20px rgba(63,185,80,0.4)}
 body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.05);border-radius:32px;overflow:hidden}
+#scene{display:none;touch-action:none;cursor:grab;image-rendering:auto;border-radius:0;background:none;border:0}
+body.v3d{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+body.v3d main,body.v3d #stage,body.v3d #rtitle{display:none}
+body.v3d>*{flex:none}
+body.v3d #scene{display:block;flex:1 1 0 !important;height:0;min-height:0;width:100%}
+body.v3d header{position:static}
+body:not(.v3d) #flr{display:none !important}
 </style></head><body>
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
@@ -14458,6 +14635,8 @@ body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px
 <span class="meter" id="clock"></span>
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <button class="snd" title="skin" onclick="nextSkin()">🎨</button>
+<button id="vw" class="snd" title="3D office / pixel rooms" onclick="toggleView()">🧊</button>
+<span class="meter" id="flr" style="display:none"><button class="snd" title="floor down" onclick="V3.go(-1)">◀</button> <span id="flt"></span> <button class="snd" title="floor up" onclick="V3.go(1)">▶</button></span>
 <span class="meter" id="srvs"></span>
 <nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
@@ -14466,6 +14645,7 @@ body.demo #stage{display:block;box-shadow:0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px
 <main id="rooms"><p class="empty">loading…</p></main>
 <h1 id="rtitle" style="display:none">NIGHTMUX REEL</h1>
 <canvas id="stage"></canvas>
+<canvas id="scene"></canvas>
 <div id="sheet"></div><div id="toast"></div>
 <script>
 // ---------- pixel kit ----------
@@ -14985,6 +15165,16 @@ function nextSkin() {
   try { localStorage.setItem('nm-skin', skin); } catch (e) {}
   toast('skin: ' + skin);
 }
+// 3D office by default; the pixel rooms stay one tap away (and are what ?demo and ?reel draw).
+let v3 = Q.get('view') ? Q.get('view') !== '2d' : true;
+try { if (!Q.get('view')) v3 = localStorage.getItem('nm-view') !== '2d'; } catch (e) {}
+if (DEMO || REEL) v3 = false;
+function setView() { document.body.classList.toggle('v3d', v3); document.getElementById('vw').textContent = v3 ? '🧊' : '🎞'; }
+function toggleView() {
+  v3 = !v3; setView();
+  try { localStorage.setItem('nm-view', v3 ? '3d' : '2d'); } catch (e) {}
+  toast(v3 ? '3D office · drag to look around, tap an agent' : 'pixel rooms');
+}
 function toggleSound() {
   sound = !sound;
   try { localStorage.setItem('nm-sound', sound ? '1' : '0'); } catch (e) {}
@@ -15129,6 +15319,11 @@ function draw() {
     cv.style.width = cv.width * (+Q.get('scale') || 3) + 'px';
     return;
   }
+  if (v3 && typeof V3 !== 'undefined') {
+    // a renderer bug must not leave a blank screen: fall back to the pixel rooms
+    try { return V3.draw(frame, Object.assign({clock: hhmm()}, sky())); }
+    catch (e) { console.error(e); v3 = false; setView(); toast('3D failed, showing pixel rooms'); }
+  }
   document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
     if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
 }
@@ -15169,6 +15364,7 @@ if (DEMO || REEL) document.body.classList.add('demo');
 if (REEL) { document.getElementById('rtitle').style.display = 'block'; document.getElementById('rtitle').textContent = Q.get('t') || 'NIGHTMUX REEL'; }
 if (window.PUB) document.body.classList.add('pub');
 if (sound) document.getElementById('snd').textContent = '🔊';
+setView();
 if (REPLAY) replay();
 else if (!DEMO && !REEL) { poll(); setInterval(poll, 2000); }
 if (!DEMO && !REEL && !REPLAY) document.addEventListener('visibilitychange', poll);
@@ -15181,6 +15377,454 @@ let lastT = 0;
   frame += Math.min(now - lastT, 250) / 110; lastT = now; draw();
 })(0);
 draw();
+</script>
+<script>
+// ---------- the 3D office: the same rooms and agents, as a place you can walk around ----------
+// A tiny software renderer: boxes and quads, perspective, painter's order, flat light. No libraries,
+// so the page stays one file that works offline. Drag to orbit, wheel or pinch to zoom, tap an agent.
+const V3 = (() => {
+  const cv = document.getElementById('scene'), g = cv.getContext('2d');
+  const cam = {yaw: .5, pitch: .62, zoom: 1}, hits = [], CC = new Map();
+  let W = 0, H = 0, dpr = 1, faces = [], lay = null, lastSig = '', R0 = 10, touched = 0;
+  const rgb = c => { let v = CC.get(c); if (!v) { const n = parseInt(c.slice(1), 16); v = [n >> 16, n >> 8 & 255, n & 255]; CC.set(c, v); } return v; };
+  const lerp = (a, b, t) => a + (b - a) * t, clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  // ----- geometry -----
+  // X is a local frame {x, y, z, ry, rx}: tilt about X, then turn about Y, then move.
+  const place = (X, p) => {
+    let [x, y, z] = p;
+    if (X.rx) { const c = Math.cos(X.rx), s = Math.sin(X.rx); [y, z] = [y * c - z * s, y * s + z * c]; }
+    const c = Math.cos(X.ry || 0), s = Math.sin(X.ry || 0);
+    return [X.x + x * c + z * s, X.y + y, X.z - x * s + z * c];
+  };
+  const CORN = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];
+  const SIDE = [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]];
+  // A box centred at (cx,cy,cz) local to X. sw: swing about the top (a limb), emit: unlit.
+  function box(X, cx, cy, cz, sx, sy, sz, col, o) {
+    o = o || {};
+    const P = CORN.map(([a, b, c]) => {
+      let p = [cx + a * sx / 2, cy + b * sy / 2, cz + c * sz / 2];
+      if (o.sw) { const jy = o.jy, c2 = Math.cos(o.sw), s2 = Math.sin(o.sw), y = p[1] - jy, z = p[2] - cz;
+        p = [p[0], jy + y * c2 - z * s2, cz + y * s2 + z * c2]; }
+      return place(X, p);
+    });
+    const mid = [0, 1, 2].map(k => P.reduce((s, p) => s + p[k], 0) / 8);
+    for (const idx of SIDE) faces.push({p: idx.map(i => P[i]), col, mid, emit: o.emit, bg: o.bg});
+  }
+  // limb: hangs from joint (jx,jy,jz) in X, length h, swung forward by a (radians)
+  const limb = (X, jx, jy, jz, w, h, d, col, a) => box(X, jx, jy - h / 2, jz, w, h, d, col, {sw: -a, jy});
+  // a flat quad in the local XY plane at depth lz, facing +z
+  function quad(X, x0, y0, x1, y1, lz, col, o) {
+    o = o || {};
+    const p = [[x0, y0, lz], [x1, y0, lz], [x1, y1, lz], [x0, y1, lz]].map(v => place(X, v));
+    faces.push({p, col, n: place({x: 0, y: 0, z: 0, ry: X.ry, rx: X.rx}, [0, 0, 1]), emit: o.emit !== false, bias: o.bias || .02, bg: o.bg});
+  }
+  
+  // ----- camera -----
+  function proj(p) {
+    const cp = cam.p, v = [p[0] - cp[0], p[1] - cp[1], p[2] - cp[2]];
+    const zc = v[0] * cam.f[0] + v[1] * cam.f[1] + v[2] * cam.f[2];
+    if (zc < .3) return null;
+    const xc = v[0] * cam.r[0] + v[1] * cam.r[1] + v[2] * cam.r[2], yc = v[0] * cam.u[0] + v[1] * cam.u[1] + v[2] * cam.u[2], k = cam.k / zc;
+    return [W / 2 + xc * k, H / 2 - yc * k, zc];
+  }
+  function setCam() {
+    const D = R0 * 2.2 * (W < H * .8 ? .75 : 1) / cam.zoom, cy = Math.cos(cam.pitch), t = lay ? lay.c : [0, 0, 0];
+    cam.p = [t[0] + D * Math.sin(cam.yaw) * cy, t[1] + D * Math.sin(cam.pitch), t[2] + D * Math.cos(cam.yaw) * cy];
+    const f = [t[0] - cam.p[0], t[1] - cam.p[1], t[2] - cam.p[2]], fl = Math.hypot(...f); cam.f = f.map(v => v / fl);
+    const r = [-cam.f[2], 0, cam.f[0]], rl = Math.hypot(r[0], r[2]) || 1; cam.r = [r[0] / rl, 0, r[2] / rl];
+    cam.u = [cam.r[1] * cam.f[2] - cam.r[2] * cam.f[1], cam.r[2] * cam.f[0] - cam.r[0] * cam.f[2], cam.r[0] * cam.f[1] - cam.r[1] * cam.f[0]];
+    cam.k = Math.min(W, H * 1.35) * 1.15;
+  }
+
+  // ----- layout: rooms in rows, the lounge along the front, an alley down the left -----
+  const PITCH = 2.5, RD = 3.5, GAP = 1.6;
+  // The office is split into floors of a few rooms: the whole night on one screen was huge and slow to draw.
+  let floorNo = 0;
+  function floors() {
+    const out = []; let cur = [], n = 0;
+    for (const r of data.rooms) { if (cur.length && (cur.length >= 6 || n + r.desks.length > 14)) { out.push(cur); cur = []; n = 0; } cur.push(r); n += r.desks.length; }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  function floorBar(fl) {
+    const el = document.getElementById('flr'); if (!el) return;
+    el.style.display = fl.length > 1 ? '' : 'none';
+    const hot = fl.reduce((n, rs, i) => i === floorNo ? n : n + rs.reduce((m, r) => m + r.desks.filter(d => d.state === 'waiting').length, 0), 0);
+    document.getElementById('flt').textContent = 'floor ' + (floorNo + 1) + '/' + fl.length + (hot ? ' · ✋' + hot : '');
+  }
+  function layout(rs) {
+    const rooms = rs.map(r => ({r, w: Math.max(2, r.desks.length) * PITCH + .5}));
+    const rows = []; let cur = [], cw = 0;
+    for (const m of rooms) { if (cur.length && cw + m.w > 21) { rows.push(cur); cur = []; cw = 0; } cur.push(m); cw += m.w + GAP; }
+    if (cur.length) rows.push(cur);
+    const AL = GAP + .4;                                          // the alley
+    let z = 0, wmax = 9;
+    rows.forEach(row => { let x = AL; row.forEach(m => { m.x0 = x; m.z0 = z; x += m.w + GAP; }); wmax = Math.max(wmax, x - GAP); z += RD + GAP; });
+    const L = {x0: AL, z0: z + .2, w: Math.max(wmax - AL, 9), d: 4.6};       // lounge
+    const wTot = L.x0 + L.w + .6, dTot = L.z0 + L.d + .4;
+    L.cor = z - GAP * .45;                                        // corridor line between rooms and lounge
+    return {rooms, L, wTot, dTot, c: [wTot / 2 - .2, .4, dTot / 2 - .3], rad: Math.hypot(wTot, dTot) / 2};
+  }
+
+  // ----- the lounge spots -----
+  function spots(L) {
+    const x = L.x0, z = L.z0, S = [];
+    const add = (n, px, pz, ry, pose) => S.push({n, x: px, z: pz, ry, pose});
+    add('coffee', x + 1.0, z + 1.35, Math.PI, 'stand'); add('coffee', x + 1.9, z + 1.35, Math.PI, 'stand');
+    add('wc', x + L.w - .9, z + 1.2, 0, 'in');
+    const cx = x + 2.2;
+    for (let i = 0; i < 3; i++) add('tv', cx + i * .8, z + 2.85, Math.PI, 'sit');
+    for (let i = 0; i < 4; i++) add('bed', x + L.w - 1.0 - i * 1.1, z + L.d - 1.1, 0, 'lie');
+    return S;
+  }
+  // Walks follow a polyline; a pure function of frame and the frame the state last changed.
+  const PACE = .11, P = 720, STAND = .45;
+  function along(path, s) {
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (s <= d || i === path.length - 1) { const u = d ? clamp(s / d, 0, 1) : 1; return {x: lerp(a[0], b[0], u), z: lerp(a[1], b[1], u), ry: Math.atan2(b[0] - a[0], b[1] - a[1]), done: s >= d && i === path.length - 1}; }
+      s -= d;
+    }
+    return {x: path[0][0], z: path[0][1], ry: 0, done: true};
+  }
+  const plen = p => p.reduce((s, a, i) => i ? s + Math.hypot(a[0] - p[i - 1][0], a[1] - p[i - 1][1]) : 0, 0);
+  function route(m, home, sp, L) {
+    const fz = m.z0 + RD - .15, ax = lay.L.x0 - GAP * .7, p = [[home.x, home.z], [home.x, fz]];
+    if (m.z0 + RD < L.cor - .1) p.push([ax, fz], [ax, L.cor]);
+    else p.push([home.x, L.cor]);
+    p.push([sp.x, L.cor], [sp.x, sp.z]);
+    return p.filter((a, i) => !i || Math.hypot(a[0] - p[i - 1][0], a[1] - p[i - 1][1]) > .01);
+  }
+  function plan(d, gi, f, home, m, S) {
+    const t = f - (d.since || 0), pace = PACE * (.85 + (gi * .13) % .3), grace = 24;
+    const pick = (n, k) => { const a = S.filter(s => s.n === n); return a[k % a.length]; };
+    const go = (sp, u, ret) => {
+      const path = route(m, home, sp, lay.L), len = plen(path), wt = len / pace + 4;
+      if (u < 4) return {x: home.x, z: home.z, ry: 0, pose: 'rise'};
+      if (u < wt) { const w = along(path, (u - 4) * pace); return {x: w.x, z: w.z, ry: w.ry, pose: 'walk', walked: (u - 4) * pace}; }
+      return Object.assign({pose: sp.pose, spot: sp.n}, {x: sp.x, z: sp.z, ry: sp.ry});
+    };
+    if (d.state === 'limit') { if (t < 14) return null; return go(pick('bed', gi), t - 14); }
+    if (d.state !== 'idle' || t < grace) return null;
+    const u0 = t - grace, c = Math.floor(u0 / P); let u = u0 % P;
+    const kind = ['coffee', 'tv', 'wc', 'tv', 'coffee', 'wc'][(c + gi * 2) % 6], sp = pick(kind, gi);
+    const path = route(m, home, sp, lay.L), walk = plen(path) / pace + 4, desk = 40 + (gi * 37) % 50, stay = P - desk - 2 * walk;
+    if (stay < 60 || u < desk) return null;
+    u -= desk;
+    if (u < walk + stay) return go(sp, u);
+    u -= walk + stay;
+    const back = path.slice().reverse(), w = along(back, u * pace);
+    if (w.done) return null;
+    return {x: w.x, z: w.z, ry: w.ry, pose: 'walk', walked: u * pace};
+  }
+
+  // ----- light -----
+  const LT = (() => { const v = [-.45, .8, .4], l = Math.hypot(...v); return v.map(a => a / l); })();
+  let amb = .5, tint = [1, 1, 1];
+  function shade(col, n, emit) {
+    const c = rgb(col);
+    if (emit) return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+    const k = clamp(amb + (1 - amb) * .9 * Math.max(0, n[0] * LT[0] + n[1] * LT[1] + n[2] * LT[2]), 0, 1.15);
+    return 'rgb(' + (c[0] * k * tint[0] | 0) + ',' + (c[1] * k * tint[1] | 0) + ',' + (c[2] * k * tint[2] | 0) + ')';
+  }
+
+  // ----- the furniture -----
+  function wall(x0, z0, x1, z1, y1, col, nx, nz) {          // one-sided: it vanishes when the camera is behind it
+    const p = [[x0, 0, z0], [x1, 0, z1], [x1, y1, z1], [x0, y1, z0]];
+    faces.push({p, col, n: [nx, 0, nz], bg: 2, wall: 1});
+  }
+  function station(m, d, i, gi, f, o) {
+    const dx = m.x0 + .25 + PITCH * i + PITCH / 2, dz = m.z0 + 1.15, X = {x: dx, y: 0, z: dz, ry: 0}, st = d.state;
+    const M = {x: dx + .42, y: .75, z: dz - .1, ry: -.4};                                           // monitor, turned toward the seat
+    cached('d' + dx + ',' + dz, () => {
+      box(X, 0, .72, 0, 2.0, .07, .9, '#a07c5c'); box(X, 0, .35, -.35, 1.9, .7, .1, '#6b4f3a');       // desk top + modesty panel
+      box(X, -.9, .35, .1, .08, .7, .7, '#5a4130'); box(X, .9, .35, .1, .08, .7, .7, '#5a4130');
+      box(X, .62, .36, 0, .5, .64, .66, '#5a4130'); box(X, .62, .5, .34, .16, .03, .03, '#c9a46a');   // drawers
+      box(X, -.35, .765, .15, .62, .03, .22, '#3a4060');                                              // keyboard
+      box(X, -.35, .785, .15, .5, .01, .14, '#c9cfdc');
+      box(M, 0, .22, 0, .1, .22, .1, '#1f2335'); box(M, 0, .02, 0, .32, .04, .22, '#1f2335');
+      box(M, 0, .58, 0, .82, .54, .06, '#0b0d14');
+      const C = {x: dx - .3, y: 0, z: dz + .9, ry: 0};                                                // chair
+      box(C, 0, .22, 0, .56, .07, .56, '#262b40'); box(C, 0, .52, .27, .56, .6, .07, '#2f3652');
+      box(C, 0, .11, 0, .06, .2, .06, '#1b1f30'); box(C, 0, .02, 0, .5, .04, .5, '#1b1f30');
+    });
+    screen(M, d, f);
+    const glow = {busy: color(d.agent), waiting: '#e0af68', limit: '#f7768e', shell: '#9ece6a'}[st];
+    if (glow) glows.push({p: [M.x, M.y + .6, M.z], c: glow, r: 1.1});
+    if (d.live) glows.push({p: [dx, 0.02, dz + .4], c: '#ffd596', r: 1.9, floor: 1});
+    for (let q = 0; q < Math.min(d.queued || 0, 5); q++) box(M, -.28 + q * .14, 1.0, .02, .1, .1, .06, ['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], {emit: 1});
+    if (st !== 'busy' && st !== 'waiting') box(X, -.78, .8, -.1, .12, .1, .12, '#e6e9f2');          // mug
+    const away = d.away;
+    if (!away && st !== 'gone' && st !== 'shell') person(d, {x: dx - .3, y: .0, z: dz + .88, ry: 0}, 'sit', f, gi, {at: d.since});
+    d._home = {x: dx - .3, z: dz + .88};
+    if (!away) label(d.agent, [dx - .3, 1.95, dz + .88], d, 'desk');
+    if (st === 'waiting') bubbles.push({p: [dx - .3, 2.25, dz + .88], g: '!', bg: '#ffd166', fg: '#7a4b00', bob: f % 6 < 3});
+    if (st === 'unknown') bubbles.push({p: [dx - .3, 2.25, dz + .88], g: '?', bg: '#dfe3f0', fg: '#565f89'});
+    if (st === 'limit' && !away) zzz.push({p: [dx - .3, 1.85, dz + .88]});
+  }
+  function screen(M, d, f) {
+    const st = d.state, x0 = -.38, x1 = .38, y0 = .36, y1 = .76, lz = .04, Q = (a, b, c, e, col) => quad(M, a, b, c, e, lz, col, {bias: .03});
+    if (st === 'gone') { Q(x0, y0, x1, y1, '#05070d'); return; }
+    if (st === 'shell') { Q(x0, y0, x1, y1, '#050b07'); Q(-.32, .64, -.26, .7, '#9ece6a'); if (f % 4 < 2) Q(-.2, .44, -.08, .47, '#9ece6a'); return; }
+    if (st === 'limit') { Q(x0, y0, x1, y1, '#2a0f17'); Q(-.3, .4, .3, .46, '#4a1a26'); Q(-.3, .4, -.3 + .6 * clamp(d.prog || 0, .02, 1), .46, '#f7768e'); Q(-.12, .6, .12, .7, '#f7768e'); return; }
+    if (st === 'waiting') { Q(x0, y0, x1, y1, '#1c2238'); Q(x0, .68, x1, y1, '#e0af68'); Q(-.28, .44, -.06, .56, '#9ece6a'); Q(.06, .44, .28, .56, '#f7768e'); return; }
+    if (st === 'unknown') { Q(x0, y0, x1, y1, '#1a1e2e'); for (let k = 0; k < 8; k++) { const a = -.34 + (k % 4) * .17, b = .4 + (k >> 2) * .17; if ((k * 7 + f * 5) % 9 < 4) Q(a, b, a + .15, b + .15, '#3b4261'); } return; }
+    if (st === 'busy') {
+      Q(x0, y0, x1, y1, '#0f1424');
+      const C = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7', '#7dcfff', color(d.agent)];
+      for (let r = 0; r < 6; r++) { const k = r + (f >> 1), ind = k % 3 * .06, w1 = .08 + k * 7 % 5 * .05, w2 = Math.min(.04 + k * 5 % 6 * .035, .66 - ind - w1);
+        const y = .7 - r * .06; Q(-.34 + ind, y - .03, -.34 + ind + w1, y, C[k % 6]); if (w2 > 0) Q(-.32 + ind + w1, y - .03, -.32 + ind + w1 + w2, y, C[(k + 2) % 6]); }
+      return;
+    }
+    Q(x0, y0, x1, y1, '#151a2e'); Q(-.06, .52, .06, .64, '#e0af68'); Q(-.02, .53, .08, .63, '#151a2e');   // idle: a crescent
+  }
+
+  // ----- people -----
+  function person(d, X, pose, f, gi, o) {
+    const L = look(d.agent), ph = (gi * 17) % 61, walked = (o && o.walked) || 0;
+    const st = d.state, sk = L.skin, sh = L.shirt, pt = '#2a2f45', B = {x: X.x, y: X.y, z: X.z, ry: X.ry, rx: X.rx};
+    let bob = 0, sw = 0, armsA = [0, 0], head = [0, 0];
+    if (pose === 'walk') { sw = Math.sin(walked * 4.2) * .75; bob = Math.abs(Math.cos(walked * 4.2)) * .05; }
+    if (pose === 'rise') bob = .02;
+    B.y += bob;
+    const sit = pose === 'sit', lie = pose === 'lie', hipY = sit ? .52 : .8, tors = hipY + .34;
+    const sleep = st === 'limit';
+    // legs
+    if (sit) for (const s of [-1, 1]) { box(B, s * .13, hipY - .08, .26, .17, .17, .52, pt); box(B, s * .13, .27, .5, .17, .5, .17, pt); box(B, s * .13, .03, .56, .18, .07, .28, '#0b0d14'); }
+    else if (lie) for (const s of [-1, 1]) { limb(B, s * .13, hipY, 0, .17, .8, .18, pt, 0); box(B, s * .13, .03, 0, .18, .07, .28, '#0b0d14'); }
+    else for (const s of [-1, 1]) { const a = s * sw * .9; limb(B, s * .13, hipY, 0, .17, .8, .18, pt, a); box(B, s * .13, .03 + Math.max(0, -a) * .3, .0 + Math.sin(a) * .8 - .05, .18, .07, .3, '#0b0d14'); }
+    // torso
+    const lean = sleep && sit ? .5 : 0;
+    box(B, 0, tors, lean * .3, .52, .62, .3, sh); box(B, 0, hipY + .02, 0, .5, .1, .3, pt);
+    box(B, 0, tors + .05, -.16 + lean * .3, .44, .5, .04, L.shade);                       // back panel so the chair reads
+    // arms
+    const shY = tors + .27;
+    if (pose === 'walk') { limb(B, -.34, shY, 0, .14, .6, .15, sh, -sw); limb(B, .34, shY, 0, .14, .6, .15, sh, sw); }
+    else if (pose === 'stand') { limb(B, -.34, shY, 0, .14, .6, .15, sh, .1); limb(B, .34, shY, 0, .14, .6, .15, sh, f % 40 < 14 ? 1.9 : .9); box(B, .34, f % 40 < 14 ? 1.2 : .95, .45, .1, .12, .1, '#e6e9f2'); }
+    else if (sit && st === 'busy') { const a = Math.sin(f * .9) * .12; limb(B, -.34, shY, 0, .14, .6, .15, sh, 1.15 + a); limb(B, .34, shY, 0, .14, .6, .15, sh, 1.15 - a); }
+    else if (sit && st === 'waiting') { limb(B, -.34, shY, 0, .14, .6, .15, sh, 1.1); limb(B, .34, shY, 0, .14, .6, .15, sh, 3.1 + Math.sin(f * .5) * .3); }
+    else if (sit && sleep) { limb(B, -.34, shY, 0, .14, .6, .15, sh, 1.3); limb(B, .34, shY, 0, .14, .6, .15, sh, 1.3); }
+    else if (sit && st === 'idle' && f % 48 < 12) { limb(B, -.34, shY, 0, .14, .6, .15, sh, 1.1); limb(B, .34, shY, 0, .14, .6, .15, sh, 2.3); }
+    else if (sit) { limb(B, -.34, shY, 0, .14, .6, .15, sh, 1.0); limb(B, .34, shY, 0, .14, .6, .15, sh, .9); }
+    else { limb(B, -.34, shY, 0, .14, .6, .15, sh, 0); limb(B, .34, shY, 0, .14, .6, .15, sh, 0); }
+    // head
+    const hy = tors + .31 + .22 + (sleep && sit ? -.12 : 0), hz = lean * .55, blink = (f + ph) % 52 === 0 || sleep || lie;
+    const look3 = st === 'busy' && sit && (f + ph) % 45 < 4 ? .25 : 0, H0 = {x: B.x, y: B.y, z: B.z, ry: (X.ry || 0) + look3, rx: X.rx};
+    box(H0, 0, hy, hz, .4, .4, .4, sk); box(H0, 0, hy + .15, hz - .01, .44, .14, .44, L.hair); box(H0, 0, hy - .02, hz - .21, .44, .36, .04, L.hair);
+    if (!blink) { box(H0, -.1, hy + .02, hz + .205, .07, .07, .02, '#0b0d14'); box(H0, .1, hy + .02, hz + .205, .07, .07, .02, '#0b0d14'); }
+    else { box(H0, -.1, hy + .02, hz + .205, .1, .02, .02, '#0b0d14'); box(H0, .1, hy + .02, hz + .205, .1, .02, .02, '#0b0d14'); }
+    const lh = L.hat;
+    if (lh === 'cap') { box(H0, 0, hy + .24, hz, .46, .1, .46, sh); box(H0, 0, hy + .2, hz + .3, .4, .03, .24, L.shade); }
+    if (lh === 'beanie') { box(H0, 0, hy + .26, hz, .46, .16, .46, L.shade); box(H0, 0, hy + .2, hz, .47, .05, .47, sh); box(H0, 0, hy + .37, hz, .08, .08, .08, '#e6e9f2'); }
+    if (lh === 'headset') { box(H0, 0, hy + .24, hz, .46, .04, .1, '#1b1b1b'); box(H0, -.23, hy, hz, .06, .16, .16, sh); box(H0, .23, hy, hz, .06, .16, .16, sh); box(H0, -.15, hy - .13, hz + .22, .2, .03, .03, '#1b1b1b'); }
+    if (lh === 'hood') { box(H0, 0, hy + .22, hz - .02, .48, .12, .48, L.shade); box(H0, -.23, hy - .02, hz - .02, .05, .36, .46, L.shade); box(H0, .23, hy - .02, hz - .02, .05, .36, .46, L.shade); }
+    hits.push({d, p: [B.x, B.y + 1.1, B.z]});
+    return B;
+  }
+  function actor(d, a, f, gi) {
+    if (a.pose === 'in') return;
+    const X = {x: a.x, y: 0, z: a.z, ry: a.ry};
+    if (a.pose === 'lie') { X.y = .82; X.rx = -Math.PI / 2; X.z = a.z + .65; }   // on its back, head on the pillow
+    const pose = a.pose === 'rise' ? 'stand' : a.pose;
+    person(d, X, pose === 'rise' ? 'stand' : pose, f, gi, {walked: a.walked});
+    const top = a.pose === 'lie' ? [a.x, 1.3, a.z] : [a.x, 1.95 + (a.pose === 'sit' ? .0 : 0), a.z];
+    label(d.agent, top, d, 'away');
+    if (a.pose === 'lie') zzz.push({p: [a.x, 1.5, a.z]});
+  }
+
+  // ----- the room around them -----
+  function lounge(L, f, occ) {
+    const x = L.x0, z = L.z0, X = {x: 0, y: 0, z: 0, ry: 0}, C = '#2b2640';
+    box(X, x + L.w / 2, .015, z + L.d / 2, L.w, .03, L.d, '#2a2740', {bg: 1});
+    box(X, x + 2.6, .02, z + 2.5, 2.6, .02, 1.6, '#3d2c4a', {bg: 1});                       // rug
+    // coffee bar
+    box(X, x + 1.4, .45, z + .55, 2.4, .9, .6, '#6b4f3a'); box(X, x + 1.4, .92, z + .55, 2.5, .05, .65, '#a07c5c');
+    box(X, x + 1.0, 1.2, z + .5, .5, .5, .4, '#1f2335'); box(X, x + 1.0, 1.3, z + .72, .3, .14, .02, '#3a4060', {emit: 1});
+    box(X, x + 1.0, 1.0, z + .72, .12, .12, .1, '#e6e9f2'); if (occ.coffee) { glows.push({p: [x + 1.0, 1.4, z + .8], c: '#9ece6a', r: .5}); }
+    box(X, x + 1.8, 1.04, z + .55, .24, .18, .24, '#5a4130');
+    // WC cabin
+    box(X, x + L.w - .9, 1.05, z + .55, 1.3, 2.1, .1, '#463f5e'); box(X, x + L.w - .25, 1.05, z + 1.1, .1, 2.1, 1.2, '#3b3550');
+    box(X, x + L.w - 1.55, 1.05, z + 1.1, .1, 2.1, 1.2, '#3b3550');
+    box({x: x + L.w - .9, y: 0, z: z + 1.75, ry: 0}, 0, 1.0, 0, 1.0, 2.0, .06, occ.wc ? '#2b2640' : '#5a5078');
+    box(X, x + L.w - .6, 1.2, z + 1.84, .08, .08, .04, occ.wc ? '#f7768e' : '#9ece6a', {emit: 1});
+    // TV on a stand, couch facing it
+    const tvx = x + 3.0, tvz = z + 1.9, T = {x: tvx, y: 0, z: tvz, ry: 0};
+    box(X, tvx, .3, tvz, 2.4, .6, .5, '#3d2c20'); box(T, 0, 1.25, 0, 2.2, 1.2, .1, '#0b0d14');
+    quad(T, -1.0, .72, 1.0, 1.78, .06, occ.tv ? '#3b3a78' : '#0b0e1a', {bias: .03});
+    if (occ.tv) { const CC = ['#7aa2f7', '#bb9af7', '#9ece6a', '#e0af68', '#7dcfff', '#f7768e'];
+      for (let a = 0; a < 6; a++) for (let b = 0; b < 3; b++) quad(T, -.95 + a * .32, .78 + b * .33, -.65 + a * .32, 1.08 + b * .33, .06, CC[((a * 3 + b * 5 + (f >> 2) * 7) >> 1) % 6], {bias: .04});
+      glows.push({p: [tvx, 1.3, tvz + .6], c: '#7aa2f7', r: 2.4}); }
+    box(X, tvx, .3, z + 2.9, 2.8, .4, .85, '#5a4570'); box(X, tvx, .75, z + 3.3, 2.8, .7, .25, '#3d2c4a');
+    box(X, tvx - 1.5, .5, z + 2.95, .25, .65, .85, '#3d2c4a'); box(X, tvx + 1.5, .5, z + 2.95, .25, .65, .85, '#3d2c4a');
+    // beds
+    for (let i = 0; i < 4; i++) { const bx = x + L.w - 1.0 - i * 1.1, bz = z + L.d - 1.2;
+      box(X, bx, .25, bz + .0, .9, .3, 2.0, '#2b3452'); box(X, bx, .45, bz + .0, .84, .14, 1.9, '#4d5b8a'); box(X, bx, .56, bz - .72, .6, .12, .4, '#e6e9f2'); }
+    // plants
+    for (const [px, pz] of [[x + .3, z + L.d - .4], [x + L.w - .3, z + 2.4]]) { box(X, px, .25, pz, .4, .5, .4, '#8a4b2c'); box(X, px, .75, pz, .5, .6, .5, '#3b7a46'); box(X, px + .05, 1.15, pz, .34, .4, .34, '#4f9d5b'); }
+  }
+  function room(m, f, o, occ) {
+    const X = {x: 0, y: 0, z: 0, ry: 0};
+    const hue = ['#2a2440', '#22303f', '#33263c', '#27332f', '#37302a', '#2a2f45'][Math.abs(+m.r.topic || 0) % 6];
+    box(X, m.x0 + m.w / 2, .015, m.z0 + RD / 2, m.w, .03, RD, hue, {bg: 1});
+    box(X, m.x0 + m.w / 2, .045, m.z0 + RD - .02, m.w, .02, .05, '#e0af68', {bg: 1});
+    roomLabels.push({t: m.r.name + '  #' + m.r.topic, p: [m.x0 + .1, .06, m.z0 + RD - .08]});
+  }
+  function shell(f, o) {
+    const w = lay.wTot, dd = lay.dTot, X = {x: 0, y: 0, z: 0, ry: 0}, day = o.day || 0, dawn = o.dawn || 0;
+    box(X, w / 2, -.1, dd / 2, w + 2, .2, dd + 2, '#16121f', {bg: 2});
+    box(X, w / 2, .005, dd / 2, w, .02, dd, '#261e2e', {bg: 2});
+    for (let zz = .4; zz < dd; zz += 1.1) box(X, w / 2, .02, zz, w, .005, .02, '#1c1622', {bg: 1});
+    const Y = 3.6, wc = mix('#171c33', '#33405f', day);
+    wall(0, 0, w, 0, Y, wc, 0, 1); wall(0, dd, 0, 0, Y, wc, 1, 0); wall(w, 0, w, dd, Y, wc, -1, 0); wall(w, dd, 0, dd, Y, wc, 0, -1);
+    box(X, w / 2, .25, -.04, w, .5, .08, '#11162a', {bg: 2});
+    // windows on the back wall: the sky follows the viewer's clock
+    const sk = (t) => mix(mix(mix('#070a1c', '#2a1d4a', t), mix('#3d5aa8', '#ffb86b', t), dawn), mix('#4f8fd9', '#bfe3ff', t), day);
+    const WN = Math.max(2, Math.floor(w / 4.2)), ww = Math.min(3, w / WN - .8);
+    for (let k = 0; k < WN; k++) {
+      const cx = (k + .5) * w / WN, F = {x: cx, y: 0, z: .02, ry: 0};
+      quad(F, -ww / 2 - .09, 1.04, ww / 2 + .09, 3.16, 0, '#2b3452', {emit: false, bg: 1, bias: .01});
+      for (let b = 0; b < 4; b++) quad(F, -ww / 2, 1.1 + b * .5, ww / 2, 1.1 + (b + 1) * .5, 0, sk(b / 3), {emit: true, bg: 1, bias: .02});
+      const r = rng(k * 77 + 5);
+      for (let bx = -ww / 2; bx < ww / 2 - .1;) { const bw = .18 + r() * .3, bh = .15 + r() * .55; quad(F, bx, 1.1, Math.min(bx + bw, ww / 2), 1.1 + bh, 0, mix(mix('#0b0e1f', '#3a2c4a', dawn), '#6b7a99', day * .7), {emit: true, bg: 1, bias: .03});
+        if (dawn < .9 && r() < .8) quad(F, bx + .05, 1.1 + bh * .5, bx + .1, 1.1 + bh * .5 + .06, 0, '#f2c46d', {emit: true, bg: 1, bias: .04});
+        bx += bw + .03; }
+      if (dawn < .85) quad(F, ww / 2 - .55, 2.7, ww / 2 - .25, 3.0, 0, '#f5e6b8', {emit: true, bg: 1, bias: .035});
+      if (dawn > 0) quad(F, -ww / 2 + .4, 1.5 + dawn * .8, -ww / 2 + .8, 1.9 + dawn * .8, 0, '#ffcf70', {emit: true, bg: 1, bias: .035});
+      quad(F, -.03, 1.1, .03, 3.1, 0, '#2b3452', {emit: false, bg: 1, bias: .04});
+    }
+    // sign + clock
+    const S = {x: 0, y: 0, z: .03, ry: 0}, px = .045, R = (c, a, b, ww2, hh) => quad(S, w / 2 - 2.2 + a * px, 3.3 - b * px, w / 2 - 2.2 + (a + ww2) * px, 3.3 - (b + hh) * px, 0, c, {emit: true, bg: 1, bias: .05});
+    text(R, 'NIGHTMUX', 0, 0, '#e0af68');
+    const R2 = (c, a, b, ww2, hh) => quad(S, w / 2 + 1.2 + a * px, 3.3 - b * px, w / 2 + 1.2 + (a + ww2) * px, 3.3 - (b + hh) * px, 0, c, {emit: true, bg: 1, bias: .05});
+    text(R2, o.clock, 0, 0, '#9ece6a');
+  }
+
+  // ----- the frame -----
+  // Furniture and the shell never move: build their faces once and replay them (cleared with the layout).
+  const SC = new Map();
+  function cached(key, fn) {
+    let a = SC.get(key);
+    if (!a) { if (SC.size > 80) SC.clear(); const n = faces.length; fn(); a = faces.slice(n); SC.set(key, a); }
+    else for (let i = 0; i < a.length; i++) faces.push(a[i]);
+  }
+  let glows = [], bubbles = [], zzz = [], roomLabels = [], labels = [];
+  function label(name, p, d, kind) { labels.push({n: name, p, d, kind}); }
+  function build(F, o) {
+    faces = []; glows = []; bubbles = []; zzz = []; roomLabels = []; labels = []; hits.length = 0;
+    const f = Math.floor(F);
+    amb = lerp(.55, .9, o.day || 0);
+    tint = o.dawn && !o.day ? [1.05, .96, .9] : [1, 1, 1];
+    cached('sh' + Math.round((o.day || 0) * 20) + ',' + Math.round((o.dawn || 0) * 20) + o.clock, () => shell(f, o)); lounge(lay.L, f, occ3);
+    const S = spots(lay.L); let gi = 0; const away = [];
+    for (const m of lay.rooms) { room(m, f, o);
+      m.r.desks.forEach((d, i) => {
+        const home = {x: m.x0 + .25 + PITCH * i + PITCH / 2 - .3, z: m.z0 + 1.15 + .88};
+        const a = plan(d, gi, F, home, m, S); d.away = a; if (a) away.push([d, a, gi]); station(m, d, i, gi, f, o); gi++;
+      }); }
+    occ3.wc = away.some(([, a]) => a.pose === 'in'); occ3.coffee = away.some(([, a]) => a.spot === 'coffee' && a.pose !== 'walk'); occ3.tv = away.some(([, a]) => a.pose === 'sit');
+    for (const [d, a, k] of away) actor(d, a, f, k);
+    // hand-offs, sparkles
+    for (const m of lay.rooms) for (const e of fx[m.r.topic] || []) {
+      const age = F - e.start, find = s => { const i = m.r.desks.findIndex(d => d.session === s); return i < 0 ? null : [m.x0 + .25 + PITCH * i + PITCH / 2, m.z0 + 1.15]; };
+      if (e.type === 'folder' && age >= 0 && age < 18) { const a = find(e.from), b = find(e.to); if (!a || !b) continue;
+        const u = age / 17, X0 = {x: lerp(a[0], b[0], u), y: 1.6 + Math.sin(Math.PI * u) * 1.2, z: lerp(a[1], b[1], u), ry: u * 6};
+        box(X0, 0, 0, 0, .34, .06, .26, '#e0af68', {emit: 1}); box(X0, -.08, .04, 0, .14, .03, .26, '#f6d365', {emit: 1}); }
+      if ((e.type === 'sparkle' || e.type === 'check') && age >= 0 && age < 16) { const a = find(e.on); if (!a) continue;
+        for (let k = 0; k < 8; k++) { const t = k / 8 * 6.283, r = .4 + age * .06; box({x: a[0] + Math.cos(t) * r, y: 1.6 + age * .05 + Math.sin(t) * .1, z: a[1] + 1.0 + Math.sin(t) * r * .6, ry: 0}, 0, 0, 0, .07, .07, .07, e.type === 'check' ? '#9ece6a' : '#f6d365', {emit: 1}); }
+        if (e.type === 'check') bubbles.push({p: [a[0] - .3, 2.4 + age * .03, a[1] + .9], g: '✓', bg: '#9ece6a', fg: '#14401c'}); }
+    }
+  }
+  const occ3 = {wc: 0, coffee: 0, tv: 0};
+
+  function paint() {
+    const cp = cam.p;
+    const draw = [];
+    for (const fc of faces) {
+      const q0 = proj(fc.p[0]), q1 = proj(fc.p[1]), q2 = proj(fc.p[2]), q3 = proj(fc.p[3]);
+      if (!q0 || !q1 || !q2 || !q3) continue;
+      if ((q0[0] < 0 && q1[0] < 0 && q2[0] < 0 && q3[0] < 0) || (q0[0] > W && q1[0] > W && q2[0] > W && q3[0] > W) ||
+          (q0[1] < 0 && q1[1] < 0 && q2[1] < 0 && q3[1] < 0) || (q0[1] > H && q1[1] > H && q2[1] > H && q3[1] > H)) continue;
+      const pr = [q0, q1, q2, q3];
+      let n = fc.n;
+      if (!n) { const a = fc.p[0], b = fc.p[1], c = fc.p[2], u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]; const l = Math.hypot(...n) || 1; n = n.map(k => k / l);
+        const cx = (fc.p[0][0] + fc.p[2][0]) / 2 - fc.mid[0], cy = (fc.p[0][1] + fc.p[2][1]) / 2 - fc.mid[1], cz = (fc.p[0][2] + fc.p[2][2]) / 2 - fc.mid[2];
+        if (n[0] * cx + n[1] * cy + n[2] * cz < 0) n = n.map(k => -k); }
+      const c0 = fc.p[0], to = [cp[0] - c0[0], cp[1] - c0[1], cp[2] - c0[2]];
+      if (n[0] * to[0] + n[1] * to[1] + n[2] * to[2] <= 0) continue;
+      const z = (pr[0][2] + pr[1][2] + pr[2][2] + pr[3][2]) / 4 - (fc.bias || 0) * 4;
+      draw.push([fc.bg || 0, z, pr, fc, n]);
+    }
+    draw.sort((a, b) => b[0] - a[0] || b[1] - a[1]);
+    for (const [, , pr, fc, n] of draw) {
+      g.fillStyle = fc.wall ? shade(fc.col, n, false) : shade(fc.col, n, fc.emit);
+      g.beginPath(); g.moveTo(pr[0][0], pr[0][1]); for (let i = 1; i < 4; i++) g.lineTo(pr[i][0], pr[i][1]); g.closePath(); g.fill();
+      if (!fc.emit) { g.strokeStyle = g.fillStyle; g.lineWidth = .6; g.stroke(); }
+    }
+  }
+  function overlay(f, o) {
+    g.globalCompositeOperation = 'lighter';
+    for (const gl of glows) { const q = proj(gl.p); if (!q) continue; const r = gl.r * cam.k / q[2], gr = g.createRadialGradient(q[0], q[1], 1, q[0], q[1], r);
+      if (gl.floor) { g.save(); g.translate(q[0], q[1]); g.scale(1, .5); g.translate(-q[0], -q[1]); }
+      gr.addColorStop(0, gl.c + (gl.floor ? '30' : '38')); gr.addColorStop(1, gl.c + '00'); g.fillStyle = gr; g.fillRect(q[0] - r, q[1] - r, r * 2, r * 2);
+      if (gl.floor) g.restore(); }
+    g.globalCompositeOperation = 'source-over';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const fs = k => Math.round(clamp(k, 9, 22));
+    for (const r of roomLabels) { const q = proj(r.p); if (!q) continue; g.font = '700 ' + fs(.34 * cam.k / q[2]) + 'px ui-monospace,Menlo,monospace';
+      g.textAlign = 'left'; g.fillStyle = 'rgba(224,175,104,.85)'; g.fillText(r.t.toUpperCase(), q[0], q[1]); g.textAlign = 'center'; }
+    for (const l of labels) { const q = proj(l.p); if (!q) continue; const s = fs(.3 * cam.k / q[2]); g.font = '700 ' + s + 'px ui-monospace,Menlo,monospace';
+      const t = l.n + (l.d.live ? ' ★' : ''), w = g.measureText(t).width + 10;
+      g.fillStyle = 'rgba(8,10,18,.7)'; g.beginPath(); g.roundRect ? g.roundRect(q[0] - w / 2, q[1] - s * .75, w, s * 1.5, 6) : g.rect(q[0] - w / 2, q[1] - s * .75, w, s * 1.5); g.fill();
+      g.fillStyle = l.d.live ? '#e0af68' : color(l.d.agent); g.fillText(t, q[0], q[1]); }
+    for (const b of bubbles) { const q = proj(b.p); if (!q) continue; const s = clamp(.5 * cam.k / q[2], 16, 40), y = q[1] - (b.bob ? 3 : 0);
+      g.fillStyle = b.bg; g.beginPath(); g.arc(q[0], y, s / 2, 0, 6.283); g.fill(); g.strokeStyle = '#0b0d14'; g.lineWidth = 2; g.stroke();
+      g.fillStyle = b.fg; g.font = '800 ' + s * .7 + 'px system-ui,sans-serif'; g.fillText(b.g, q[0], y + 1); }
+    for (const z of zzz) { const q = proj(z.p); if (!q) continue; g.font = '800 ' + fs(.4 * cam.k / q[2]) + 'px ui-monospace,monospace';
+      for (let i = 0; i < 3; i++) { const ph = (f * .6 + i * 8) % 24; g.fillStyle = 'rgba(122,162,247,' + (1 - ph / 24).toFixed(2) + ')'; g.fillText('Z', q[0] + 6 + ph / 2, q[1] - ph * 1.3); } }
+  }
+  let lastKey = '', lastData = null;
+  function draw3d(F, o) {
+    const key = (F * 2 | 0) + '|' + cam.yaw + cam.pitch + cam.zoom + '|' + o.clock + (o.day || 0) + (o.dawn || 0) + '|' + floorNo + '|' + cv.clientWidth + 'x' + cv.clientHeight;
+    if (key === lastKey && data === lastData) return;
+    lastKey = key; lastData = data;
+    const r = cv.getBoundingClientRect(), nw = Math.max(1, r.width | 0), nh = Math.max(1, r.height | 0), d = Math.min(window.devicePixelRatio || 1, 1.5);
+    if (nw !== W || nh !== H || d !== dpr) { W = nw; H = nh; dpr = d; cv.width = W * d; cv.height = H * d; }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const fl = floors(); floorNo = clamp(floorNo, 0, Math.max(0, fl.length - 1)); floorBar(fl);
+    const rs = fl[floorNo] || [], sig = floorNo + '/' + rs.map(r => r.topic + ':' + r.desks.length).join('|');
+    if (!lay || sig !== lastSig) { lastSig = sig; lay = layout(rs); R0 = lay.rad + 1; SC.clear(); }
+    setCam();
+    const k = o.day || 0, dk = o.dawn || 0, top = mix(mix('#080a16', '#2a2548', dk), '#7fb0e8', k), bot = mix(mix('#14182c', '#4a3a58', dk), '#bcd8f2', k);
+    const bg = g.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, top); bg.addColorStop(1, bot); g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    if (!data.rooms.length) { g.fillStyle = '#8b949e'; g.textAlign = 'center'; g.font = '16px system-ui'; g.fillText('no topics bound', W / 2, H / 2); return; }
+    build(F, o); paint(); overlay(Math.floor(F), o);
+  }
+
+  // ----- hit test + camera input -----
+  function hit(x, y) {
+    let best = null, bd = 1e9;
+    for (const h of hits) { const q = proj(h.p); if (!q) continue; const r = .75 * cam.k / q[2], dd = Math.hypot(q[0] - x, q[1] - y); if (dd < r && q[2] < bd) { bd = q[2]; best = h; } }
+    return best;
+  }
+  const ptr = new Map(); let pinch = 0, moved = 0;
+  cv.addEventListener('pointerdown', e => { try { cv.setPointerCapture(e.pointerId); } catch (x) {} ptr.set(e.pointerId, [e.clientX, e.clientY]); moved = 0; touched = 1; pinch = 0; });
+  cv.addEventListener('pointermove', e => {
+    const p = ptr.get(e.pointerId); if (!p) return;
+    const dx = e.clientX - p[0], dy = e.clientY - p[1]; ptr.set(e.pointerId, [e.clientX, e.clientY]);
+    if (ptr.size === 1) { moved += Math.abs(dx) + Math.abs(dy); cam.yaw -= dx * .006; cam.pitch = clamp(cam.pitch + dy * .005, .22, 1.35); }
+    else if (ptr.size === 2) { const [a, b] = [...ptr.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) cam.zoom = clamp(cam.zoom * d / pinch, .5, 4); pinch = d; moved = 99; }
+  });
+  const up = e => { const had = ptr.has(e.pointerId); ptr.delete(e.pointerId); pinch = 0;
+    if (had && e.type === 'pointerup' && moved < 6 && !ptr.size) { const b = cv.getBoundingClientRect(), h = hit(e.clientX - b.left, e.clientY - b.top);
+      if (h) { const r = data.rooms.find(r => r.desks.includes(h.d)); if (r) pick(r.topic, r.desks.indexOf(h.d)); } } };
+  cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+  cv.addEventListener('wheel', e => { e.preventDefault(); cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * .0012), .5, 4); }, {passive: false});
+  cv.addEventListener('dblclick', () => { cam.yaw = .5; cam.pitch = .62; cam.zoom = 1; });
+  const go = k => { floorNo = Math.max(0, floorNo + k); lastKey = ''; };
+  return {draw: draw3d, cam, hits, hit, go};
+})();
 </script>
 </body></html>"""
 
@@ -18320,6 +18964,12 @@ def selfcheck():
           "  ┃  3. Scaffold-only",
           "  ┃  ↑↓ select  enter submit  esc dismiss"]
     assert pane_state(oc) == "waiting"
+    form = ["  ┃  Questions", "  ┃  Symptom  APK type  Phone side  Setup  Submit",
+            "  ┃  Symptom: Icon not in AA launcher", "  ┃  APK type: Not sure",
+            "  ┃  ⇆ tab  enter submit  esc dismiss", "", "  ╹▀▀▀▀▀▀▀▀▀▀▀▀"]
+    assert pane_state(form) == "waiting"
+    assert [b["text"] for b in json.loads(menu_buttons(form))["inline_keyboard"][-1]] == \
+        ["esc", "⇆", "↑", "↓", "⏎"]
     assert [r[0]["callback_data"]
             for r in json.loads(menu_buttons(oc))["inline_keyboard"][:-1]] == \
         ["!1", "!2", "!3"]                                    # prose 5. dropped
@@ -18452,6 +19102,37 @@ def selfcheck():
     # A session suffix on every button: a mirrored copy in the command center
     # has no topic binding to resolve a bare "!1" against.
     qmenu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes", "  2. No"], "api")
+    # ♾ always: a pinned yes/no menu offers it, the tap saves that exact request,
+    # and autoyes then answers that request (and no other) with !autoyes off.
+    dlg = ["Bash command", "  npm test", "Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    texts_ = lambda m: [b["text"] for r in json.loads(m)["inline_keyboard"] for b in r]
+    assert "♾ always" in texts_(menu_buttons(dlg, bind=True))
+    assert "♾ always" not in texts_(menu_buttons(dlg))
+    acfg, ast_, alk, said_ = {"topics": {"1": "s"}, "chat_id": -1}, {}, threading.Lock(), []
+    scr_ = list(dlg)
+    with stubbed(has_session=lambda x: True, visible=lambda x: list(scr_), pane=lambda x: list(scr_),
+                 pane_state=lambda l: "waiting", press=lambda *a, **k: None,
+                 pick=lambda s_, d: "", resolve_ask=lambda *a: None, save_cfg=lambda c: None,
+                 send=lambda c, t, x, **k: said_.append(x)):
+        assert handle(acfg, ast_, alk, "1", "!always") is None
+        assert "npm test" in list(acfg["always"]["s"].values())[0], acfg
+        autoyes(acfg, ast_, "1", "s")
+        assert said_ and said_[-1].startswith("♾ always s → 1"), said_
+        scr_[1], ast_["s"]["autoyes_at"] = "  make deploy", 0
+        n_ = len(said_)
+        autoyes(acfg, ast_, "1", "s")
+        assert len(said_) == n_, said_            # a different request: left to you
+        scr_[1] = "  rm -rf build"
+        assert "risky" in handle(acfg, ast_, alk, "1", "!always")
+        assert "1. " in rules_cmd(acfg, alk, "s", "") and "no ♾" in rules_cmd(acfg, alk, "s", "1 off")
+    # !quiet: silent inside the window (wrapping midnight or not), phone time
+    qcfg = {"tz_offset": 0}
+    with stubbed(save_cfg=lambda c: None):
+        assert "usage" in quiet_cmd(qcfg, alk, "late")
+        quiet_cmd(qcfg, alk, "23:00-07:00")
+    assert qcfg["quiet"] == ["23:00", "07:00"] and quiet_now(qcfg, 3600) and not quiet_now(qcfg, 43200)
+    qcfg["quiet"] = ["09:00", "17:00"]
+    assert quiet_now(qcfg, 43200) and not quiet_now(qcfg, 3600) and not quiet_now({}, 3600)
     # An answer key sent to a pane that is not asking is typed in as text and
     # queued by the agent, which is how five taps became "33333" in a prompt box.
     kcfg, klk = {"topics": {"1": "s"}, "chat_id": -1}, threading.Lock()
@@ -19390,6 +20071,15 @@ def selfcheck():
         assert price_of("Claude-Opus-5-5[1m]") == PRICES["claude-opus-5-5"] == (4, 20, .2, 5)
         assert price_of("claude-x") is price_of("gpt-5.5-pro") is price_of("") is None
         assert price_of("mine", {"mine": [1, 2]}) == (1, 2, 1, 1)
+        # !tokens: dollars, what the cache saved, pace, habits; an unpriced model is named, not free
+        tk_ = tokens_report({"days": 7, "agents": {
+            "claude": {"tokens": {"input": 1000000, "cache_read": 9000000, "cache_write": 0, "output": 100000},
+                       "by_model": {"claude-sonnet-5-5": [1000000, 9000000, 0, 100000], "mystery-1": [5, 5, 5, 5]},
+                       "prompts": 10, "requests": 100, "cache_hit": .7, "avg_ctx": 200000,
+                       "daily": {"2026-11-01": [100, 1], "2026-11-02": [200, 1]}}}}, now=1793600000)
+        assert "$3.90" in tk_ and "$0.39" in tk_ and "$17.10" in tk_, tk_   # cost, $/prompt, cache saved
+        assert "cache hit 70%" in tk_ and "!compact" in tk_ and "not priced: mystery-1" in tk_, tk_
+        assert tokens_report({"days": 7, "agents": {}}).startswith("no agent transcripts")
         assert price_of("gpt-5.5", {"gpt-5.5": [3, 4, 5, 6]}) == (3, 4, 5, 6)
         for junk_ in ("junk", [1], [1, -2], [1, float("nan")], [1, 2, 3, 4, 5], 7):
             assert price_of("gpt-5.5", {"gpt-5.5": junk_}) is None, junk_
@@ -19518,6 +20208,8 @@ def selfcheck():
         assert sum(1 for _ in open(replay_path())) == 4 and _replay["file_n"] == 4
     _replay.update(old_rp_)
     assert "?replay" in OFFICE_HTML and "/api/office/replay" in OFFICE_HTML
+    assert 'id="scene"' in OFFICE_HTML and "const V3 = " in OFFICE_HTML and "toggleView" in OFFICE_HTML  # the 3D office and its switch
+    assert "function floors()" in OFFICE_HTML and "cached('sh'" in OFFICE_HTML and "V3.draw(frame" in OFFICE_HTML  # floors, cached statics, draw guard
     with stubbed(save_cfg=lambda c: None):
         lc_ = {}
         assert "👕 claude: shirt #ff0000 shade #b20000 hat cap" in look_cmd(lc_, "claude shirt #FF0000 hat cap")
@@ -21303,6 +21995,16 @@ def selfcheck():
 
     cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
     assert agent(cfg2, "claude") == ("claude", "--continue")
+    with tempfile.TemporaryDirectory() as pj_:
+        old_pj_ = PROJECTS
+        globals()["PROJECTS"] = pj_
+        try:
+            assert not claude_has_chat("/www/agent")
+            os.makedirs(os.path.join(pj_, "-www-agent"))
+            open(os.path.join(pj_, "-www-agent", "s.jsonl"), "w").close()
+            assert claude_has_chat("/www/agent") and not claude_has_chat("/www/other")
+        finally:
+            globals()["PROJECTS"] = old_pj_
     assert agent(cfg2, "opencode") == ("opencode", "--resume")    # added by config
     assert agent(cfg2, "nope") == ("nope", "")   # one-off: the key is the command
     assert default_agent(cfg2) == "claude"
@@ -21369,7 +22071,7 @@ def selfcheck():
     with stubbed(self_upgrade=lambda: (True, "a → b"), restart_self=lambda: ure_.append(1),
                  peer_call=lambda c, n, p, b=None, timeout=10: {"msg": "1.3 → 1.4 · restarting"} if n == "box" else None,
                  send=lambda c, t, x, mode="mono", buttons=None, quiet=False: usaid_.append(x)):
-        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "")
+        assert "every peer" in upgrade_cmd({"peers": {"box": {}, "old": {}}, "name": "me"}, "1", "all")
         for _ in range(100):
             if usaid_:
                 break
