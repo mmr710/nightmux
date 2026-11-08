@@ -92,6 +92,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!lint` on|off = hold a vague prompt for ✨ improve · `!coach` = what your first-try prompts have in common
 - `!memory [update|on|off]` = project notes every agent reads on start
 - `!stats [days]` = tokens, cache and prompts per agent · `!saved`
+- `!tokens [days]` = tokens and API-list dollars per agent, what the cache saved, today's pace, costly habits
 
 ## 🔧 Git, PRs and production
 

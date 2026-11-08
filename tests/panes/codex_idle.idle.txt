@@ -1,0 +1,12 @@
+╭──────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.160.0)                   │
+│                                              │
+│ model:     gpt-5.5 high   /model to change   │
+│ directory: ~/proj                            │
+╰──────────────────────────────────────────────╯
+
+  Tip: Use /skills to list available skills.
+
+› Ask Codex to do anything
+
+  gpt-5.5 high · 98% context left · ~/proj
