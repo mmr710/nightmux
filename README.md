@@ -6,6 +6,8 @@
 
 ### Your AI coding agents keep working while you sleep.
 
+Approve a roadmap from your phone before bed. Wake up to pull requests.
+
 Drive **Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose, Qwen Code** and **aider**
 from your phone. Usage limit at 2 AM? Your queue waits and resumes the moment the window
 resets, or hands the work to another agent. You wake up to a briefing.
@@ -26,10 +28,13 @@ resets, or hands the work to another agent. You wake up to a briefing.
 
 <sub>12 seconds of a night. <a href="https://mmr710.github.io/nightmux/#video">The full 48-second video, with sound →</a></sub>
 
+**Try it in 30 seconds, no bot and no keys:** `python3 nightmux.py --demo` · or click the [live demo](https://mmr710.github.io/nightmux/office.html?demo)
+
 </div>
 
 ## Why vibe coders run it
 
+- 🧠 **A product owner and a foreman, built in.** `!po <goal>` reads your repo and drafts a roadmap. One tap on ✅ gives every item its own topic, worktree and agent, and `!brain` follows each one up: it answers "what next?" for the agent, and stops to ask you when it is done, stuck or going in circles. It never approves deploys, deletes, force-pushes or spending.
 - 🌙 **A usage limit no longer ends the night.** Claude Code runs out of its 5-hour window at 2:14 AM. nightmux keeps your queue and the turn that got cut off, and sends them back the moment the window resets. Can't wait? `!failover codex` hands the work to another agent now.
 - 📱 **Your phone is the terminal.** One Telegram topic per project, one tmux session behind it. Approval menus arrive as buttons, so a "yes" is one tap from bed. Photos, files and voice notes go straight to the agent.
 - ✅ **It keeps going until the tests pass.** `!goal npm test` runs your check after every turn and sends the failures back. It stops and asks when it goes in circles.
@@ -46,7 +51,7 @@ resets, or hands the work to another agent. You wake up to a briefing.
    curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh
    ```
 2. Create the bot: scan the QR it prints (quickest; the new token passes through the maintainer's [onboarding relay](https://github.com/mmr710/nightmux/blob/main/SECURITY.md#the-qr-onboarding-relay)), or press Enter and paste a token from [@BotFather](https://t.me/BotFather) (nothing leaves your machine). No token at all runs dashboard-only.
-3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type.
+3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type. Or hand it the whole thing: `!po a habit tracker with streaks`, tap ✅, go to bed.
 
 No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup` (or `pipx run --spec git+https://github.com/mmr710/nightmux nightmux --setup`).
 
@@ -270,7 +275,24 @@ nightmux is one of several ways to reach a coding agent from your phone, and not
 | **[claude-squad](https://github.com/smtg-ai/claude-squad)** | several terminal agents at once, managed from the terminal | you stay at the keyboard |
 | **Anthropic's own** Remote Control and Telegram channel plugin | reach a Claude Code session with no third-party code | Claude Code is the only agent you use |
 
-What nightmux is for is the overnight layer across agents: a queue that waits out usage limits or hands the work to another agent, schedules, `!goal` loops that run your tests until they pass, a morning briefing, and a dashboard with an office view. The cost is size: the daemon is a single file of about 20,000 lines, from one maintainer.
+What nightmux is for is the overnight layer across agents: a roadmap you approve from your phone (`!po`) and a supervisor that keeps each agent moving (`!brain`), a queue that waits out usage limits or hands the work to another agent, schedules, `!goal` loops that run your tests until they pass, a morning briefing, and a dashboard with an office view. The cost is size: the daemon is a single file of about 23,000 lines, from one maintainer.
+
+## FAQ
+
+**Is it safe to let agents run unattended?**
+Nothing is approved for you unless you turn it on: `!autoyes` is off by default and set per topic. `!sandbox on` runs an agent in a Docker container that sees only its own folder. `!brain` never approves deploys, deletes, force-pushes or spending; it asks you. The dashboard listens on 127.0.0.1 only. More in [SECURITY.md](https://github.com/mmr710/nightmux/blob/main/SECURITY.md).
+
+**Agent CLIs change their screens all the time. Won't it break?**
+It reads the agents' terminal screens, so a new release can move things. A drift guard starts the newest Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode and Aider every night in CI and checks that their screens still read correctly. When a menu shows up that nightmux does not know, you still get arrow and Enter buttons, `!keys` sends any keystroke, and `!raw` types past the guard.
+
+**How is this different from Claude Code's Remote Control?**
+Remote Control reaches one Claude Code session. nightmux runs many projects across ten agents, waits out usage limits or hands work to another agent, plans the night (`!po`, `!shift`, `!at`) and briefs you in the morning. If Claude Code is all you use and you stay awake, Remote Control is enough.
+
+**What do `!po` and `!brain` cost?**
+They call Claude Code in headless mode: `!brain` uses Haiku for one short decision per turn, `!po` uses Sonnet once per roadmap. Both need the `claude` CLI signed in; the agents doing the work can be any of the ten.
+
+**Do I need a server?**
+No. A laptop that stays awake works. A small VPS is what most people use, so the night does not depend on a lid staying open.
 
 ## Docs
 
@@ -310,6 +332,14 @@ What that means in practice:
 - **Spend is capped.** `!budget` (in tokens or dollars) and `!spendcap` stop runaway loops; `!cost top` shows where it went; `!stopall` stops every agent at once.
 - **The QR shortcut in setup trusts the maintainer.** The relay passes your new bot's token to your terminal once, from memory, with no logs and no disk copy — but it runs on a machine you can't audit, so paste a BotFather token instead if that matters ([details](https://github.com/mmr710/nightmux/blob/main/SECURITY.md#the-qr-onboarding-relay)).
 - **Zero dependencies.** Standard library only, so nothing third-party to audit. The daemon itself is a single file of about 20,000 lines.
+
+---
+
+<div align="center">
+
+**If nightmux saved you a night, a ⭐ helps other people find it.**
+
+</div>
 
 ## License
 
