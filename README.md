@@ -4,7 +4,9 @@
 
 # nightmux
 
-### Approve a roadmap from your phone. Your AI agents build it while you sleep.
+### Your AI coding agents keep working while you sleep.
+
+Approve a roadmap from your phone before bed. Wake up to pull requests.
 
 Drive **Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose, Qwen Code** and **aider**
 from your phone. Usage limit at 2 AM? Your queue waits and resumes the moment the window
@@ -25,6 +27,8 @@ resets, or hands the work to another agent. You wake up to a briefing.
 <a href="https://mmr710.github.io/nightmux/#video"><img src="https://raw.githubusercontent.com/mmr710/nightmux/main/docs/promo.gif" width="100%" alt="nightmux in 12 seconds: claude hits its usage limit at 02:14, codex takes over, agy asks and gets a yes with one tap on the phone, claude is back at 04:11, and the morning briefing says 3 tasks done and 2 PRs ready"></a>
 
 <sub>12 seconds of a night. <a href="https://mmr710.github.io/nightmux/#video">The full 48-second video, with sound →</a></sub>
+
+**Try it in 30 seconds, no bot and no keys:** `python3 nightmux.py --demo` · or click the [live demo](https://mmr710.github.io/nightmux/office.html?demo)
 
 </div>
 
@@ -328,6 +332,14 @@ What that means in practice:
 - **Spend is capped.** `!budget` (in tokens or dollars) and `!spendcap` stop runaway loops; `!cost top` shows where it went; `!stopall` stops every agent at once.
 - **The QR shortcut in setup trusts the maintainer.** The relay passes your new bot's token to your terminal once, from memory, with no logs and no disk copy — but it runs on a machine you can't audit, so paste a BotFather token instead if that matters ([details](https://github.com/mmr710/nightmux/blob/main/SECURITY.md#the-qr-onboarding-relay)).
 - **Zero dependencies.** Standard library only, so nothing third-party to audit. The daemon itself is a single file of about 20,000 lines.
+
+---
+
+<div align="center">
+
+**If nightmux saved you a night, a ⭐ helps other people find it.**
+
+</div>
 
 ## License
 
