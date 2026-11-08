@@ -280,10 +280,28 @@ def chat_log(topic, who, text, buttons=None):
     del log[:-CHAT_KEEP]
 
 
+# What still rings the phone inside !quiet hours: a question, a reminder of
+# one, an agent that died, a stop. Everything else lands silently.
+QUIET_RINGS = ("🟠", "⏰", "💀", "🛑")
+
+
+def quiet_now(cfg, ts=None):
+    """Inside the !quiet window (cfg["quiet"] = ["23:00", "07:00"], phone time)?"""
+    q = cfg.get("quiet")
+    if not q:
+        return False
+    t = local_time(cfg, time.time() if ts is None else ts)
+    now = t.tm_hour * 60 + t.tm_min
+    a, b = (int(x[:2]) * 60 + int(x[3:]) for x in q)
+    return a <= now < b if a <= b else now >= a or now < b
+
+
 def send(cfg, topic, text, mode="mono", buttons=None, quiet=False):
     """mode: mono (<pre>), plain, or md (markdown -> Telegram HTML)."""
     if not text.strip():
         return None
+    if not quiet and quiet_now(cfg) and not text.lstrip().startswith(QUIET_RINGS):
+        quiet = True
     chat_log(topic, "bot", text, buttons)
     print(f"out topic={topic} {len(text)}b {text.splitlines()[0][:60]!r}", flush=True)
     parts, mid = chunks(text), None
@@ -873,7 +891,7 @@ DETAIL = re.compile(r"^\s*(?:⎿|\.{3}|\+\d+ (?:more )?lines?|… \+\d+|▸ Thou
 # prints one is not waiting for anything. The pane then sat "waiting" forever,
 # swallowing typed text and nudging about an answer nobody owed.
 WAITING = re.compile(r"^\s*[│┃]?\s*(?:"
-                     r"[❯>]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes
+                     r"[❯>›]\s*\[?\d[.)\]]\s"          # ❯ 1. Yes / > [1] Yes / › 1. (Codex)
                      r"|\[?\d[.)\]]\s*(?:Yes|No|Allow|Approve|Proceed|Confirm|Accept|Grant|Run)\b"    # 1. Yes / 1. Allow
                      # A dialog's question, only with its options under it: an agent's
                      # answer ending "Do you want me to restart X?" held the queue for hours.
@@ -991,6 +1009,31 @@ RESET_AT = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:[ap]m)?)", 
 HOOK_DIR = os.path.expanduser("~/.nightmux-hooked")
 HOOK_FRESH = 900  # a Stop hook seen this recently owns delivery for that session
 STATE_DIR = os.path.expanduser("~/.nightmux-state")
+
+
+def harden_state():
+    """The state dir holds queued prompts, pane snapshots and paired-device tokens:
+    private to this user. It used to be created 0775 with 0664 files, readable by
+    every other account on a shared box. Closing the directory covers every file in it."""
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        if os.stat(STATE_DIR).st_mode & 0o077:
+            os.chmod(STATE_DIR, 0o700)
+    except OSError:
+        pass
+
+
+# What `!get` will not send: the files that are the keys to everything else.
+SECRET_FILES = (".nightmux.json", ".nightmux-relay.env", ".ssh", ".gnupg", ".aws", ".netrc",
+                ".git-credentials", ".config/gh", ".nightmux-state")
+
+
+def is_secret_path(p):
+    real = os.path.realpath(p)
+    home = os.path.realpath(os.path.expanduser("~"))
+    return os.path.basename(real) == ".env" or any(
+        real == os.path.join(home, s) or real.startswith(os.path.join(home, s) + os.sep)
+        for s in SECRET_FILES)
 # The status line only redraws while a session is active, so an idle one goes
 # quiet. Its transcript path stays valid the whole time — only the usage numbers
 # in it go stale — hence two ages: one to trust the path, a shorter one to act
@@ -1256,8 +1299,8 @@ def pane_state(lines):
 
 
 IDLE = re.compile(
-    r"^\s*[│┃]?\s*[❯>]\s*$|"          # bare prompt
-    r"^\s*[│┃]?\s*[❯>]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
+    r"^\s*[│┃]?\s*[❯>›]\s*$|"          # bare prompt (› is Codex's)
+    r"^\s*[│┃]?\s*[❯>›]\s*[^|│┃\n]*|"  # prompt with some text (but not busy/waiting)
     r"^\s*[\w.-]+@[a-zA-Z0-9.-]+:[~/\w.-]+[#$%>]\s*$|" # typical shell prompt
     r"╹▀{5,}",                           # opencode bottom bar
     re.M
@@ -1382,6 +1425,9 @@ def menu_buttons(lines, sess=None, bind=False):
     # A bare arrow menu (the trust prompts) gets its rows by position, and the
     # nav row drives anything else, exactly as you would in the terminal.
     rows = [[(f"{d}. {opts[d]}", tap(d, True))] for d in sorted(opts)]
+    # Yes, and remember this exact request for this session (!rules)
+    if bind and menu_digit(lines, YES_NO["!y"]):
+        rows.append([("♾ always", tap("always", True))])
     if FORM.search("\n".join(plain(l) for l in lines[-25:])):
         rows.append([("esc", tap("esc")), ("⇆", tap("tab")), ("↑", tap("up")),
                      ("↓", tap("down")), ("⏎", tap("enter", True))])
@@ -3355,6 +3401,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
             speak_turn(cfg, topic, body)
             sav_turn(cfg, state.setdefault(sess, {}))
             goal_capture(cfg, topic, sess)
+            brain_capture(cfg, topic, sess, body)
             loop_capture(cfg, topic, sess, body)
             mem_capture(cfg, topic, sess)
             pair_capture(cfg, topic, sess, body)
@@ -3766,6 +3813,7 @@ def watcher(cfg, state, lock):
             failover_tick(cfg, state, lock)
             harvest_tick(cfg, state, lock)
             goal_tick(cfg, state)
+            brain_tick(cfg, state)
             watch_tick(cfg, state, lock)
             loop_tick(cfg, state, lock)
             pair_tick(cfg, state, lock)
@@ -3791,7 +3839,7 @@ def watcher(cfg, state, lock):
 # ---------- commands ----------
 
 KEYS = {"!esc": "Escape", "!int": "C-c", "!enter": "Enter", "!up": "Up",
-        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n"}
+        "!down": "Down", "!left": "Left", "!right": "Right", "!tab": "Tab", "!mode": "S-Tab", "!y": "y", "!n": "n", "!always": "y"}
 KEYS.update({f"!{d}": str(d) for d in range(1, 10)})
 
 # The dialogs disagree about Enter. Claude Code's permission prompt acts on the
@@ -3811,6 +3859,7 @@ YES_NO = {
         re.I,
     ),
 }
+YES_NO["!always"] = YES_NO["!y"]     # yes, and saved as a rule (see autoyes)
 
 
 def dialog_id(lines):
@@ -3976,7 +4025,7 @@ TG_SLASH = {"ctl": "!ctl", "vibe": "!vibe", "teleport": "!teleport", "harvest": 
             "tmhelp": "!help", "tmversion": "!version",
             "limits": "!usage", "tz": "!tz", "ctx": "!ctx", "spend": "!cost",
             "grep": "!grep", "autocompact": "!autocompact", "idlectx": "!idlectx",
-            "spendcap": "!spendcap", "tmstats": "!stats"}
+            "spendcap": "!spendcap", "tmstats": "!stats", "tokens": "!tokens"}
 TG_DESC = {"ctl": "button panel for this session",
            "vibe": "1-tap super-intent cockpit (build, goal, race, teleport, harvest, wrapped)",
            "teleport": "package live context (.nightmux/HANDOFF.md) & switch agents mid-thought",
@@ -3996,7 +4045,8 @@ TG_DESC = {"ctl": "button panel for this session",
            "grep": "search every transcript, e.g. /grep rate limit",
            "autocompact": "auto /compact at N% context, or off",
            "idlectx": "flag parked sessions above N% context, or off",
-           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent"}
+           "spendcap": "pause agent after N turns, or 500k/2M tokens, in 5 mins", "tmstats": "tokens, cache and prompt stats per agent",
+           "tokens": "tokens and dollars per agent, cache savings, daily pace"}
 PASSTHRU = [
     ("compact", "compact the conversation"), ("clear", "clear the history"),
     ("context", "context usage breakdown"), ("cost", "token spend this session"),
@@ -4925,11 +4975,12 @@ def autoyes(cfg, state, topic, sess):
     it stops after AUTOYES_MAX in an hour so a dialog loop cannot run all night.
     """
     keys = (cfg.get("autoyes") or {}).get(str(topic)) or []
+    rules = (cfg.get("always") or {}).get(sess) or {}
     st = state.get(sess) or {}
-    if not keys or st.get("stop_hold"):     # a stopped fleet approves nothing
+    if not (keys or rules) or st.get("stop_hold"):     # a stopped fleet approves nothing
         return
     ak = agent_key(cfg, topic, sess)
-    if ak not in keys and "on" not in keys and "all" not in keys:
+    if keys and ak not in keys and "on" not in keys and "all" not in keys:
         bound = cfg.get("topics", {}).get(str(topic))
         live_key = _agent.get(sess) or (cfg.get("started") or {}).get(str(topic))
         if bound == sess and (live_key in keys or "all" in keys or "on" in keys):
@@ -4938,6 +4989,8 @@ def autoyes(cfg, state, topic, sess):
         # one nightmux started as Claude is not agy because Claude is the default.
         elif bound == sess and len(keys) == 1 and keys[0] in AGENTS and not live_key:
             ak = keys[0]
+        elif rules:
+            keys = []           # not opted in: only a learned rule answers
         else:
             return
     if st.get("mode") != "waiting":
@@ -4959,6 +5012,10 @@ def autoyes(cfg, state, topic, sess):
                  "answer it yourself, or !autoyes off", mode="plain")
         return
     lines = visible(sess)
+    # ♾ always: the exact request (prompt_fp) was approved with "always" before
+    learned = not keys and prompt_fp(pane(sess)) in rules
+    if not keys and not learned:
+        return
     digit = menu_digit(lines, YES_NO["!y"])
     if not digit:
         tail = [plain(l) for l in (lines[-15:] if lines else [])]
@@ -4980,8 +5037,9 @@ def autoyes(cfg, state, topic, sess):
     st.pop("autoyes_capped", None)
     non_empty = [l.strip() for l in lines[-15:] if l.strip()]
     question = next((l for l in non_empty if WAITING.search(l)), non_empty[0] if non_empty else "?")
-    send(cfg, topic, f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
-         "!autoyes off to stop", mode="plain")
+    send(cfg, topic, (f"♾ always {sess} → {digit}\n{question[:160]}\n!rules to list or drop"
+                      if learned else f"🤖 auto-yes {sess} → {digit}\n{question[:160]}\n"
+                      "!autoyes off to stop"), mode="plain")
     res = pick(sess, digit)
     if res is None:             # not an arrow menu: the digit is the answer
         press(sess, digit, confirm=True)
@@ -4989,6 +5047,44 @@ def autoyes(cfg, state, topic, sess):
         send(cfg, topic, f"⚠️ auto-yes {sess}: {res}", mode="plain")   # would confirm a guess
         return
     remember(state, sess, digit)
+
+
+def rules_cmd(cfg, lock, sess, arg):
+    """!rules [clear|<n> off]: the requests ♾ always answers for this session."""
+    with lock:
+        rules = cfg.setdefault("always", {}).setdefault(sess, {})
+        a = arg.split()
+        if a == ["clear"]:
+            rules.clear()
+        elif len(a) == 2 and a[0].isdigit() and a[1] == "off" and 0 < int(a[0]) <= len(rules):
+            rules.pop(list(rules)[int(a[0]) - 1])
+        elif a:
+            return "usage: !rules [clear|<n> off]"
+        save_cfg(cfg)
+        rows = list(rules.values())
+    if not rows:
+        return (f"no ♾ always rules for {sess}\n"
+                "tap ♾ always on an approval: that exact request is answered yes from then on")
+    return (f"♾ always in {sess} (answered yes, risky list still wins):\n"
+            + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
+            + "\n!rules <n> off · !rules clear")
+
+
+def quiet_cmd(cfg, lock, arg):
+    """!quiet [HH:MM-HH:MM|off]: messages land silently, questions still ring."""
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)", arg.strip())
+    with lock:
+        if arg.strip() == "off":
+            cfg.pop("quiet", None)
+        elif m:
+            cfg["quiet"] = [m.group(0)[:5], m.group(0)[6:]]
+        elif arg.strip():
+            return "usage: !quiet 23:00-07:00 | off"
+        save_cfg(cfg)
+    q = cfg.get("quiet")
+    return (f"quiet {q[0]}-{q[1]} ({'now' if quiet_now(cfg) else 'not now'}): "
+            "updates land silently; questions, nudges, exits and stops still ring"
+            if q else "quiet hours off · !quiet 23:00-07:00")
 
 
 def policy_cmd(cfg, lock, topic, arg):
@@ -5334,7 +5430,7 @@ def status_report(cfg, state):
 # command. Listed rather than inferred: a command added later is read-only until
 # someone says otherwise, which is the safe direction for the list to be wrong in.
 WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy",
+              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy", "!rules", "!quiet",
               "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
               "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
               "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
@@ -5343,6 +5439,8 @@ WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill
               "!failover", "!ship",
               "!server",   # re-routes the topic to another machine
               "!goal",     # runs a shell command after every turn
+              "!brain",    # types prompts on its own
+              "!po",       # starts agents on its own
               "!preview",  # opens a port to the tailnet
               "!p",        # types a prompt
               "!idea",     # creates a project and starts an agent
@@ -5447,9 +5545,15 @@ HELP = [
         "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
         "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
         "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
+        "♾ always (button) = yes, and the same request is answered yes from then on · !rules [clear|<n> off]",
+        "!quiet 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
+        "!po <product goal> | edit <notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, "
+        "then it runs each item as its own topic under !brain",
+        "!brain [n] <mission> | resume | off = a supervisor reads every finished turn and sends "
+        "the next step, or asks you when it needs a human",
         "!goal [n] <check> | off = run a check (tests, build) after every turn "
         "and send failures back until it passes",
         "!shift then one prompt per line = a sequential overnight plan",
@@ -5505,6 +5609,8 @@ HELP = [
         "first-try prompts have in common",
         "!memory [update|on|off] = project notes every agent reads on start",
         "!stats [days] = tokens, cache and prompts per agent · !saved",
+        "!tokens [days] = tokens and API-list dollars per agent, what the cache saved, "
+        "today's pace, costly habits",
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
@@ -5648,8 +5754,19 @@ def handle(cfg, state, lock, topic, text, mid=None):
         if ("fleet", days) not in _analysis:
             send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
         return stats_report(fleet_analysis(cfg, days))
+    if cmd == "!tokens":
+        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 7
+        if ("fleet", days) not in _analysis:
+            send(cfg, topic, f"🔢 reading {days} days of transcripts…", mode="plain")
+        return tokens_report(fleet_analysis(cfg, days), cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
+    if cmd == "!brain":
+        out = brain_cmd(cfg, lock, topic, arg)
+        if out.startswith("🧠 brain set"):      # a new mission starts the work
+            state.setdefault(sess, {}).setdefault("queue", []).append(
+                (cfg.get("brains") or {})[topic]["mission"])
+        return out
     if cmd == "!briefing":
         return briefing_cmd(cfg, state, lock, topic, arg)
     if cmd == "!deps":
@@ -5903,6 +6020,11 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return voice_cmd(cfg, lock, topic, arg)
     if cmd == "!policy":
         return policy_cmd(cfg, lock, topic, arg)
+    if cmd == "!quiet":
+        return quiet_cmd(cfg, lock, arg)
+    if cmd == "!rules":
+        s_ = cfg.get("topics", {}).get(str(topic))
+        return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
     if cmd == "!agents":
         return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
@@ -5911,6 +6033,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return routed          # not addressed to anyone: falls through as text
     if cmd == "!idea":
         return idea_cmd(cfg, state, lock, topic, arg)
+    if cmd == "!po":
+        return po_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!template":
         return template_cmd(cfg, state, lock, topic, arg)
     if cmd == "!new" or cmd[1:] in agents(cfg):
@@ -5997,6 +6121,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
         p = os.path.join(sess_cwd(sess), os.path.expanduser(arg))
         if not os.path.isfile(p):
             return f"no file {p}"
+        if is_secret_path(p):
+            return "🔒 that file holds credentials; !get will not send it"
         mb = os.path.getsize(p) / 1048576
         if mb > 45:  # bots may upload 50MB
             return f"{p} is {mb:.0f}MB, over Telegram's 50MB upload cap"
@@ -6209,6 +6335,18 @@ def handle(cfg, state, lock, topic, text, mid=None):
             if bound != prompt_fp(lines):
                 return stale_tap(cfg, state, lock, sess, lines)
         key = KEYS[cmd]
+        if cmd == "!always":
+            lines = pane(sess)
+            hit = policy_hit(cfg, topic, "\n".join(plain(l) for l in lines[-15:]))
+            if hit:
+                return f"'{hit[:60]}' is on the risky list — answer it with !y each time"
+            label = " · ".join(plain(l).strip() for l in strip_noise(lines[-15:], verbose=True)
+                               if l.strip() and not MENU.match(l))
+            with lock:
+                if pane_state(visible(sess)) != "waiting":
+                    return f"nothing is asking in {sess} right now — no rule saved"
+                cfg.setdefault("always", {}).setdefault(sess, {})[prompt_fp(lines)] = label[-120:]
+                save_cfg(cfg)
         if cmd in YES_NO:
             key = menu_digit(visible(sess), YES_NO[cmd]) or key
         with lock:
@@ -8580,6 +8718,59 @@ def fleet_cost(agents, extra=None):
         if rest > 0:
             out["left_out"]["(no model name)"] = out["left_out"].get("(no model name)", 0) + rest
     return out
+
+
+def tokens_report(r, extra=None, now=None):
+    """!tokens: what the last N days consumed, in tokens and API list dollars.
+
+    Per agent: tokens, cost, cache hit, what the cache saved against paying full
+    input price, and dollars per prompt. Then the daily context carried, today's
+    pace, and the habits that cost the most. A model with no price is named, not
+    counted as free (see fleet_cost)."""
+    ag = r.get("agents") or {}
+    if not ag:
+        return f"no agent transcripts in the last {r.get('days', '?')} days"
+    cost = fleet_cost(ag, extra)
+    saved, rows, day = {}, [], {}
+    for a, s in ag.items():
+        for m, t in (s.get("by_model") or {}).items():
+            p = price_of(m, extra)
+            if p:
+                saved[a] = saved.get(a, 0) + t[1] * max(0, p[0] - p[2]) / 1e6
+        for d, (c, q) in (s.get("daily") or {}).items():
+            day[d] = day.get(d, 0) + c
+    out = [f"🔢 tokens · last {r.get('days')}d" + (f" · {', '.join(r['servers'])}" if r.get("servers") else ""),
+           "", f"{'agent':<9}{'tokens':>8}{'$ list':>9}{'cache':>6}{'saved':>8}{'$/prompt':>9}"]
+    for a, s in sorted(ag.items(), key=lambda kv: -cost["agents"].get(kv[0], 0)):
+        tk = sum((s.get("tokens") or {}).get(k, 0) for k in ("input", "cache_read", "cache_write", "output"))
+        c, n = cost["agents"].get(a), s.get("prompts") or 0
+        ch = s.get("cache_hit")
+        rows.append((a, tk))
+        out.append(f"{a[:8]:<9}{_k(tk):>8}{(_usd(c) if c is not None else '?'):>9}"
+                   f"{(f'{ch:.0%}' if ch is not None else '-'):>6}{_usd(saved.get(a, 0)):>8}"
+                   f"{(_usd(c / n) if c is not None and n else '-'):>9}")
+    tot = sum(t for _, t in rows)
+    out.append(f"{'total':<9}{_k(tot):>8}{_usd(cost['total']):>9}{'':>6}{_usd(sum(saved.values())):>8}")
+    if day:
+        days = sorted(day)[-7:]
+        peak = max(day[d] for d in days) or 1
+        out += ["", "context carried per day (UTC)"]
+        out += [f"{d[5:]:<6}{'█' * max(1, int(day[d] / peak * 16)):<17}{_k(day[d]):>7}" for d in days]
+        now = now if now is not None else time.time()
+        gone = now % 86400
+        if len(day) > 1 and time.strftime("%Y-%m-%d", time.gmtime(now)) == days[-1] and gone > 3600:
+            avg = sum(day[d] for d in days[:-1]) / len(days[:-1])
+            pace = day[days[-1]] * 86400 / gone
+            out.append(f"today's pace {_k(int(pace))} vs {_k(int(avg))} a day ({pace / avg:.1f}x)" if avg else f"today's pace {_k(int(pace))}")
+    for a, s in sorted(ag.items()):
+        if s.get("cache_hit") is not None and s["cache_hit"] < .8 and (s.get("requests") or 0) > 50:
+            out.append(f"⚠ {a}: cache hit {s['cache_hit']:.0%} — gaps over 5 min expire it; keep sessions busy or !new")
+        if (s.get("avg_ctx") or 0) > 150000:
+            out.append(f"⚠ {a}: {_k(s['avg_ctx'])} context per call — !compact or !new cuts every later call")
+    if cost["left_out"]:
+        out.append("not priced: " + ", ".join(sorted(cost["left_out"])[:4]))
+    out.append("API list prices, not your bill; cache writes at the 5-min rate")
+    return "\n".join(out)
 
 
 def wrapped_data(cfg, days):
@@ -11158,6 +11349,226 @@ def goal_tick(cfg, state):
             "weaken or delete the check or its tests. Stop when it passes.")
         send(cfg, topic, f"🔁 goal round {gs['rounds']}/{top}: {cmd} failed "
              f"(exit {run['rc']}) — sent back to {run['sess']}", mode="plain")
+
+
+BRAIN_STEPS = 12
+BRAIN_CMD = ["claude", "-p", "--model", "haiku", "--tools", "", "--no-session-persistence"]
+BRAIN_PROMPT = """You supervise a coding agent working toward a mission for its owner, who is away.
+MISSION: {mission}
+Steps already sent: {log}
+The agent's last reply:
+{body}
+
+Answer with exactly one line:
+NEXT: <the exact next instruction for the agent>
+DONE: <one-line summary>   (only when the mission is fully met and verified)
+ASK: <question for the owner>   (needs a human decision, credentials, money, or anything risky or irreversible)
+Never approve deploys, deletes, force-pushes or spending. Do not repeat a step already sent."""
+_brain = {}       # topic -> {"steps", "log", "paused"}: in memory
+_brain_run = {}   # topic -> {"sess", and "out" once the decision is in}
+
+
+def claude_once(prompt, model="haiku", timeout=120):
+    """One headless, tool-less, sessionless answer from the user's own Claude login."""
+    try:
+        return subprocess.run(BRAIN_CMD[:3] + [model] + BRAIN_CMD[4:], input=prompt, capture_output=True,
+                              text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def brain_decide(prompt):
+    out = claude_once(prompt)
+    if out is None:
+        return "ASK: the brain could not run (is `claude` installed and logged in?)"
+    m = re.search(r"^(NEXT|DONE|ASK):\s*(.+)", out, re.M | re.S)
+    return f"{m.group(1)}: {m.group(2).strip()}" if m else "ASK: unclear answer: " + out.strip()[:300]
+
+
+def brain_capture(cfg, topic, sess, body):
+    b = (cfg.get("brains") or {}).get(topic)
+    bs = _brain.setdefault(topic, {"steps": 0, "log": []})
+    if not b or bs.get("paused") or topic in _brain_run:
+        return
+    run = _brain_run[topic] = {"sess": sess}
+    prompt = BRAIN_PROMPT.format(mission=b["mission"], body=body[-3000:],
+                                 log="; ".join(x[:150] for x in bs["log"][-6:]) or "none")
+
+    def go():
+        run["out"] = brain_decide(prompt)
+    threading.Thread(target=go, daemon=True).start()
+
+
+def brain_tick(cfg, state):
+    for topic, run in list(_brain_run.items()):
+        if "out" not in run:
+            continue
+        _brain_run.pop(topic, None)
+        b, bs = (cfg.get("brains") or {}).get(topic), _brain.get(topic)
+        if not b or not bs:
+            continue
+        kind, _, text = run["out"].partition(": ")
+        q = state.setdefault(run["sess"], {}).setdefault("queue", [])
+        if kind == "NEXT" and q:
+            continue                    # you spoke first; the next turn asks again
+        top = b.get("max") or BRAIN_STEPS
+        bs["steps"] += 1
+        if kind == "NEXT" and (text in bs["log"] or bs["steps"] > top):
+            kind, text = "ASK", ("it is repeating itself" if text in bs["log"]
+                                 else f"{top} steps used") + f", next would be: {text[:300]}"
+        if kind == "NEXT":
+            bs["log"].append(text)
+            q.append(text)
+            send(cfg, topic, f"🧠 step {bs['steps']}/{top} → {run['sess']}: {text[:300]}", mode="plain")
+            continue
+        bs["paused"] = True
+        send(cfg, topic, (f"🧠 mission done: {text}" if kind == "DONE" else f"🧠 needs you: {text}"
+                          "\n\n!brain resume continues · !brain off stops it"), mode="plain")
+        par = (cfg.get("fan_kids") or {}).get(topic)
+        if par:                         # a roadmap item: the owner topic hears too
+            send(cfg, par, f"🧠 {run['sess']} {'done' if kind == 'DONE' else 'needs you'}: {text[:300]}",
+                 mode="plain")
+
+
+def brain_cmd(cfg, lock, topic, arg):
+    brains = cfg.get("brains") or {}
+    b, bs = brains.get(topic), _brain.get(topic) or {}
+    if not arg:
+        if not b:
+            return ("no brain here. !brain <mission> starts the work and supervises it: after every "
+                    "finished turn it sends the next step, or asks you.\n!brain 20 ship the login page "
+                    "(20 steps instead of %d)" % BRAIN_STEPS)
+        return (f"🧠 {b['mission']}\nstep {bs.get('steps', 0)}/{b.get('max') or BRAIN_STEPS}"
+                + (" · paused" if bs.get("paused") else ""))
+    with lock:
+        if arg == "off":
+            brains.pop(topic, None)
+            _brain.pop(topic, None)
+            out = "brain off"
+        elif arg == "resume" and b:
+            _brain[topic] = {"steps": 0, "log": []}
+            out = "🧠 resumed, fresh step budget; it decides at the end of the next turn"
+        else:
+            m = re.match(r"(\d+)\s+(.+)", arg, re.S)
+            n, mission = (int(m.group(1)), m.group(2)) if m else (None, arg)
+            brains[topic] = {"mission": mission.strip(), **({"max": n} if n else {})}
+            cfg["brains"] = brains
+            _brain.pop(topic, None)
+            out = f"🧠 brain set: {mission.strip()[:200]}\nI send each next step; you get asked only when it needs you"
+        save_cfg(cfg)
+    return out
+
+
+PO_PROMPT = """You are the product owner of this product. The owner is away and will approve your roadmap.
+PRODUCT GOAL: {goal}
+{extra}
+README:
+{readme}
+Project memory:
+{memory}
+Recent commits:
+{log}
+
+Write the roadmap: 3 to 8 items, most valuable first, each shippable on its own git branch by one coding agent
+without waiting for the others. Output ONLY lines of this exact form, nothing else:
+- <short title> | <agent: {agents}> | <the full mission for that agent: what to build, what done looks like, how to verify it>
+Prefer cheap, high-impact items. No deploys, releases or spending."""
+PO_FEEDBACK = "\nCurrent roadmap:\n{road}\nThe owner's notes on it (revise accordingly): {notes}"
+
+
+def po_text(po):
+    return "\n".join(f"{i}. {'✅ ' if it.get('topic') else ''}{it['title']} · {it['agent']}\n   {it['mission'][:200]}"
+                      for i, it in enumerate(po["items"], 1))
+
+
+def po_draft(cfg, topic, cwd, goal, notes, lock):
+    def rd(*parts):
+        try:
+            with open(os.path.join(cwd, *parts), errors="replace") as f:
+                return f.read()[:3000]
+        except OSError:
+            return "(none)"
+    old = (cfg.get("po") or {}).get(topic)
+    out = claude_once(PO_PROMPT.format(
+        goal=goal, readme=rd("README.md"), memory=rd(".nightmux", "memory.md"),
+        log=run("git", "-C", cwd, "log", "--oneline", "-15") or "(none)", agents=" / ".join(agents(cfg)),
+        extra=PO_FEEDBACK.format(road=po_text(old), notes=notes) if old and notes else ""),
+        model="sonnet", timeout=300)
+    items = []
+    for m in re.finditer(r"^- (.+?) \| (\w+) \| (.+)$", out or "", re.M):
+        key = m.group(2).lower()
+        items.append({"title": m.group(1).strip()[:60], "mission": m.group(3).strip(),
+                      "agent": key if key in agents(cfg) else default_agent(cfg)})
+    if not items:
+        send(cfg, topic, "🗺️ the product owner could not write a roadmap"
+             + ("" if out is not None else " (is `claude` installed and logged in?)"), mode="plain")
+        return
+    with lock:
+        cfg.setdefault("po", {})[topic] = {"goal": goal, "items": items}
+        save_cfg(cfg)
+    send(cfg, topic, f"🗺️ roadmap for: {goal[:150]}\n\n{po_text(cfg['po'][topic])}\n\n"
+         "!po edit <notes> revises it · !po go [1,3] approves all or some", mode="plain",
+         buttons=kb([[("✅ Approve all", "!po go"), ("❌ Drop", "!po off")]]))
+
+
+def po_go(cfg, state, lock, topic, pick):
+    po = (cfg.get("po") or {}).get(topic)
+    if not po:
+        return "no roadmap here — !po <product goal> first"
+    want = {int(n) for n in re.findall(r"\d+", pick)} or set(range(1, len(po["items"]) + 1))
+    rows = []
+    for i, it in enumerate(po["items"], 1):
+        if i not in want or it.get("topic"):
+            continue
+        before = set(cfg.get("fan_kids") or {})
+        _fan[topic] = [(it["agent"], it["mission"], "")]
+        out = fan_go(cfg, state, lock, topic)
+        new = [k for k in (cfg.get("fan_kids") or {}) if k not in before]
+        if not new:
+            rows.append(f"✕ {it['title']}: {out[:120]}")
+            continue
+        it["topic"] = new[0]
+        brain_cmd(cfg, lock, new[0], f"{it['title']}: {it['mission']}")      # saves cfg too
+        rows.append(f"✅ {it['title']} ← {it['agent']}")
+    return "🧭 started under the brain:\n" + "\n".join(rows or ["nothing new to start"])
+
+
+def po_status(cfg, topic):
+    po = (cfg.get("po") or {}).get(topic)
+    if not po:
+        return ("no roadmap. !po <product goal> — the brain drafts a roadmap for you to approve, then "
+                "runs each item as its own topic.\n!po edit <notes> revises · !po go [1,3] approves · "
+                "!po off drops it")
+    rows = []
+    for i, it in enumerate(po["items"], 1):
+        bs = _brain.get(it.get("topic")) or {}
+        state_ = ("not started" if not it.get("topic") else "paused" if bs.get("paused")
+                  else f"step {bs.get('steps', 0)}")
+        rows.append(f"{i}. {it['title']} · {it['agent']} · {state_}")
+    return f"🗺️ {po['goal'][:150]}\n" + "\n".join(rows)
+
+
+def po_cmd(cfg, state, lock, topic, sess, arg):
+    topic = str(topic)
+    a, _, rest = arg.partition(" ")
+    if a == "go":
+        return po_go(cfg, state, lock, topic, rest)
+    if a == "off":
+        with lock:
+            gone = (cfg.get("po") or {}).pop(topic, None)
+            save_cfg(cfg)
+        return "roadmap dropped" if gone else "no roadmap here"
+    if not arg:
+        return po_status(cfg, topic)
+    cwd = (cfg.get("dirs") or {}).get(topic) or (sess_cwd(sess) if sess else "")
+    if not cwd:
+        return "this topic has no project folder"
+    goal = (cfg.get("po") or {}).get(topic, {}).get("goal") if a == "edit" else arg
+    if not goal:
+        return "nothing to edit — !po <product goal> first"
+    threading.Thread(target=po_draft, args=(cfg, topic, cwd, goal, rest if a == "edit" else "", lock),
+                     daemon=True).start()
+    return "🗺️ the product owner is drafting the roadmap, about a minute…"
 
 
 def goal_cmd(cfg, lock, topic, arg):
@@ -14241,6 +14652,7 @@ body.v3d main,body.v3d #stage,body.v3d #rtitle{display:none}
 body.v3d>*{flex:none}
 body.v3d #scene{display:block;flex:1 1 0 !important;height:0;min-height:0;width:100%}
 body.v3d header{position:static}
+body:not(.v3d) #flr{display:none !important}
 </style></head><body>
 <header><h1>🌙 nightmux office</h1>
 <span class="meter">5h <span class="bar" id="u5"><i></i></span></span>
@@ -14251,6 +14663,7 @@ body.v3d header{position:static}
 <button id="snd" class="snd" title="sounds: done, asking, limit" onclick="toggleSound()">🔈</button>
 <button class="snd" title="skin" onclick="nextSkin()">🎨</button>
 <button id="vw" class="snd" title="3D office / pixel rooms" onclick="toggleView()">🧊</button>
+<span class="meter" id="flr" style="display:none"><button class="snd" title="floor down" onclick="V3.go(-1)">◀</button> <span id="flt"></span> <button class="snd" title="floor up" onclick="V3.go(1)">▶</button></span>
 <span class="meter" id="srvs"></span>
 <nav class="nav"><a href="/">⚙ dashboard</a><a href="?replay">⏪ last night</a><a href="/#new">+ project</a><a href="/#servers">+ server</a></nav></header>
 <div id="rp" hidden><button id="rpp" class="snd" title="play">▶</button>
@@ -14933,7 +15346,11 @@ function draw() {
     cv.style.width = cv.width * (+Q.get('scale') || 3) + 'px';
     return;
   }
-  if (v3 && typeof V3 !== 'undefined') return V3.draw(frame, Object.assign({clock: hhmm()}, sky()));
+  if (v3 && typeof V3 !== 'undefined') {
+    // a renderer bug must not leave a blank screen: fall back to the pixel rooms
+    try { return V3.draw(frame, Object.assign({clock: hhmm()}, sky())); }
+    catch (e) { console.error(e); v3 = false; setView(); toast('3D failed, showing pixel rooms'); }
+  }
   document.querySelectorAll('.room canvas').forEach((cv, i) => { const r = data.rooms[i];
     if (r) cv.pad = drawRoom(cv, r, frame, Object.assign({clock: hhmm(), fx: fx[r.topic]}, sky())); });
 }
@@ -15039,7 +15456,7 @@ const V3 = (() => {
     return [W / 2 + xc * k, H / 2 - yc * k, zc];
   }
   function setCam() {
-    const D = R0 * 2.05 * (W < H * .8 ? .75 : 1) / cam.zoom, cy = Math.cos(cam.pitch), t = lay ? lay.c : [0, 0, 0];
+    const D = R0 * 2.2 * (W < H * .8 ? .75 : 1) / cam.zoom, cy = Math.cos(cam.pitch), t = lay ? lay.c : [0, 0, 0];
     cam.p = [t[0] + D * Math.sin(cam.yaw) * cy, t[1] + D * Math.sin(cam.pitch), t[2] + D * Math.cos(cam.yaw) * cy];
     const f = [t[0] - cam.p[0], t[1] - cam.p[1], t[2] - cam.p[2]], fl = Math.hypot(...f); cam.f = f.map(v => v / fl);
     const r = [-cam.f[2], 0, cam.f[0]], rl = Math.hypot(r[0], r[2]) || 1; cam.r = [r[0] / rl, 0, r[2] / rl];
@@ -15049,10 +15466,24 @@ const V3 = (() => {
 
   // ----- layout: rooms in rows, the lounge along the front, an alley down the left -----
   const PITCH = 2.5, RD = 3.5, GAP = 1.6;
-  function layout() {
-    const rooms = data.rooms.map(r => ({r, w: Math.max(2, r.desks.length) * PITCH + .5}));
+  // The office is split into floors of a few rooms: the whole night on one screen was huge and slow to draw.
+  let floorNo = 0;
+  function floors() {
+    const out = []; let cur = [], n = 0;
+    for (const r of data.rooms) { if (cur.length && (cur.length >= 6 || n + r.desks.length > 14)) { out.push(cur); cur = []; n = 0; } cur.push(r); n += r.desks.length; }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  function floorBar(fl) {
+    const el = document.getElementById('flr'); if (!el) return;
+    el.style.display = fl.length > 1 ? '' : 'none';
+    const hot = fl.reduce((n, rs, i) => i === floorNo ? n : n + rs.reduce((m, r) => m + r.desks.filter(d => d.state === 'waiting').length, 0), 0);
+    document.getElementById('flt').textContent = 'floor ' + (floorNo + 1) + '/' + fl.length + (hot ? ' · ✋' + hot : '');
+  }
+  function layout(rs) {
+    const rooms = rs.map(r => ({r, w: Math.max(2, r.desks.length) * PITCH + .5}));
     const rows = []; let cur = [], cw = 0;
-    for (const m of rooms) { if (cur.length && cw + m.w > 17) { rows.push(cur); cur = []; cw = 0; } cur.push(m); cw += m.w + GAP; }
+    for (const m of rooms) { if (cur.length && cw + m.w > 21) { rows.push(cur); cur = []; cw = 0; } cur.push(m); cw += m.w + GAP; }
     if (cur.length) rows.push(cur);
     const AL = GAP + .4;                                          // the alley
     let z = 0, wmax = 9;
@@ -15132,14 +15563,19 @@ const V3 = (() => {
   }
   function station(m, d, i, gi, f, o) {
     const dx = m.x0 + .25 + PITCH * i + PITCH / 2, dz = m.z0 + 1.15, X = {x: dx, y: 0, z: dz, ry: 0}, st = d.state;
-    box(X, 0, .72, 0, 2.0, .07, .9, '#a07c5c'); box(X, 0, .35, -.35, 1.9, .7, .1, '#6b4f3a');       // desk top + modesty panel
-    box(X, -.9, .35, .1, .08, .7, .7, '#5a4130'); box(X, .9, .35, .1, .08, .7, .7, '#5a4130');
-    box(X, .62, .36, 0, .5, .64, .66, '#5a4130'); box(X, .62, .5, .34, .16, .03, .03, '#c9a46a');   // drawers
-    box(X, -.35, .765, .15, .62, .03, .22, '#3a4060');                                              // keyboard
-    box(X, -.35, .785, .15, .5, .01, .14, '#c9cfdc');
     const M = {x: dx + .42, y: .75, z: dz - .1, ry: -.4};                                           // monitor, turned toward the seat
-    box(M, 0, .22, 0, .1, .22, .1, '#1f2335'); box(M, 0, .02, 0, .32, .04, .22, '#1f2335');
-    box(M, 0, .58, 0, .82, .54, .06, '#0b0d14');
+    cached('d' + dx + ',' + dz, () => {
+      box(X, 0, .72, 0, 2.0, .07, .9, '#a07c5c'); box(X, 0, .35, -.35, 1.9, .7, .1, '#6b4f3a');       // desk top + modesty panel
+      box(X, -.9, .35, .1, .08, .7, .7, '#5a4130'); box(X, .9, .35, .1, .08, .7, .7, '#5a4130');
+      box(X, .62, .36, 0, .5, .64, .66, '#5a4130'); box(X, .62, .5, .34, .16, .03, .03, '#c9a46a');   // drawers
+      box(X, -.35, .765, .15, .62, .03, .22, '#3a4060');                                              // keyboard
+      box(X, -.35, .785, .15, .5, .01, .14, '#c9cfdc');
+      box(M, 0, .22, 0, .1, .22, .1, '#1f2335'); box(M, 0, .02, 0, .32, .04, .22, '#1f2335');
+      box(M, 0, .58, 0, .82, .54, .06, '#0b0d14');
+      const C = {x: dx - .3, y: 0, z: dz + .9, ry: 0};                                                // chair
+      box(C, 0, .22, 0, .56, .07, .56, '#262b40'); box(C, 0, .52, .27, .56, .6, .07, '#2f3652');
+      box(C, 0, .11, 0, .06, .2, .06, '#1b1f30'); box(C, 0, .02, 0, .5, .04, .5, '#1b1f30');
+    });
     screen(M, d, f);
     const glow = {busy: color(d.agent), waiting: '#e0af68', limit: '#f7768e', shell: '#9ece6a'}[st];
     if (glow) glows.push({p: [M.x, M.y + .6, M.z], c: glow, r: 1.1});
@@ -15147,9 +15583,6 @@ const V3 = (() => {
     for (let q = 0; q < Math.min(d.queued || 0, 5); q++) box(M, -.28 + q * .14, 1.0, .02, .1, .1, .06, ['#f6d365', '#f7a8b8', '#9ece6a'][q % 3], {emit: 1});
     if (st !== 'busy' && st !== 'waiting') box(X, -.78, .8, -.1, .12, .1, .12, '#e6e9f2');          // mug
     const away = d.away;
-    const C = {x: dx - .3, y: 0, z: dz + .9, ry: 0};                                                // chair
-    box(C, 0, .22, 0, .56, .07, .56, '#262b40'); box(C, 0, .52, .27, .56, .6, .07, '#2f3652');
-    box(C, 0, .11, 0, .06, .2, .06, '#1b1f30'); box(C, 0, .02, 0, .5, .04, .5, '#1b1f30');
     if (!away && st !== 'gone' && st !== 'shell') person(d, {x: dx - .3, y: .0, z: dz + .88, ry: 0}, 'sit', f, gi, {at: d.since});
     d._home = {x: dx - .3, z: dz + .88};
     if (!away) label(d.agent, [dx - .3, 1.95, dz + .88], d, 'desk');
@@ -15295,6 +15728,13 @@ const V3 = (() => {
   }
 
   // ----- the frame -----
+  // Furniture and the shell never move: build their faces once and replay them (cleared with the layout).
+  const SC = new Map();
+  function cached(key, fn) {
+    let a = SC.get(key);
+    if (!a) { if (SC.size > 80) SC.clear(); const n = faces.length; fn(); a = faces.slice(n); SC.set(key, a); }
+    else for (let i = 0; i < a.length; i++) faces.push(a[i]);
+  }
   let glows = [], bubbles = [], zzz = [], roomLabels = [], labels = [];
   function label(name, p, d, kind) { labels.push({n: name, p, d, kind}); }
   function build(F, o) {
@@ -15302,7 +15742,7 @@ const V3 = (() => {
     const f = Math.floor(F);
     amb = lerp(.55, .9, o.day || 0);
     tint = o.dawn && !o.day ? [1.05, .96, .9] : [1, 1, 1];
-    shell(f, o); lounge(lay.L, f, occ3);
+    cached('sh' + Math.round((o.day || 0) * 20) + ',' + Math.round((o.dawn || 0) * 20) + o.clock, () => shell(f, o)); lounge(lay.L, f, occ3);
     const S = spots(lay.L); let gi = 0; const away = [];
     for (const m of lay.rooms) { room(m, f, o);
       m.r.desks.forEach((d, i) => {
@@ -15328,7 +15768,11 @@ const V3 = (() => {
     const cp = cam.p;
     const draw = [];
     for (const fc of faces) {
-      const pr = fc.p.map(proj); if (pr.some(v => !v)) continue;
+      const q0 = proj(fc.p[0]), q1 = proj(fc.p[1]), q2 = proj(fc.p[2]), q3 = proj(fc.p[3]);
+      if (!q0 || !q1 || !q2 || !q3) continue;
+      if ((q0[0] < 0 && q1[0] < 0 && q2[0] < 0 && q3[0] < 0) || (q0[0] > W && q1[0] > W && q2[0] > W && q3[0] > W) ||
+          (q0[1] < 0 && q1[1] < 0 && q2[1] < 0 && q3[1] < 0) || (q0[1] > H && q1[1] > H && q2[1] > H && q3[1] > H)) continue;
+      const pr = [q0, q1, q2, q3];
       let n = fc.n;
       if (!n) { const a = fc.p[0], b = fc.p[1], c = fc.p[2], u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
         n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]; const l = Math.hypot(...n) || 1; n = n.map(k => k / l);
@@ -15367,12 +15811,17 @@ const V3 = (() => {
     for (const z of zzz) { const q = proj(z.p); if (!q) continue; g.font = '800 ' + fs(.4 * cam.k / q[2]) + 'px ui-monospace,monospace';
       for (let i = 0; i < 3; i++) { const ph = (f * .6 + i * 8) % 24; g.fillStyle = 'rgba(122,162,247,' + (1 - ph / 24).toFixed(2) + ')'; g.fillText('Z', q[0] + 6 + ph / 2, q[1] - ph * 1.3); } }
   }
+  let lastKey = '', lastData = null;
   function draw3d(F, o) {
-    const r = cv.getBoundingClientRect(), nw = Math.max(1, r.width | 0), nh = Math.max(1, r.height | 0), d = Math.min(window.devicePixelRatio || 1, 2);
+    const key = (F * 2 | 0) + '|' + cam.yaw + cam.pitch + cam.zoom + '|' + o.clock + (o.day || 0) + (o.dawn || 0) + '|' + floorNo + '|' + cv.clientWidth + 'x' + cv.clientHeight;
+    if (key === lastKey && data === lastData) return;
+    lastKey = key; lastData = data;
+    const r = cv.getBoundingClientRect(), nw = Math.max(1, r.width | 0), nh = Math.max(1, r.height | 0), d = Math.min(window.devicePixelRatio || 1, 1.5);
     if (nw !== W || nh !== H || d !== dpr) { W = nw; H = nh; dpr = d; cv.width = W * d; cv.height = H * d; }
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const sig = data.rooms.map(r => r.topic + ':' + r.desks.length).join('|');
-    if (!lay || sig !== lastSig) { lastSig = sig; lay = layout(); R0 = lay.rad + 1; }
+    const fl = floors(); floorNo = clamp(floorNo, 0, Math.max(0, fl.length - 1)); floorBar(fl);
+    const rs = fl[floorNo] || [], sig = floorNo + '/' + rs.map(r => r.topic + ':' + r.desks.length).join('|');
+    if (!lay || sig !== lastSig) { lastSig = sig; lay = layout(rs); R0 = lay.rad + 1; SC.clear(); }
     setCam();
     const k = o.day || 0, dk = o.dawn || 0, top = mix(mix('#080a16', '#2a2548', dk), '#7fb0e8', k), bot = mix(mix('#14182c', '#4a3a58', dk), '#bcd8f2', k);
     const bg = g.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, top); bg.addColorStop(1, bot); g.fillStyle = bg; g.fillRect(0, 0, W, H);
@@ -15400,7 +15849,8 @@ const V3 = (() => {
   cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
   cv.addEventListener('wheel', e => { e.preventDefault(); cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * .0012), .5, 4); }, {passive: false});
   cv.addEventListener('dblclick', () => { cam.yaw = .5; cam.pitch = .62; cam.zoom = 1; });
-  return {draw: draw3d, cam, hits, hit};
+  const go = k => { floorNo = Math.max(0, floorNo + k); lastKey = ''; };
+  return {draw: draw3d, cam, hits, hit, go};
 })();
 </script>
 </body></html>"""
@@ -16633,6 +17083,9 @@ def inject_telemetry(cfg, html):
         ping = f'<script data-goatcounter="https://{tid}.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>'
     return html.replace("</head>", ping + "</head>")
 
+MAX_POST = 64 * 1024 * 1024    # the biggest legitimate body is a phone upload
+
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
     peer = False   # this request came from another nightmux, through /peer/
 
@@ -17029,7 +17482,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self.auth_gate():
             return
-        length = int(self.headers.get('Content-Length', 0))
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            length = -1
+        if not 0 <= length <= MAX_POST:      # unbounded, one request could exhaust memory
+            self.send_response(413)
+            self.end_headers()
+            return
         body = self.rfile.read(length).decode('utf-8').strip()
         cfg = self.server.cfg
         if self.path == "/api/pair/revoke":
@@ -17319,6 +17779,7 @@ def up_cli(args):
 
 
 def main():
+    harden_state()
     added = widen_path()
     if added:
         print(f"PATH += {os.pathsep.join(added)}", flush=True)

@@ -26,6 +26,19 @@ def selfcheck():
 
     assert common_prefix(["a", "b", "c"], ["a", "b", "z"]) == 2
 
+    # Hardening: credentials are never sent by !get, and the state dir is private.
+    home_ = os.path.expanduser("~")
+    for p_ in (".nightmux.json", ".ssh/id_ed25519", ".nightmux-relay.env", ".aws/credentials",
+               "proj/.env", ".nightmux-state/paired_tokens.json"):
+        assert is_secret_path(os.path.join(home_, p_)), p_
+    assert not is_secret_path(os.path.join(home_, "proj", "README.md"))
+    with stubbed(STATE_DIR=os.path.join(__import__("tempfile").mkdtemp(), "st")):
+        harden_state()
+        assert os.stat(STATE_DIR).st_mode & 0o777 == 0o700
+        os.chmod(STATE_DIR, 0o775)
+        harden_state()
+        assert os.stat(STATE_DIR).st_mode & 0o777 == 0o700
+
     # Something that always blocks. `tmux wait-for` only blocks once a server is
     # already running, so this passed on a machine with sessions open and let a
     # clean one through untested — the timeout path is what is being checked.
@@ -612,6 +625,37 @@ def selfcheck():
     # A session suffix on every button: a mirrored copy in the command center
     # has no topic binding to resolve a bare "!1" against.
     qmenu = menu_buttons(["Do you want to proceed?", "❯ 1. Yes", "  2. No"], "api")
+    # ♾ always: a pinned yes/no menu offers it, the tap saves that exact request,
+    # and autoyes then answers that request (and no other) with !autoyes off.
+    dlg = ["Bash command", "  npm test", "Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+    texts_ = lambda m: [b["text"] for r in json.loads(m)["inline_keyboard"] for b in r]
+    assert "♾ always" in texts_(menu_buttons(dlg, bind=True))
+    assert "♾ always" not in texts_(menu_buttons(dlg))
+    acfg, ast_, alk, said_ = {"topics": {"1": "s"}, "chat_id": -1}, {}, threading.Lock(), []
+    scr_ = list(dlg)
+    with stubbed(has_session=lambda x: True, visible=lambda x: list(scr_), pane=lambda x: list(scr_),
+                 pane_state=lambda l: "waiting", press=lambda *a, **k: None,
+                 pick=lambda s_, d: "", resolve_ask=lambda *a: None, save_cfg=lambda c: None,
+                 send=lambda c, t, x, **k: said_.append(x)):
+        assert handle(acfg, ast_, alk, "1", "!always") is None
+        assert "npm test" in list(acfg["always"]["s"].values())[0], acfg
+        autoyes(acfg, ast_, "1", "s")
+        assert said_ and said_[-1].startswith("♾ always s → 1"), said_
+        scr_[1], ast_["s"]["autoyes_at"] = "  make deploy", 0
+        n_ = len(said_)
+        autoyes(acfg, ast_, "1", "s")
+        assert len(said_) == n_, said_            # a different request: left to you
+        scr_[1] = "  rm -rf build"
+        assert "risky" in handle(acfg, ast_, alk, "1", "!always")
+        assert "1. " in rules_cmd(acfg, alk, "s", "") and "no ♾" in rules_cmd(acfg, alk, "s", "1 off")
+    # !quiet: silent inside the window (wrapping midnight or not), phone time
+    qcfg = {"tz_offset": 0}
+    with stubbed(save_cfg=lambda c: None):
+        assert "usage" in quiet_cmd(qcfg, alk, "late")
+        quiet_cmd(qcfg, alk, "23:00-07:00")
+    assert qcfg["quiet"] == ["23:00", "07:00"] and quiet_now(qcfg, 3600) and not quiet_now(qcfg, 43200)
+    qcfg["quiet"] = ["09:00", "17:00"]
+    assert quiet_now(qcfg, 43200) and not quiet_now(qcfg, 3600) and not quiet_now({}, 3600)
     # An answer key sent to a pane that is not asking is typed in as text and
     # queued by the agent, which is how five taps became "33333" in a prompt box.
     kcfg, klk = {"topics": {"1": "s"}, "chat_id": -1}, threading.Lock()
@@ -1550,6 +1594,15 @@ def selfcheck():
         assert price_of("Claude-Opus-5-5[1m]") == PRICES["claude-opus-5-5"] == (4, 20, .2, 5)
         assert price_of("claude-x") is price_of("gpt-5.5-pro") is price_of("") is None
         assert price_of("mine", {"mine": [1, 2]}) == (1, 2, 1, 1)
+        # !tokens: dollars, what the cache saved, pace, habits; an unpriced model is named, not free
+        tk_ = tokens_report({"days": 7, "agents": {
+            "claude": {"tokens": {"input": 1000000, "cache_read": 9000000, "cache_write": 0, "output": 100000},
+                       "by_model": {"claude-sonnet-5-5": [1000000, 9000000, 0, 100000], "mystery-1": [5, 5, 5, 5]},
+                       "prompts": 10, "requests": 100, "cache_hit": .7, "avg_ctx": 200000,
+                       "daily": {"2026-11-01": [100, 1], "2026-11-02": [200, 1]}}}}, now=1793600000)
+        assert "$3.90" in tk_ and "$0.39" in tk_ and "$17.10" in tk_, tk_   # cost, $/prompt, cache saved
+        assert "cache hit 70%" in tk_ and "!compact" in tk_ and "not priced: mystery-1" in tk_, tk_
+        assert tokens_report({"days": 7, "agents": {}}).startswith("no agent transcripts")
         assert price_of("gpt-5.5", {"gpt-5.5": [3, 4, 5, 6]}) == (3, 4, 5, 6)
         for junk_ in ("junk", [1], [1, -2], [1, float("nan")], [1, 2, 3, 4, 5], 7):
             assert price_of("gpt-5.5", {"gpt-5.5": junk_}) is None, junk_
@@ -1679,6 +1732,7 @@ def selfcheck():
     _replay.update(old_rp_)
     assert "?replay" in OFFICE_HTML and "/api/office/replay" in OFFICE_HTML
     assert 'id="scene"' in OFFICE_HTML and "const V3 = " in OFFICE_HTML and "toggleView" in OFFICE_HTML  # the 3D office and its switch
+    assert "function floors()" in OFFICE_HTML and "cached('sh'" in OFFICE_HTML and "V3.draw(frame" in OFFICE_HTML  # floors, cached statics, draw guard
     with stubbed(save_cfg=lambda c: None):
         lc_ = {}
         assert "👕 claude: shirt #ff0000 shade #b20000 hat cap" in look_cmd(lc_, "claude shirt #FF0000 hat cap")
@@ -1889,6 +1943,49 @@ def selfcheck():
         goal_round()
         assert "✅ goal green: true" in gsaid_ and "/clear" in gst_["g"]["queue"], gsaid_[-2:]
         assert goal_cmd(gcfg_, glk_, "4", "off") == "goal off" and not gcfg_["goals"]
+    # !brain: NEXT queues the step, a repeat or DONE or ASK pauses and tells you.
+    bsaid_, bcfg_, bst_ = [], {"topics": {"5": "b"}}, {"b": {"mode": "idle"}}
+    with stubbed(save_cfg=lambda c: None, brain_decide=lambda p: BRAIN_ANS_[0],
+                 send=lambda c, t, x, mode="mono", buttons=None, quiet=False: bsaid_.append(x)):
+        BRAIN_ANS_ = ["NEXT: write the tests"]
+        assert brain_cmd(bcfg_, glk_, "5", "3 ship it").startswith("🧠 brain set")
+
+        def brain_round():
+            brain_capture(bcfg_, "5", "b", "did a thing")
+            for _ in range(200):
+                if "out" in (_brain_run.get("5") or {}):
+                    break
+                time.sleep(0.02)
+            brain_tick(bcfg_, bst_)
+        brain_round()
+        assert bst_["b"]["queue"] == ["write the tests"] and "step 1/3" in bsaid_[-1], bsaid_
+        bst_["b"]["queue"] = []
+        brain_round()                                   # same step again: it is looping
+        assert "repeating itself" in bsaid_[-1] and _brain["5"]["paused"] and not bst_["b"]["queue"]
+        brain_capture(bcfg_, "5", "b", "x")             # paused: nothing runs
+        assert "5" not in _brain_run
+        assert "resumed" in brain_cmd(bcfg_, glk_, "5", "resume")
+        BRAIN_ANS_[0] = "DONE: login page shipped"
+        brain_round()
+        assert "mission done: login page shipped" in bsaid_[-1]
+        assert brain_cmd(bcfg_, glk_, "5", "off") == "brain off" and not bcfg_["brains"]
+    # !po: roadmap parsed from the model's lines, approved, one topic+brain per item.
+    psaid_, pcfg_, pst_ = [], {"topics": {"6": "p"}, "agents": {}}, {}
+    ROAD_ = ("noise\n- Add login | claude | build login with tests\n"
+             "- Dark mode | nope | add a theme toggle\n")
+    with tempfile.TemporaryDirectory() as pd_, stubbed(
+            save_cfg=lambda c: None, claude_once=lambda p, model="haiku", timeout=120: ROAD_,
+            send=lambda c, t, x, mode="mono", buttons=None, quiet=False: psaid_.append(x),
+            fan_go=lambda c, st, lk, t: (c.setdefault("fan_kids", {}).update({"k%d" % len(c.get("fan_kids", {})): t}),
+                                         "ok")[1]):
+        po_draft(pcfg_, "6", pd_, "a todo app", "", glk_)
+        its_ = pcfg_["po"]["6"]["items"]
+        assert [i["title"] for i in its_] == ["Add login", "Dark mode"], its_
+        assert its_[1]["agent"] == default_agent(pcfg_) and "roadmap for: a todo app" in psaid_[-1]
+        assert "started" in po_go(pcfg_, pst_, glk_, "6", "1") and its_[0]["topic"] and not its_[1].get("topic")
+        assert pcfg_["brains"][its_[0]["topic"]]["mission"].startswith("Add login:")
+        assert "step 0" in po_status(pcfg_, "6") and "not started" in po_status(pcfg_, "6")
+        assert po_cmd(pcfg_, pst_, glk_, "6", "p", "off") == "roadmap dropped"
     # !preview finds what the session's own processes serve over HTTP — by
     # process tree, not port guessing — and links it on the tailnet.
     if shutil.which("ss"):

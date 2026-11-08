@@ -41,12 +41,16 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!voice [on|off]` = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)
 - `!ship [notes]` = commit, push, open a PR, then watch CI and fix red checks until green (never merges)
 - `!policy [on|off|deny <regex>]` = dialogs auto-yes must leave to you (rm -rf, push, sudo...)
+- ♾ always (button) = yes, and the same request is answered yes from then on · `!rules [clear|<n> off]`
+- `!quiet` 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring
 - `!pane [lines]` | `!verbose` | `!ctl` · type / for autocomplete
 
 ## 🌙 Overnight and schedules
 
 `!help night`
 
+- `!po <product goal>` | edit &lt;notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, then it runs each item as its own topic under `!brain`
+- `!brain [n] <mission>` | resume | off = a supervisor reads every finished turn and sends the next step, or asks you when it needs a human
 - `!goal [n] <check>` | off = run a check (tests, build) after every turn and send failures back until it passes
 - `!shift` then one prompt per line = a sequential overnight plan
 - `!plan <big task>` = the agent splits it into steps, run one at a time
@@ -92,6 +96,7 @@ Everything works as `!cmd`; the common ones are also `/cmd` so Telegram autocomp
 - `!lint` on|off = hold a vague prompt for ✨ improve · `!coach` = what your first-try prompts have in common
 - `!memory [update|on|off]` = project notes every agent reads on start
 - `!stats [days]` = tokens, cache and prompts per agent · `!saved`
+- `!tokens [days]` = tokens and API-list dollars per agent, what the cache saved, today's pace, costly habits
 
 ## 🔧 Git, PRs and production
 
