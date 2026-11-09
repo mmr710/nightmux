@@ -4,13 +4,13 @@
 
 # nightmux
 
-### Your AI coding agents keep working while you sleep.
+### The vendor-neutral night shift for AI coding agents.
 
-Approve a roadmap from your phone before bed. Wake up to pull requests.
+Claude, Codex and Gemini work while you sleep. Your tests decide when a task is done, and when one agent runs out, another takes over. Wake up to passing tests and pull requests.
 
 Drive **Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose, Qwen Code** and **aider**
-from your phone. Usage limit at 2 AM? Your queue waits and resumes the moment the window
-resets, or hands the work to another agent. You wake up to a briefing.
+from one phone. Usage limit at 2 AM? The work fails over to another vendor's agent, or waits and
+resumes when the window resets. You wake up to a briefing.
 
 [![GitHub stars](https://img.shields.io/github/stars/mmr710/nightmux?style=social)](https://github.com/mmr710/nightmux/stargazers)
 [![tests](https://github.com/mmr710/nightmux/actions/workflows/test.yml/badge.svg)](https://github.com/mmr710/nightmux/actions/workflows/test.yml)
@@ -34,14 +34,14 @@ resets, or hands the work to another agent. You wake up to a briefing.
 
 ## Why vibe coders run it
 
+- ✅ **Done means your tests pass.** `!goal npm test` runs your check after every turn and sends the failures back. It stops and asks when it goes in circles.
+- 🔀 **Fails over across vendors.** Claude Code runs out of its 5-hour window at 2:14 AM. `!failover codex` hands the held work to another vendor's agent now, or nightmux keeps the turn that got cut off and sends it back when the window resets. A single vendor's own resume can only wait; it can't hand off to a rival.
 - 🧠 **A product owner and a foreman, built in.** `!po <goal>` reads your repo and drafts a roadmap. One tap on ✅ gives every item its own topic, worktree and agent, and `!brain` follows each one up: it answers "what next?" for the agent, and stops to ask you when it is done, stuck or going in circles. It never approves deploys, deletes, force-pushes or spending.
-- 🌙 **A usage limit no longer ends the night.** Claude Code runs out of its 5-hour window at 2:14 AM. nightmux keeps your queue and the turn that got cut off, and sends them back the moment the window resets. Can't wait? `!failover codex` hands the work to another agent now.
 - 📱 **Your phone is the terminal.** One Telegram topic per project, one tmux session behind it. Approval menus arrive as buttons, so a "yes" is one tap from bed. Photos, files and voice notes go straight to the agent.
-- ✅ **It keeps going until the tests pass.** `!goal npm test` runs your check after every turn and sends the failures back. It stops and asks when it goes in circles.
 - 🗓 **Plan the whole night.** `!shift` takes one prompt per line and runs them in order. `!at 03:00 <prompt>` and `!every 4h <prompt>` start work while you sleep.
-- 🤝 **Every agent you already use.** Ten terminal agents, a bench of them per topic. `!race claude,codex <task>` runs both in their own worktrees and you keep the better one.
+- 🤝 **One phone for every agent you already use.** Ten terminal agents behind the same buttons, queue and topics, a bench of them per topic. `!race claude,codex <task>` runs both in their own worktrees and you keep the better one.
 - ☀️ **You wake up to a briefing.** What got done, which PRs are ready, which errors came in, and a GIF of the night.
-- 💸 **Fewer tokens spent.** Live context %, the limit windows, auto-compact, a fresh session per task, and `!stats` says what to change.
+- 💸 **Cost across vendors, counted.** `!tokens` shows per-agent tokens and API-list dollars; in our own test an agent team cost about 3x a solo agent. Live context %, the limit windows, auto-compact, a fresh session per task, and `!stats` says what to change.
 - 🔒 **Yours, entirely.** Python standard library only, zero dependencies, on your machine with your keys. Nothing is exposed by default. MIT.
 
 ## Quickstart
