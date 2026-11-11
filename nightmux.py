@@ -9135,10 +9135,12 @@ def wrapped_cli(args, out="."):
     c = w["cost"]
     if "--json" in flags:
         j = {"days": days, "version": VERSION, "tokens": w["used"], "prompts": w["prompts"],
-             "usd": round(c["total"], 2),
-             "agents": {a: {"tokens": n, "usd": round(c["agents"].get(a, 0), 2)} for a, n, _ in w["split"]}}
-        if "--projects" in flags:
-            j["projects"] = [{"name": p, "tokens": n} for p, n in w["projects"]]
+             "usd": round(c["total"], 2), "unpriced_tokens": sum(c["left_out"].values()),
+             # usd is None, not 0, for an agent with no list price: unknown is not free
+             "agents": {a: {"tokens": n, "usd": round(c["agents"][a], 2) if a in c["agents"] else None}
+                        for a, n, _ in w["split"]}}
+        if "--projects" in flags:  # top six, by prompt count
+            j["projects"] = [{"name": p, "prompts": n} for p, n in w["projects"]]
         print(json.dumps(j))
         return
     print(f"\n🌙 nightmux wrapped · last {days} days · {' · '.join(w['agents'])}\n\n"
