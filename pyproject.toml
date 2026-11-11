@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nightmux"
-version = "1.5.0"
+version = "1.6.0"
 description = "Your AI coding agents keep working while you sleep: drive Claude Code, Codex, Gemini, opencode and more from your phone, past usage limits."
 readme = "README.md"
 license = { file = "LICENSE" }
