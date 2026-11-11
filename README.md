@@ -14,12 +14,12 @@ Run Claude, Codex and Gemini overnight. When one hits its limit, another takes o
 </div>
 
 - **Your check decides when it is done.** After each turn, `--until` runs your shell command; if it fails, the output goes back to the agent. It stops after 20 turns unless you set `--max-turns`.
-- **Another agent takes over.** On a usage limit, an exit, or a turn that runs over an hour, the next agent gets a handoff brief of the work so far. Pick them with `--agents`; the default is whatever is installed, Claude first.
+- **Another agent takes over.** On a Claude Code usage limit, any agent's exit, or a turn that runs over an hour, the next agent gets a handoff brief of the work so far. Pick them with `--agents`; the default is whatever is installed, Claude first.
 - **Nothing to set up.** It needs tmux and an agent CLI. No bot, no keys, no daemon.
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/mmr710/nightmux/main/docs/office-demo.gif" width="100%" alt="The full nightmux daemon's office view: claude hits its limit at 02:14, codex takes over, and claude is back at 04:11">
-<br><sub>The daemon's office view of a night, one step beyond <code>run</code>. <a href="https://mmr710.github.io/nightmux/#video">48-second video</a></sub>
+<br><sub>A made-up night in the daemon's office view (what the phone setup below adds), not the output of <code>run</code>. <a href="https://mmr710.github.io/nightmux/office.html?demo">Live demo</a> · <a href="https://mmr710.github.io/nightmux/#video">48-second video</a></sub>
 </div>
 
 ```bash
@@ -27,7 +27,7 @@ uvx nightmux run "fix the failing tests" --until "npm test"
 uvx nightmux run "add input validation" --until "pytest -q" --agents claude,codex --max-turns 10
 ```
 
-Limits: usage-limit text is recognised for Claude Code only. Other agents fail over when they exit or a turn passes an hour. A permission menu in the agent is reported and waited on, never answered; attach with `tmux attach -t =<session>` to answer it. Exit codes: 0 check passed, 1 max turns, 2 usage, 3 no agent left.
+Limits: usage-limit text is recognised for Claude Code only. Other agents fail over when they exit or a turn passes an hour. A permission menu in the agent is reported and waited on, never answered; attach with `tmux attach -t =<session>` to answer it. Exit codes: 0 check passed, 1 max turns, 2 bad arguments or no tmux, 3 no agent left, 130 interrupted.
 
 ## See what your agents cost first
 
@@ -35,7 +35,7 @@ Limits: usage-limit text is recognised for Claude Code only. Other agents fail o
 uvx nightmux wrapped
 ```
 
-Reads the logs Claude Code, Codex, OpenCode and Antigravity already keep in your home folder and prints what the last 30 days would have cost at API list prices (`wrapped 7` for a week). Nothing is uploaded. Dollars are list prices, not your invoice. [Details in the guide](docs/GUIDE.md#what-did-your-agents-cost).
+Reads the logs Claude Code, Codex, OpenCode and Antigravity already keep in your home folder and prints what the last 30 days would have cost at API list prices (`wrapped 7` for a week). Nothing is uploaded; it also writes two share-card files into the current folder. Dollars are list prices, not your invoice. [Details in the guide](docs/GUIDE.md#what-did-your-agents-cost).
 
 ## From your phone
 
@@ -73,7 +73,7 @@ The last column is the [drift guard](https://github.com/mmr710/nightmux/actions/
 
 - Nothing is exposed by default: the dashboard binds 127.0.0.1.
 - Messages from anyone not in `allow_users` are ignored.
-- `!autoyes` is off unless you turn it on per topic, and it never presses yes on `rm -rf`, `sudo`, `git push`, `curl | sh`, `--force` or publish dialogs.
+- `!autoyes` is off unless you turn it on per topic, and it never presses yes on `rm -rf`, `sudo`, `git push`, `curl | sh`, `--force` or `npm publish` (`!policy` tunes this).
 - Standard library only, no dependencies. The QR setup shortcut trusts the maintainer's relay; paste a BotFather token if that matters. [SECURITY.md](SECURITY.md) is short and covers the rest.
 
 ## More

@@ -1009,17 +1009,7 @@ All of them: [docs/COMMANDS.md](https://github.com/mmr710/nightmux/blob/main/doc
 
 ### How it compares
 
-nightmux is one of several ways to reach a coding agent from your phone, and not the biggest. The others, and where to look first:
-
-| Project | What it is | Start there if |
-|---|---|---|
-| **[Happy](https://github.com/slopus/happy)** (MIT, 24k★) · **[HAPI](https://github.com/tiann/hapi)** (AGPL-3.0, 5k★) | apps for Claude Code, Codex and more, with communities far larger than this one | you want an app rather than a chat bot |
-| **[ccbot](https://github.com/six-ddc/ccbot)** · **[ccgram](https://github.com/alexei-led/ccgram)** | Telegram topics bridged to tmux sessions, the same shape as nightmux's core | a bridge is all you want |
-| **[claude-auto-resume](https://github.com/terryso/claude-auto-resume)** | a shell script that resumes Claude Code when a usage limit lifts; nightmux does the same inside a bigger tool | that is the one part you need |
-| **[claude-squad](https://github.com/smtg-ai/claude-squad)** | several terminal agents at once, managed from the terminal | you stay at the keyboard |
-| **Anthropic's own** Remote Control and Telegram channel plugin | reach a Claude Code session with no third-party code | Claude Code is the only agent you use |
-
-What nightmux is for is the overnight layer across agents: a roadmap you approve from your phone (`!po`) and a supervisor that keeps each agent moving (`!brain`), a queue that waits out usage limits or hands the work to another agent, schedules, `!goal` loops that run your tests until they pass, a morning briefing, and a dashboard with an office view. The cost is size: the daemon is a single file of about 23,000 lines, from one maintainer.
+See [COMPARE.md](COMPARE.md).
 
 ### FAQ
 
