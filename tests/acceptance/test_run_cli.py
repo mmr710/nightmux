@@ -19,7 +19,7 @@ FAKE_AGENT = """#!/bin/sh
 # never the assertions below.
 printf 'fake-agent ready\\n❯ '
 while IFS= read -r line; do
-  [ -n "$line" ] && touch done.flag && printf 'worked on it\\n'
+  [ -n "$line" ] && touch done.flag && printf 'did: %s\\n' "$line"
   printf '❯ '
 done
 """

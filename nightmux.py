@@ -1592,6 +1592,14 @@ def undetail(line):
     return re.sub(r"^\s*⎿\s*", "", line)
 
 
+def limit_banner(l):
+    """Is this one pane line a usage-limit (or capacity) banner. Shared by the daemon
+    and `nightmux run`. A DETAIL line is quoted output, so only one that starts with
+    the banner counts."""
+    return bool((LIMIT_HIT.search(l) or CAPACITY_HIT.search(l)) and (
+        not DETAIL.match(l) or LIMIT_HIT.match(undetail(l)) or CAPACITY_HIT.search(undetail(l))))
+
+
 def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
     """Hold prompts until the usage window resets.
 
@@ -1631,8 +1639,7 @@ def check_limit(cfg, st, topic, sess, scr, fresh, busy=False):
         # on every pane the sidecar's windows do not cover. What separates them is
         # position: a quoted error puts its own words in front, an announcement
         # starts with the banner.
-        hit = next((l for l in scr[-12:] if (LIMIT_HIT.search(l) or CAPACITY_HIT.search(l)) and (
-            not DETAIL.match(l) or LIMIT_HIT.match(undetail(l)) or CAPACITY_HIT.search(undetail(l)))), None)
+        hit = next((l for l in scr[-12:] if limit_banner(l)), None)
         if not hit:
             return
         hit, at = hit.strip(), parse_reset("\n".join(scr[-12:]))
@@ -1984,9 +1991,9 @@ def handoff_cli(args):
         sys.exit(f"could not start {binary}: {e}")
 
 
-def failover_brief(was, hpath, last):
-    """What the next agent is told when the last one hit its usage limit."""
-    return (f"{was} was working in this directory and hit its usage limit "
+def failover_brief(was, hpath, last, why="hit its usage limit"):
+    """What the next agent is told when the last one stopped (default: usage limit)."""
+    return (f"{was} was working in this directory and {why} "
             "mid-task. Look at the working tree (git status, git diff)"
             + (" and .nightmux/HANDOFF.md" if hpath else "")
             + " to see how far it got, then carry on."
@@ -18839,7 +18846,6 @@ a turn takes longer than an hour.
 """
 RUN_TURN_WAIT = 3600   # hard stop for one turn, seconds
 RUN_START_WAIT = 120   # an agent's first prompt; time spent on a menu does not count
-RUN_POLL = float(os.environ.get("NIGHTMUX_RUN_POLL") or 1)   # seconds; tests shorten it
 
 
 def run_args(argv):
@@ -18886,8 +18892,9 @@ def run_cli(argv):
     config. Exits 0 check passed, 1 max turns, 2 usage, 3 no agent left, 130 Ctrl-C.
 
     The agent is the tmux session's own command, so the session ends when the agent
-    does and a vanished session means "agent exited". Nothing is typed into a pane
-    that has fallen back to a shell, because there is no shell to fall back to.
+    does and a vanished session means "agent exited". Every tmux target run builds is
+    `=name:` (exact match): a bare `name:` falls back to a prefix match once the
+    session is gone, and would reach a user's `name-api`.
     """
     if "-h" in argv or "--help" in argv:
         print(RUN_USAGE, end="")
@@ -18896,12 +18903,16 @@ def run_cli(argv):
     if not shutil.which("tmux"):
         print("nightmux run needs tmux, and it is not installed", file=sys.stderr)
         sys.exit(2)
+    try:
+        a["poll"] = max(0.1, float(os.environ.get("NIGHTMUX_RUN_POLL") or 1))
+    except ValueError:
+        a["poll"] = 1.0
     mine = []   # sessions this invocation created: the only ones it may kill
     say = lambda m: print(m, flush=True)
 
     def finish(code):
         for s in mine:
-            if has_session(s):
+            if _run_alive(s):
                 say(f"session {s} is still running: tmux attach -t {s}   (stop it: tmux kill-session -t {s})")
         sys.exit(code)
 
@@ -18914,55 +18925,91 @@ def run_cli(argv):
         sys.exit(130)
 
 
+def _run_alive(sess):
+    """Exact-name has-session (`=name`): never a prefix match."""
+    try:
+        return subprocess.run(("tmux", "has-session", "-t", "=" + sess),
+                              capture_output=True, timeout=10).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _run_loop(a, mine, say, finish):
-    cfg, cwd = a["cfg"], os.getcwd()
+    cfg, cwd, poll = a["cfg"], os.getcwd(), a["poll"]
     base = re.sub(r"[^\w-]", "-", os.path.basename(cwd)) or "run"
-    turns, text, resets = 0, a["task"], []
+    turns, text, resets, why = 0, a["task"], [], "hit its usage limit"
     for key in a["agents"]:
         if turns >= a["max_turns"]:
             break
         cmd = agents(cfg)[key][0]
+        sess, i = base, 1       # never reuse a session run did not create
+        while _run_alive(sess):
+            i += 1
+            sess = f"{base}-{key}" + (f"-{i}" if i > 2 else "")
+        box = sandboxed(cfg, sess)
         try:
-            prog = shlex.split(cmd)[0]
+            prog = "docker" if box else shlex.split(cmd)[0]
         except (ValueError, IndexError):
             prog = cmd
         if not shutil.which(prog):
             say(f"{key}: {prog} is not installed, skipping")
             continue
-        sess, i = base, 1       # never reuse a session run did not create
-        while has_session(sess):
-            i += 1
-            sess = f"{base}-{key}" + (f"-{i}" if i > 2 else "")
-        tmux("new-session", "-d", "-s", sess, "-c", cwd, cmd)
+        env = []
+        tok_at = compact_at(cfg)[1]     # same variable spawn() hands Claude Code
+        if tok_at:
+            env = ["-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % max(NATIVE_MIN, tok_at)]
+        if box:
+            cmd = sandbox_cmd(cfg, sess, cwd, cmd)
+        at = f"={sess}:"
+        # remain-on-exit off: an exited agent must end the session, whatever tmux.conf says
+        tmux("new-session", "-d", "-s", sess, "-c", cwd, *env, cmd,
+             ";", "set-option", "-w", "-t", at, "remain-on-exit", "off")
         mine.append(sess)
-        _target[sess] = sess + ":"      # the session, never a window of the same name
+        _target[sess] = at      # exact session; pane()/inject()/settle() all go through tgt()
         say(f"{key}: started in tmux session {sess}")
-        ctx = {"base": [], "inj": [], "last": [], "told": False}
+        ctx = {"base": [], "inj": [], "last": [], "told": False, "cmd": None}
 
         def echo(l):
             return any((len(t) >= 12 and t in l) or l.rstrip().endswith(t) for t in ctx["inj"])
 
-        def norm(lines):
-            return [l for l in lines if l.strip() and not echo(l)]
+        def agent_gone(idle=False):
+            """The pane is dead, or its foreground program became a shell. The program
+            at the first idle prompt is the baseline: a script agent shows as sh/bash
+            from the start and must not count. ponytail: an agent that falls back to the
+            same-named shell it started as, or a wrapper already at a shell prompt when
+            first seen idle, cannot be told apart by name."""
+            o = tmux_out("display-message", "-p", "-t", at, "#{pane_dead} #{pane_current_command}")
+            if o is None:
+                return True
+            dead, _, c = o.strip().partition(" ")
+            if dead == "1":
+                return True
+            if ctx["cmd"] is None:
+                if idle:
+                    ctx["cmd"] = c
+                return False
+            return c != ctx["cmd"] and c in SHELLS
 
         def wait(secs, pre=None):
-            """'ready' (idle and unchanged for two polls, and, with `pre`, the pane has
-            changed beyond the echoed input), 'limit', 'gone' (session ended) or
+            """'ready' (idle on two polls in a row and, with `pre`, the turn was seen busy
+            or the pane changed since `pre`), 'limit', 'gone' (agent exited) or
             'timeout'. Time on a waiting menu is not counted; the menu is reported,
             never answered."""
             last = time.time()
-            end, prev = last + secs, None
+            end, seen, idle_n = last + secs, False, 0
             while True:
-                time.sleep(RUN_POLL)
-                if not has_session(sess):
+                time.sleep(poll)
+                if not _run_alive(sess):
                     return "gone"
                 lines = ctx["last"] = pane(sess)
-                seen = set(ctx["base"])
-                new = [l for l in norm(lines) if l not in seen]
-                if any(LIMIT_HIT.match(re.sub(r"^[\s⎿●⏺│┃>❯›·✗⚠!*-]+", "", undetail(l))) for l in new[-12:]):
+                seen_lines = set(ctx["base"])
+                new = [l for l in lines if l.strip() and not echo(l) and l not in seen_lines]
+                if any(limit_banner(l) for l in new[-12:]):
                     resets.append(parse_reset("\n".join(new[-12:])))
                     return "limit"
                 st = pane_state(lines, quiet=True)
+                if agent_gone(st == "idle"):
+                    return "gone"
                 now = time.time()
                 if st == "waiting":
                     end += now - last
@@ -18972,13 +19019,18 @@ def _run_loop(a, mine, say, finish):
                 last = now
                 if now > end:
                     return "timeout"
-                if st == "idle" and lines == prev and (pre is None or norm(lines) != norm(pre)):
+                if pre is not None and (st == "busy" or lines != pre):
+                    seen = True
+                idle_n = idle_n + 1 if st == "idle" and (pre is None or seen) else 0
+                if idle_n >= 2:
                     return "ready"
-                prev = lines
 
         r = wait(RUN_START_WAIT)
         while r == "ready" and turns < a["max_turns"]:
             turns += 1
+            if agent_gone():
+                r = "gone"
+                break
             pre = ctx["base"] = pane(sess)
             ctx["inj"] = [t.strip()[:40] for t in text.split("\n") if t.strip()]
             if not inject(sess, text):
@@ -19002,17 +19054,20 @@ def _run_loop(a, mine, say, finish):
             break
         if r == "limit":
             say(f"{key}: usage limit hit")
+            why = "hit its usage limit"
         elif r == "gone":
             say(f"{key}: the agent exited. Its last output:")
             for l in [x for x in ctx["last"] if x.strip()][-8:]:
                 say("    " + l.rstrip())
+            why = "exited"
         else:
             say(f"{key}: no response in time, stopping it and moving on")
-            tmux("kill-session", "-t", sess + ":")     # ours; two agents must not share the tree
+            tmux("kill-session", "-t", f"={sess}")     # ours; two agents must not share the tree
+            why = "timed out"
         hpath, _ = teleport_packet(cfg, {}, None, None, was=key, last=text, cwd=cwd)
         if hpath:
             say(f"wrote {hpath}")
-        text = failover_brief(key, hpath, text)
+        text = failover_brief(key, hpath, text, why)
     if turns >= a["max_turns"]:
         say(f"max turns reached ({turns}), check still failing")
         finish(1)
