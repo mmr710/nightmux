@@ -15,7 +15,7 @@ from _h import ROOT, run
 FAKE_GIT = """#!/bin/sh
 echo "$@" >> "$GIT_LOG"
 case "$1 $2" in
-  "ls-remote --tags"*|"ls-remote "*) printf 'aaa\\trefs/tags/v9.9.9\\nbbb\\trefs/tags/v9.9.8\\n' ;;
+  "ls-remote --tags"*|"ls-remote "*) printf 'xxx\\trefs/tags/vps-test\\nyyy\\trefs/tags/v9.9.10-rc1\\naaa\\trefs/tags/v9.9.9\\nbbb\\trefs/tags/v9.9.8\\n' ;;
 esac
 for a in "$@"; do last="$a"; done
 [ "$1" = clone ] && mkdir -p "$last/.git"
