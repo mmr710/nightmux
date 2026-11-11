@@ -1277,7 +1277,7 @@ def tail_transcript(st, path, ladder=False, prices=None):
     return out
 
 
-def pane_state(lines):
+def pane_state(lines, quiet=False):
     """waiting | busy | idle, from the live screen only.
 
     Detail lines are excluded from the busy test on purpose: a backgrounded
@@ -1294,7 +1294,8 @@ def pane_state(lines):
     live = "\n".join(l for l in tail if not DETAIL.match(l))
     if BUSY.search(live): return "busy"
     if IDLE.search(live): return "idle"
-    print(f"pane_state unknown: {repr(tail)}", file=sys.stderr)
+    if not quiet:
+        print(f"pane_state unknown: {repr(tail)}", file=sys.stderr)
     return "unknown"
 
 
@@ -18831,8 +18832,14 @@ def demo_serve(port=8099):
 
 
 RUN_USAGE = """usage: nightmux run "<task>" [--until "<shell check>"] [--agents a,b] [--max-turns N]
+
+Usage-limit detection works for Claude Code only: its banners ("You've hit your ...")
+are the ones nightmux matches. Any other agent is failed over only when it exits or
+a turn takes longer than an hour.
 """
 RUN_TURN_WAIT = 3600   # hard stop for one turn, seconds
+RUN_START_WAIT = 120   # an agent's first prompt; time spent on a menu does not count
+RUN_POLL = float(os.environ.get("NIGHTMUX_RUN_POLL") or 1)   # seconds; tests shorten it
 
 
 def run_args(argv):
@@ -18846,7 +18853,8 @@ def run_args(argv):
     for x in it:
         if x in ("--until", "--agents", "--max-turns"):
             v = next(it, None)
-            if v is None:
+            if not v:
+                task = None
                 break
             if x == "--until":
                 a["until"] = v
@@ -18875,77 +18883,142 @@ def run_args(argv):
 
 def run_cli(argv):
     """`nightmux run`: drive an agent in tmux until the check passes. No bot, daemon or
-    config. Exits 0 check passed, 1 max turns, 2 usage, 3 no agent left."""
+    config. Exits 0 check passed, 1 max turns, 2 usage, 3 no agent left, 130 Ctrl-C.
+
+    The agent is the tmux session's own command, so the session ends when the agent
+    does and a vanished session means "agent exited". Nothing is typed into a pane
+    that has fallen back to a shell, because there is no shell to fall back to.
+    """
+    if "-h" in argv or "--help" in argv:
+        print(RUN_USAGE, end="")
+        sys.exit(0)
     a = run_args(argv)
+    if not shutil.which("tmux"):
+        print("nightmux run needs tmux, and it is not installed", file=sys.stderr)
+        sys.exit(2)
+    mine = []   # sessions this invocation created: the only ones it may kill
+    say = lambda m: print(m, flush=True)
+
+    def finish(code):
+        for s in mine:
+            if has_session(s):
+                say(f"session {s} is still running: tmux attach -t {s}   (stop it: tmux kill-session -t {s})")
+        sys.exit(code)
+
+    try:
+        _run_loop(a, mine, say, finish)
+    except KeyboardInterrupt:
+        say("interrupted")
+        for s in mine:
+            say(f"session {s}: tmux attach -t {s}   (stop it: tmux kill-session -t {s})")
+        sys.exit(130)
+
+
+def _run_loop(a, mine, say, finish):
     cfg, cwd = a["cfg"], os.getcwd()
     base = re.sub(r"[^\w-]", "-", os.path.basename(cwd)) or "run"
-    say = lambda m: print(m, flush=True)
     turns, text, resets = 0, a["task"], []
-    for n, key in enumerate(a["agents"]):
-        prog = agents(cfg)[key][0]
+    for key in a["agents"]:
+        if turns >= a["max_turns"]:
+            break
+        cmd = agents(cfg)[key][0]
+        try:
+            prog = shlex.split(cmd)[0]
+        except (ValueError, IndexError):
+            prog = cmd
         if not shutil.which(prog):
             say(f"{key}: {prog} is not installed, skipping")
             continue
-        sess = base if n == 0 and not has_session(base) else f"{base}-{key}"
-        if has_session(sess):
-            say(f"{key}: session {sess} already exists, skipping")
-            continue
-        spawn(sess, cwd, prog, cfg)
+        sess, i = base, 1       # never reuse a session run did not create
+        while has_session(sess):
+            i += 1
+            sess = f"{base}-{key}" + (f"-{i}" if i > 2 else "")
+        tmux("new-session", "-d", "-s", sess, "-c", cwd, cmd)
+        mine.append(sess)
+        _target[sess] = sess + ":"      # the session, never a window of the same name
         say(f"{key}: started in tmux session {sess}")
+        ctx = {"base": [], "inj": [], "last": [], "told": False}
 
-        def wait(want, secs):
-            """Poll the pane until its state is `want`; 'limit' on a usage banner, else
-            'timeout'. A waiting menu is reported, never answered."""
-            end, told = time.time() + secs, False
-            while time.time() < end:
-                lines = pane(sess)
-                hit = next((l for l in lines[-12:] if LIMIT_HIT.search(l)), None)
-                if hit:
-                    resets.append(parse_reset("\n".join(lines[-12:])))
+        def echo(l):
+            return any((len(t) >= 12 and t in l) or l.rstrip().endswith(t) for t in ctx["inj"])
+
+        def norm(lines):
+            return [l for l in lines if l.strip() and not echo(l)]
+
+        def wait(secs, pre=None):
+            """'ready' (idle and unchanged for two polls, and, with `pre`, the pane has
+            changed beyond the echoed input), 'limit', 'gone' (session ended) or
+            'timeout'. Time on a waiting menu is not counted; the menu is reported,
+            never answered."""
+            last = time.time()
+            end, prev = last + secs, None
+            while True:
+                time.sleep(RUN_POLL)
+                if not has_session(sess):
+                    return "gone"
+                lines = ctx["last"] = pane(sess)
+                seen = set(ctx["base"])
+                new = [l for l in norm(lines) if l not in seen]
+                if any(LIMIT_HIT.match(re.sub(r"^[\s⎿●⏺│┃>❯›·✗⚠!*-]+", "", undetail(l))) for l in new[-12:]):
+                    resets.append(parse_reset("\n".join(new[-12:])))
                     return "limit"
-                st = pane_state(lines)
-                if st == want:
-                    return st
-                if st == "waiting" and not told:
-                    told = True
-                    say(f"{key}: waiting on a prompt in the pane, answer it with: tmux attach -t {sess}")
-                time.sleep(1)
-            return "timeout"
+                st = pane_state(lines, quiet=True)
+                now = time.time()
+                if st == "waiting":
+                    end += now - last
+                    if not ctx["told"]:
+                        ctx["told"] = True
+                        say(f"{key}: waiting on a prompt in the pane, answer it with: tmux attach -t {sess}")
+                last = now
+                if now > end:
+                    return "timeout"
+                if st == "idle" and lines == prev and (pre is None or norm(lines) != norm(pre)):
+                    return "ready"
+                prev = lines
 
-        r = wait("idle", 120)
-        while r == "idle" and turns < a["max_turns"]:
+        r = wait(RUN_START_WAIT)
+        while r == "ready" and turns < a["max_turns"]:
             turns += 1
+            pre = ctx["base"] = pane(sess)
+            ctx["inj"] = [t.strip()[:40] for t in text.split("\n") if t.strip()]
             if not inject(sess, text):
-                r = "timeout"
+                r = "gone"
                 break
             say(f"{key}: turn {turns} sent")
-            r = wait("busy", 10)            # a fast agent may finish before it is seen busy
-            r = wait("idle", RUN_TURN_WAIT) if r in ("busy", "timeout") else r
-            if r != "idle":
+            r = wait(RUN_TURN_WAIT, pre)
+            if r != "ready":
                 break
             if not a["until"]:
-                say(f"✅ turn done (attach: tmux attach -t {sess})")
-                sys.exit(0)
+                say("✅ turn done")
+                finish(0)
             out = {}
             goal_check(a["until"], cwd, out)
             if out["rc"] == 0:
-                say(f"✅ {a['until']} passed after {turns} turn{'s' * (turns != 1)}"
-                    f" (attach: tmux attach -t {sess})")
-                sys.exit(0)
+                say(f"✅ {a['until']} passed after {turns} turn{'s' * (turns != 1)}")
+                finish(0)
             say(f"{key}: check failed (exit {out['rc']})")
             text = f"`{a['until']}` still fails (exit {out['rc']}):\n\n{goal_tail(out['out'])}"
-        if turns >= a["max_turns"] and r == "idle":
-            say(f"max turns reached ({turns}), check still failing (attach: tmux attach -t {sess})")
-            sys.exit(1)
+        if turns >= a["max_turns"]:
+            break
         if r == "limit":
             say(f"{key}: usage limit hit")
-            hpath, _ = teleport_packet(cfg, {}, None, None, was=key, last=text, cwd=cwd)
-            text = failover_brief(key, hpath, text)
+        elif r == "gone":
+            say(f"{key}: the agent exited. Its last output:")
+            for l in [x for x in ctx["last"] if x.strip()][-8:]:
+                say("    " + l.rstrip())
         else:
-            say(f"{key}: no response in time, moving on")
-    at = next((t for t in resets if t), None)
+            say(f"{key}: no response in time, stopping it and moving on")
+            tmux("kill-session", "-t", sess + ":")     # ours; two agents must not share the tree
+        hpath, _ = teleport_packet(cfg, {}, None, None, was=key, last=text, cwd=cwd)
+        if hpath:
+            say(f"wrote {hpath}")
+        text = failover_brief(key, hpath, text)
+    if turns >= a["max_turns"]:
+        say(f"max turns reached ({turns}), check still failing")
+        finish(1)
+    at = min((t for t in resets if t), default=None)
     say("no agent left" + (f", the first limit resets at {clock(cfg, at)}" if at else ""))
-    sys.exit(3)
+    finish(3)
 
 
 USAGE = """usage: nightmux [command | option]
