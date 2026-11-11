@@ -9116,8 +9116,11 @@ def wrapped_cli(args, out="."):
     """`nightmux wrapped [days]`: Wrapped from this machine's agent transcripts alone —
     no bot, daemon or config. Prints a summary and writes two cards into `out` (a PNG
     each when Chromium is around, else a web page). Nothing is uploaded."""
-    if len(args) > 1 or (args and not (args[0].isascii() and args[0].isdigit() and 0 < int(args[0]) <= 365)):
-        print("usage: nightmux wrapped [days]    (1 to 365, default 30)", file=sys.stderr)
+    flags = [a for a in args if a.startswith("--")]
+    args = [a for a in args if not a.startswith("--")]
+    if (len(args) > 1 or set(flags) - {"--json", "--projects"}
+            or (args and not (args[0].isascii() and args[0].isdigit() and 0 < int(args[0]) <= 365))):
+        print("usage: nightmux wrapped [days] [--json] [--projects]    (1 to 365, default 30)", file=sys.stderr)
         sys.exit(2)
     days = int(args[0]) if args else 30
     try:
@@ -9130,6 +9133,16 @@ def wrapped_cli(args, out="."):
         sys.exit(f"no agent transcripts found for the last {days} days (looked for Claude Code, "
                  "Codex, OpenCode and Antigravity in your home folder)")
     c = w["cost"]
+    if "--json" in flags:
+        j = {"days": days, "version": VERSION, "tokens": w["used"], "prompts": w["prompts"],
+             "usd": round(c["total"], 2), "unpriced_tokens": sum(c["left_out"].values()),
+             # usd is None, not 0, for an agent with no list price: unknown is not free
+             "agents": {a: {"tokens": n, "usd": round(c["agents"][a], 2) if a in c["agents"] else None}
+                        for a, n, _ in w["split"]}}
+        if "--projects" in flags:  # top six, by prompt count
+            j["projects"] = [{"name": p, "prompts": n} for p, n in w["projects"]]
+        print(json.dumps(j))
+        return
     print(f"\n🌙 nightmux wrapped · last {days} days · {' · '.join(w['agents'])}\n\n"
           f"  {_usd(c['total'])} at API list prices · {_k(w['used'])} tokens · "
           f"{w['prompts']} prompts\n")
@@ -18839,6 +18852,7 @@ USAGE = """usage: nightmux [command | option]
   (none)               run the daemon; what the service starts
   up                   first run, no bot needed: the dashboard, and how a phone reaches it
   wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
+                       (--json for the numbers alone, --projects adds project names)
   handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
   --setup              first run: bot token, group, hooks, service
   --doctor             find what is wrong with this install
