@@ -19,10 +19,18 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
+url=https://github.com/mmr710/nightmux
+# Releases, not whatever main is today; NIGHTMUX_REF overrides (e.g. main).
+ref="${NIGHTMUX_REF:-$(git ls-remote --tags --sort=-v:refname "$url" 'v*' | grep -E 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's|.*refs/tags/||')}"
+if [ -z "$ref" ]; then
+  echo "could not read release tags; installing main (set NIGHTMUX_REF to choose)" >&2
+  ref=main
+fi
 if [ -d "$HOME/nightmux/.git" ]; then
-  git -C "$HOME/nightmux" pull -q
+  git -C "$HOME/nightmux" fetch -q --tags origin "$ref"
+  git -C "$HOME/nightmux" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
 else
-  git clone -q https://github.com/mmr710/nightmux "$HOME/nightmux"
+  git clone -q -c advice.detachedHead=false --branch "$ref" "$url" "$HOME/nightmux"
 fi
 
 # Piped from curl, stdin is the script itself: setup asks questions, so it

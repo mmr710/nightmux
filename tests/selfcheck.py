@@ -3590,6 +3590,8 @@ def selfcheck():
         ch_, msg_ = self_upgrade(wk_)
         assert not ch_ and "does not compile" in msg_, msg_
         assert open(os.path.join(wk_, "nightmux.py")).read() == "x = 2\n"
+    assert latest_release_tag(["v1.9.0", "v1.10.0", "v1.11.0-rc1", "vps-test", "v1.10"]) == "v1.10.0"
+    assert latest_release_tag(["vps-test", "v2-rc"]) is None
     usaid_, ure_ = [], []
     with stubbed(self_upgrade=lambda: (True, "a → b"), restart_self=lambda: ure_.append(1),
                  peer_call=lambda c, n, p, b=None, timeout=10: {"msg": "1.3 → 1.4 · restarting"} if n == "box" else None,
