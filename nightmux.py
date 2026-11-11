@@ -9169,7 +9169,7 @@ def wrapped_cli(args, out="."):
     if c["left_out"]:
         print("\n  no list price known, so not counted: " + " · ".join(
             f"{m} {_k(n)}" for m, n in sorted(c["left_out"].items(), key=lambda kv: -kv[1])[:5])
-            + f"\n  ('prices' in {CFG_PATH} adds more; README has the shape)")
+            + f"\n  ('prices' in {CFG_PATH} adds more; docs/GUIDE.md has the shape)")
     b = browser_bin(cfg)
     os.makedirs(out, exist_ok=True)
     made = []
