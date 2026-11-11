@@ -48,6 +48,11 @@ jobs:
         run: |
           python tests/test_office.py
 
+      # install.sh installs the newest release tag; the test drives it with a fake git.
+      - name: install script
+        if: matrix.python == '3.12'
+        run: python tests/acceptance/test_install.py
+
       # The pitch is "clone and run, no dependencies". A stray import should fail
       # here rather than in somebody's install. One version is enough to catch it.
       - name: stdlib only
