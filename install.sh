@@ -19,10 +19,15 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
+url=https://github.com/mmr710/nightmux
+# Releases, not whatever main is today; NIGHTMUX_REF overrides (e.g. main).
+ref="${NIGHTMUX_REF:-$(git ls-remote --tags --sort=-v:refname "$url" 'v*' | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/||')}"
+ref="${ref:-main}"
 if [ -d "$HOME/nightmux/.git" ]; then
-  git -C "$HOME/nightmux" pull -q
+  git -C "$HOME/nightmux" fetch -q --tags origin
+  git -C "$HOME/nightmux" checkout -q "$ref"
 else
-  git clone -q https://github.com/mmr710/nightmux "$HOME/nightmux"
+  git clone -q --branch "$ref" "$url" "$HOME/nightmux"
 fi
 
 # Piped from curl, stdin is the script itself: setup asks questions, so it
