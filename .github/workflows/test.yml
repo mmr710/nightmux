@@ -40,6 +40,14 @@ jobs:
       - name: pane corpus
         run: python tests/test_panes.py
 
+      - name: acceptance run
+        if: matrix.python == '3.12'
+        run: python tests/acceptance/test_run_cli.py
+
+      - name: run command
+        if: matrix.python == '3.12'
+        run: python tests/test_run.py
+
       - name: acceptance wrapped --json
         if: matrix.python == '3.12'
         run: python tests/acceptance/test_wrapped_json.py
