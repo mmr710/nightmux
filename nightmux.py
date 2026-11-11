@@ -1983,6 +1983,15 @@ def handoff_cli(args):
         sys.exit(f"could not start {binary}: {e}")
 
 
+def failover_brief(was, hpath, last):
+    """What the next agent is told when the last one hit its usage limit."""
+    return (f"{was} was working in this directory and hit its usage limit "
+            "mid-task. Look at the working tree (git status, git diff)"
+            + (" and .nightmux/HANDOFF.md" if hpath else "")
+            + " to see how far it got, then carry on."
+            + (f"\n\nIts last instruction was:\n{last}" if last else ""))
+
+
 def failover(cfg, state, lock, topic, key):
     """!failover <agent>: hand a limit-held topic's work to another agent now,
     instead of waiting hours for the window to reset.
@@ -2013,11 +2022,7 @@ def failover(cfg, state, lock, topic, key):
     # the turn; the brief replaces it. A refused prompt was queued as itself and
     # rides along as real work.
     rest = [p for p in held if p != cfg.get("auto_continue", "continue")]
-    brief = (f"{was} was working in this directory and hit its usage limit "
-             "mid-task. Look at the working tree (git status, git diff)"
-             + (" and .nightmux/HANDOFF.md" if hpath else "")
-             + " to see how far it got, then carry on."
-             + (f"\n\nIts last instruction was:\n{last}" if last and last not in rest else ""))
+    brief = failover_brief(was, hpath, last if last and last not in rest else None)
     state.setdefault(new, {}).setdefault("queue", []).extend([brief] + rest)
     save_queue(state)
     return (f"{out}\n⏭ {was} is on hold until {clock(cfg, st['limit_until'])} — "
@@ -18825,11 +18830,130 @@ def demo_serve(port=8099):
         pass
 
 
+RUN_USAGE = """usage: nightmux run "<task>" [--until "<shell check>"] [--agents a,b] [--max-turns N]
+"""
+RUN_TURN_WAIT = 3600   # hard stop for one turn, seconds
+
+
+def run_args(argv):
+    """Parse `nightmux run` arguments; usage to stderr and exit 2 on bad input."""
+    try:
+        cfg = load_cfg()
+    except (OSError, ValueError):
+        cfg = {}
+    a, task = {"until": None, "agents": None, "max_turns": 20}, []
+    it = iter(argv)
+    for x in it:
+        if x in ("--until", "--agents", "--max-turns"):
+            v = next(it, None)
+            if v is None:
+                break
+            if x == "--until":
+                a["until"] = v
+            elif x == "--agents":
+                a["agents"] = [k for k in v.split(",") if k]
+            elif v.isdigit() and int(v) > 0:
+                a["max_turns"] = int(v)
+            else:
+                task = None
+                break
+        elif x.startswith("--") or task is None or task:
+            task = None
+            break
+        else:
+            task.append(x)
+    known = agents(cfg)
+    if a["agents"] is None:
+        have = installed_agents(cfg)
+        a["agents"] = sorted(have, key=lambda k: k != "claude") or ["claude"]
+    if not task or not a["agents"] or any(k not in known for k in a["agents"]):
+        print(RUN_USAGE, end="", file=sys.stderr)
+        sys.exit(2)
+    a["task"], a["cfg"] = task[0], cfg
+    return a
+
+
+def run_cli(argv):
+    """`nightmux run`: drive an agent in tmux until the check passes. No bot, daemon or
+    config. Exits 0 check passed, 1 max turns, 2 usage, 3 no agent left."""
+    a = run_args(argv)
+    cfg, cwd = a["cfg"], os.getcwd()
+    base = re.sub(r"[^\w-]", "-", os.path.basename(cwd)) or "run"
+    say = lambda m: print(m, flush=True)
+    turns, text, resets = 0, a["task"], []
+    for n, key in enumerate(a["agents"]):
+        prog = agents(cfg)[key][0]
+        if not shutil.which(prog):
+            say(f"{key}: {prog} is not installed, skipping")
+            continue
+        sess = base if n == 0 and not has_session(base) else f"{base}-{key}"
+        if has_session(sess):
+            say(f"{key}: session {sess} already exists, skipping")
+            continue
+        spawn(sess, cwd, prog, cfg)
+        say(f"{key}: started in tmux session {sess}")
+
+        def wait(want, secs):
+            """Poll the pane until its state is `want`; 'limit' on a usage banner, else
+            'timeout'. A waiting menu is reported, never answered."""
+            end, told = time.time() + secs, False
+            while time.time() < end:
+                lines = pane(sess)
+                hit = next((l for l in lines[-12:] if LIMIT_HIT.search(l)), None)
+                if hit:
+                    resets.append(parse_reset("\n".join(lines[-12:])))
+                    return "limit"
+                st = pane_state(lines)
+                if st == want:
+                    return st
+                if st == "waiting" and not told:
+                    told = True
+                    say(f"{key}: waiting on a prompt in the pane, answer it with: tmux attach -t {sess}")
+                time.sleep(1)
+            return "timeout"
+
+        r = wait("idle", 120)
+        while r == "idle" and turns < a["max_turns"]:
+            turns += 1
+            if not inject(sess, text):
+                r = "timeout"
+                break
+            say(f"{key}: turn {turns} sent")
+            r = wait("busy", 10)            # a fast agent may finish before it is seen busy
+            r = wait("idle", RUN_TURN_WAIT) if r in ("busy", "timeout") else r
+            if r != "idle":
+                break
+            if not a["until"]:
+                say(f"✅ turn done (attach: tmux attach -t {sess})")
+                sys.exit(0)
+            out = {}
+            goal_check(a["until"], cwd, out)
+            if out["rc"] == 0:
+                say(f"✅ {a['until']} passed after {turns} turn{'s' * (turns != 1)}"
+                    f" (attach: tmux attach -t {sess})")
+                sys.exit(0)
+            say(f"{key}: check failed (exit {out['rc']})")
+            text = f"`{a['until']}` still fails (exit {out['rc']}):\n\n{goal_tail(out['out'])}"
+        if turns >= a["max_turns"] and r == "idle":
+            say(f"max turns reached ({turns}), check still failing (attach: tmux attach -t {sess})")
+            sys.exit(1)
+        if r == "limit":
+            say(f"{key}: usage limit hit")
+            hpath, _ = teleport_packet(cfg, {}, None, None, was=key, last=text, cwd=cwd)
+            text = failover_brief(key, hpath, text)
+        else:
+            say(f"{key}: no response in time, moving on")
+    at = next((t for t in resets if t), None)
+    say("no agent left" + (f", the first limit resets at {clock(cfg, at)}" if at else ""))
+    sys.exit(3)
+
+
 USAGE = """usage: nightmux [command | option]
 
   (none)               run the daemon; what the service starts
   up                   first run, no bot needed: the dashboard, and how a phone reaches it
   wrapped [days]       what your agents did, as a card and a dollar figure; no bot, no keys
+  run "<task>"         drive an agent until --until passes, failing over on a limit; no bot, no keys
   handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
   --setup              first run: bot token, group, hooks, service
   --doctor             find what is wrong with this install
@@ -18849,6 +18973,8 @@ def cli():
     """Entry point for both `python3 nightmux.py` and the installed `nightmux`."""
     if sys.argv[1:2] == ["handoff"]:   # free text follows: keep it from the flag checks below
         handoff_cli(sys.argv[2:])
+    elif sys.argv[1:2] == ["run"]:
+        run_cli(sys.argv[2:])
     elif "-h" in sys.argv or "--help" in sys.argv:
         print(USAGE, end="")
     elif "--selfcheck" in sys.argv:

@@ -40,6 +40,10 @@ jobs:
       - name: pane corpus
         run: python tests/test_panes.py
 
+      - name: acceptance run
+        if: matrix.python == '3.12'
+        run: python tests/acceptance/test_run_cli.py
+
       # The 3D office is a renderer inside a Python string: nothing else notices
       # when a desk state it cannot draw blanks the page. One version is enough; the
       # runner image ships google-chrome.
