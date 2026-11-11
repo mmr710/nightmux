@@ -6,10 +6,17 @@ names and the shape of `~/.nightmux.json` — those are what a major bump protec
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-11-11
+
 ### Added
+- `nightmux run "<task>" --until "<check>"`: one task from a terminal with no bot, daemon or config. Starts the first installed agent in tmux, runs your check after every turn and feeds failures back, and hands the work to the next agent on a Claude Code usage limit, an exit, or a turn over an hour. `--agents` and `--max-turns` tune it. Exits 0 passed, 1 max turns, 2 bad arguments or no tmux, 3 no agent left.
+- `nightmux wrapped [days] --json [--projects]`: the totals as one JSON object (tokens, prompts, dollars at API list prices, per agent) for scripts and badges. An agent with no list price shows `null` dollars and its tokens count as unpriced. `--projects` adds the top six projects by prompt count and is off by default so project names do not leak into shared output.
 - `!kanban` and a `/board` page: every topic (on every server) as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline. Derived from live state, nothing to maintain.
 - `!review` and a `/review/<topic>` page: what the agent changed against main, per file, with the PR's checks.
 - `!sandbox on|off` (or `--nm-sandbox` on a new session): the agent runs in a Docker container that sees only its folder and its own login files, with every capability dropped. Build the image with `docker build -t nightmux-agent -f docker/agent.Dockerfile docker`.
+
+### Changed
+- `install.sh` installs and upgrades to the newest release tag (`vX.Y.Z`) instead of main, and says so when it falls back to main. `NIGHTMUX_REF` overrides the ref, and an upgrade of a detached checkout moves to the newest tag too.
 
 ## [1.5.0] — 2026-10-22
 
