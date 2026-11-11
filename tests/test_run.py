@@ -274,7 +274,7 @@ def test_survivor_is_named_with_attach_and_kill():
     home, work = setup(a=GOOD)
     r = go(home, work, "do the thing", "--agents", "a")
     assert r.returncode == 0, out(r)
-    assert "tmux attach -t proj" in r.stdout and "tmux kill-session -t proj" in r.stdout, out(r)
+    assert "tmux attach -t =proj" in r.stdout and "tmux kill-session -t =proj" in r.stdout, out(r)
 
 
 if __name__ == "__main__":

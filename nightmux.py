@@ -18904,7 +18904,7 @@ def run_cli(argv):
         print("nightmux run needs tmux, and it is not installed", file=sys.stderr)
         sys.exit(2)
     try:
-        a["poll"] = max(0.1, float(os.environ.get("NIGHTMUX_RUN_POLL") or 1))
+        a["poll"] = min(60, max(0.1, float(os.environ.get("NIGHTMUX_RUN_POLL") or 1)))
     except ValueError:
         a["poll"] = 1.0
     mine = []   # sessions this invocation created: the only ones it may kill
@@ -18913,7 +18913,7 @@ def run_cli(argv):
     def finish(code):
         for s in mine:
             if _run_alive(s):
-                say(f"session {s} is still running: tmux attach -t {s}   (stop it: tmux kill-session -t {s})")
+                say(f"session {s} is still running: tmux attach -t ={s}   (stop it: tmux kill-session -t ={s})")
         sys.exit(code)
 
     try:
@@ -18921,7 +18921,8 @@ def run_cli(argv):
     except KeyboardInterrupt:
         say("interrupted")
         for s in mine:
-            say(f"session {s}: tmux attach -t {s}   (stop it: tmux kill-session -t {s})")
+            if _run_alive(s):
+                say(f"session {s}: tmux attach -t ={s}   (stop it: tmux kill-session -t ={s})")
         sys.exit(130)
 
 
@@ -18946,7 +18947,8 @@ def _run_loop(a, mine, say, finish):
         while _run_alive(sess):
             i += 1
             sess = f"{base}-{key}" + (f"-{i}" if i > 2 else "")
-        box = sandboxed(cfg, sess)
+        # base too: sandbox names are the daemon's, and run may have had to pick <base>-<agent>
+        box = sandboxed(cfg, base) or sandboxed(cfg, sess)
         try:
             prog = "docker" if box else shlex.split(cmd)[0]
         except (ValueError, IndexError):
@@ -18960,12 +18962,16 @@ def _run_loop(a, mine, say, finish):
             env = ["-e", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d" % max(NATIVE_MIN, tok_at)]
         if box:
             cmd = sandbox_cmd(cfg, sess, cwd, cmd)
-        at = f"={sess}:"
         # remain-on-exit off: an exited agent must end the session, whatever tmux.conf says
-        tmux("new-session", "-d", "-s", sess, "-c", cwd, *env, cmd,
-             ";", "set-option", "-w", "-t", at, "remain-on-exit", "off")
+        at = (tmux_out("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", sess, "-c", cwd, *env, cmd,
+                       ";", "set-option", "-w", "-t", f"={sess}:", "remain-on-exit", "off") or "").strip()
+        if not re.fullmatch(r"%\d+", at):
+            say(f"{key}: tmux could not start session {sess}, skipping")
+            continue
         mine.append(sess)
-        _target[sess] = at      # exact session; pane()/inject()/settle() all go through tgt()
+        # The agent's own pane id, not the session: if the user attaches and splits or
+        # opens a window, `=sess:` would follow them. pane()/inject()/settle() use tgt().
+        _target[sess] = at
         say(f"{key}: started in tmux session {sess}")
         ctx = {"base": [], "inj": [], "last": [], "told": False, "cmd": None}
 
@@ -19015,7 +19021,7 @@ def _run_loop(a, mine, say, finish):
                     end += now - last
                     if not ctx["told"]:
                         ctx["told"] = True
-                        say(f"{key}: waiting on a prompt in the pane, answer it with: tmux attach -t {sess}")
+                        say(f"{key}: waiting on a prompt in the pane, answer it with: tmux attach -t ={sess}")
                 last = now
                 if now > end:
                     return "timeout"
@@ -19059,6 +19065,8 @@ def _run_loop(a, mine, say, finish):
             say(f"{key}: the agent exited. Its last output:")
             for l in [x for x in ctx["last"] if x.strip()][-8:]:
                 say("    " + l.rstrip())
+            if _run_alive(sess):     # a shell left behind, or a false alarm: either way
+                tmux("kill-session", "-t", f"={sess}")     # two agents must not share the tree
             why = "exited"
         else:
             say(f"{key}: no response in time, stopping it and moving on")
