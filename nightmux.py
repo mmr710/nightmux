@@ -13388,11 +13388,18 @@ def version_report():
 _upgrading = threading.Lock()
 
 
+def latest_release_tag(tags):
+    """Highest plain release (v1.2.3) among tags, or None: no rc, no vps-test."""
+    ok = [(tuple(map(int, m.groups())), t) for t in tags
+          for m in [re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", t)] if m]
+    return max(ok)[1] if ok else None
+
+
 def self_upgrade(here=None):
     """Update nightmux's own code in place: (changed, what happened).
 
-    A git checkout fast-forwards (or, detached, moves to origin's default
-    branch) and refuses over local edits; a pip or pipx install upgrades the
+    A git checkout fast-forwards (or, detached, moves to the newest release tag,
+    else origin's default branch) and refuses over local edits; a pip or pipx install upgrades the
     package. New code that does not compile is rolled back. The caller restarts.
     """
     here = here or HERE
@@ -13410,11 +13417,13 @@ def self_upgrade(here=None):
         if rc or dirty:
             return False, f"local edits in {here} — commit or stash them first"
         old = g("rev-parse", "--short", "HEAD")[1]
-        rc, out = g("fetch", "-q", "origin")
+        rc, out = g("fetch", "-q", "--tags", "origin")
         if rc:
             return False, "git fetch failed: " + out[-300:]
         if g("symbolic-ref", "-q", "HEAD")[0] == 0:
             rc, out = g("merge", "-q", "--ff-only", "@{u}")
+        elif tag := latest_release_tag(g("tag", "-l", "v*")[1].split()):
+            rc, out = g("checkout", "-q", "--detach", tag)
         else:
             to = "origin/HEAD" if g("rev-parse", "-q", "--verify", "origin/HEAD")[0] == 0 else "origin/main"
             rc, out = g("checkout", "-q", "--detach", to)
