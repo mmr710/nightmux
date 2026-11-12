@@ -61,16 +61,16 @@ footer{color:var(--dim);padding:30px 0 50px;font-size:14px;border-top:1px solid 
 footer a{color:var(--dim)}
 </style></head><body><div class="wrap">
 <nav><b>🌙 night<span>mux</span></b><span class="sp"></span>
-<a href="#video">video</a><a href="office.html?demo">live demo</a><a href="leaderboard.html">leaderboard</a><a href="https://github.com/mmr710/nightmux/blob/main/docs/GUIDE.md">guide</a><a href="https://github.com/mmr710/nightmux/blob/main/docs/COMMANDS.md">commands</a><a href="https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk">android</a>
+<a href="#video">video</a><a href="office.html?demo">live demo</a><a href="leaderboard.html">leaderboard</a><a href="https://github.com/mmr710/nightmux/blob/main/docs/COMPARE.md">compare</a><a href="https://github.com/mmr710/nightmux/blob/main/docs/GUIDE.md">guide</a><a href="https://github.com/mmr710/nightmux/blob/main/docs/COMMANDS.md">commands</a><a href="https://github.com/mmr710/nightmux/releases/latest/download/nightmux.apk">android</a>
 <a class="btn go" href="https://github.com/mmr710/nightmux">★ Star on GitHub</a></nav>
 
-<h1>Your AI coding agents keep working <em>while you sleep</em>.</h1>
-<p class="lead">Drive <b>Claude Code, Codex, Gemini, agy, opencode, Cursor, Amp, Goose, Qwen Code</b> and <b>aider</b>
-from your phone. Usage limit at 2 AM? Your queue waits and resumes the moment the window resets,
-or hands the work to another agent. You wake up to a briefing.</p>
+<h1>Run Claude, Codex &amp; Gemini overnight — <em>until your tests pass</em>.</h1>
+<p class="lead">When one agent hits its usage limit at 2 AM, another takes over with a handoff brief. Run one task from your terminal right now with zero setup, or run the daemon to drive every project from your phone.</p>
+<div class="install" style="margin:24px 0 10px"><pre id="run-cmd">uvx nightmux run "fix the failing tests" --until "npm test"</pre><button class="btn" id="copy-run" type="button">Copy</button></div>
+<p class="note" style="margin:0 2px 20px">Zero config · needs only <code>tmux</code> and an agent CLI · see what your agents cost first: <code>uvx nightmux wrapped</code></p>
 <div class="row"><a class="btn go" href="https://github.com/mmr710/nightmux">★ Star on GitHub</a>
-<a class="btn" href="#install">Install in one line</a>
-<a class="btn" href="office.html?demo">▶ Live demo</a></div>
+<a class="btn" href="#install">Phone &amp; daemon setup</a>
+<a class="btn" href="office.html?demo">▶ Live office demo</a></div>
 
 <div class="video" id="video"><video src="promo.mp4" poster="promo.jpg" controls autoplay muted loop playsinline preload="metadata"
 aria-label="48-second video: an agent hits its usage limit at 2:14 AM, nightmux holds the queue, hands the work to codex, asks for one approval on the phone, resumes claude at 04:11 and sends a morning briefing"></video></div>
@@ -100,6 +100,9 @@ aria-label="48-second video: an agent hits its usage limit at 2:14 AM, nightmux 
 <h2 id="install">Install</h2>
 <div class="install"><pre id="cmd">curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | sh</pre><button class="btn" id="copy" type="button">Copy</button></div>
 <ul class="more">
+<li>One task in one terminal (no bot, no daemon): <code>uvx nightmux run "fix the failing tests" --until "npm test"</code></li>
+<li>30-day multi-agent token &amp; API-list cost report + share cards: <code>uvx nightmux wrapped</code> (or <code>--json</code>)</li>
+<li>Hand a repo's work to another agent mid-session: <code>uvx nightmux handoff codex</code></li>
 <li>Just looking? <code>python3 nightmux.py --demo</code> — no bot, no keys.</li>
 <li>No Telegram? <code>nightmux up</code> starts the dashboard on <code>127.0.0.1</code>; a bot can be added later.</li>
 <li>Docker: <code>docker run -it -v ~/code:/code -p 127.0.0.1:9090:9090 ghcr.io/mmr710/nightmux</code></li>
@@ -112,14 +115,17 @@ aria-label="48-second video: an agent hits its usage limit at 2:14 AM, nightmux 
 
 <footer>MIT · self-hosted · Python stdlib only ·
 <a href="https://github.com/mmr710/nightmux">github.com/mmr710/nightmux</a> ·
+<a href="https://github.com/mmr710/nightmux/blob/main/docs/COMPARE.md">How it compares</a> ·
 <a href="https://t.me/+SGmmExdMHTQ3OWVk">Telegram community</a></footer>
 </div>
 <script>
-document.getElementById("copy").onclick = function () {
-  var b = this;
-  navigator.clipboard.writeText(document.getElementById("cmd").textContent).then(function () {
-    b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500);
-  });
-};
+["", "-run"].forEach(function (s) {
+  var btn = document.getElementById("copy" + s), pre = document.getElementById((s ? "run-" : "") + "cmd");
+  if (btn && pre) btn.onclick = function () {
+    navigator.clipboard.writeText(pre.textContent).then(function () {
+      btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    });
+  };
+});
 </script>
 </body></html>
