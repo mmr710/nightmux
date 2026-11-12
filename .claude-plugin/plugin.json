@@ -1,7 +1,7 @@
 {
   "name": "nightmux",
   "version": "1.6.0",
-  "description": "See what your coding agents cost at API list prices, and hand a repo's work to Codex, Gemini CLI or another agent with a brief when Claude Code nears its usage limit. The nightmux daemon adds phone control and resuming past limits.",
+  "description": "See what your coding agents cost at API list prices, hand a repo's work to Codex, Gemini CLI or another agent with a brief when Claude Code nears its usage limit, or run tasks until your tests pass (`nightmux run`). The daemon adds phone control and resuming past limits.",
   "author": {
     "name": "Mohamed Raslan"
   },

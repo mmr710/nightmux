@@ -797,9 +797,9 @@ The sections below are the long README as it was before it was cut to one pitch 
 2. Create the bot: scan the QR it prints (quickest; the new token passes through the maintainer's [onboarding relay](https://github.com/mmr710/nightmux/blob/main/SECURITY.md#the-qr-onboarding-relay)), or press Enter and paste a token from [@BotFather](https://t.me/BotFather) (nothing leaves your machine). No token at all runs dashboard-only.
 3. In a topic (or **+ project** on the dashboard): `!new myproj ~/code/myproj`, then just type. Or hand it the whole thing: `!po a habit tracker with streaks`, tap ✅, go to bed.
 
-No install? `uvx --from git+https://github.com/mmr710/nightmux nightmux --setup` (or `pipx run --spec git+https://github.com/mmr710/nightmux nightmux --setup`).
+No install? `uvx nightmux --setup` (or `pipx run nightmux --setup`).
 
-No Telegram, or want to look first? `nightmux up` (or `uvx --from git+https://github.com/mmr710/nightmux nightmux up`) checks for tmux, starts the dashboard at http://127.0.0.1:9090 and opens it; **+ project** there starts an agent. It opens nothing to your Wi-Fi or the internet, so a phone needs a route: with [Tailscale](https://tailscale.com) on both devices, run `tailscale serve --bg 9090`, then **+ Pair phone** on the dashboard shows the QR. A bot can be added later with `nightmux --setup`.
+No Telegram, or want to look first? `nightmux up` (or `uvx nightmux up`) checks for tmux, starts the dashboard at http://127.0.0.1:9090 and opens it; **+ project** there starts an agent. It opens nothing to your Wi-Fi or the internet, so a phone needs a route: with [Tailscale](https://tailscale.com) on both devices, run `tailscale serve --bg 9090`, then **+ Pair phone** on the dashboard shows the QR. A bot can be added later with `nightmux --setup`.
 
 Just looking? `python3 nightmux.py --demo` and open http://127.0.0.1:8099/office — no bot, no keys.
 Docker, a fresh VPS and the rest: [Install →](#install)
@@ -882,34 +882,21 @@ The [guide](https://github.com/mmr710/nightmux/blob/main/docs/GUIDE.md) walks th
 
 ### Agents
 
-Any agent that runs in a terminal works: nightmux types into its tmux pane and reads the screen back. What it reads beyond the prompt and the reply depends on the agent:
+Any agent that runs in a terminal works: nightmux types into its tmux pane and reads the screen back. The [agent table in the README](../README.md#agents) lists which dialogs, usage windows and token logs nightmux reads for each agent, and which agents the [nightly drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml) starts in CI.
 
-| Agent | Dialogs it turns into buttons | Usage windows | Tokens and cost | Started every night in CI |
-|---|---|---|---|---|
-| Claude Code | permissions, menus, folder trust | 5-hour and weekly | ✓ | ✓ |
-| Codex | menus | 5-hour and weekly | ✓ | ✓ |
-| agy | permissions | ✓ | ✓ | – |
-| OpenCode | questions | – | ✓ | ✓ |
-| Gemini CLI | folder trust | – | – | ✓ |
-| Aider | (Y)es/(N)o questions | – | – | ✓ |
-| Qwen Code | not yet | – | – | ✓ |
-| Cursor, Amp, Goose | not tested | – | – | – |
-
-Claude Code also gets hooks, so its replies and permission prompts arrive the moment they happen; the others' are read off the screen. Every agent's queue waits out a usage-limit message nightmux recognises and resumes at the reset it states. The tests cover Claude Code's limit messages and the capacity errors of Gemini models; another agent's wording may need adding.
-
-The last column is the [drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml). Every night it installs the newest release of each agent, starts it in tmux from an empty home folder and checks how nightmux reads its first screen; each run's summary lists the versions. If a new release reads differently on your machine, an issue with a screenshot is the fastest fix.
+Claude Code also gets hooks, so its replies and permission prompts arrive the moment they happen; the others' are read off the screen. Every agent's queue waits out a usage-limit message nightmux recognises and resumes at the reset it states. The tests cover Claude Code's limit messages and the capacity errors of Gemini models; another agent's wording may need adding. If a new release reads differently on your machine, an issue with a screenshot is the fastest fix.
 
 ### Two tools that need nothing running
 
 #### What did your agents cost?
 
-`uvx --from git+https://github.com/mmr710/nightmux nightmux wrapped` (or `python3 nightmux.py wrapped` in a clone) reads the logs Claude Code, Codex, OpenCode and Antigravity already keep in your home folder, and prints what the last 30 days would have cost at API list prices (`wrapped 7` for a week). No bot, no keys, no daemon. It also draws two cards: one with your project names, to keep, and one with counts only, safe to post. Nothing is uploaded.
+`uvx nightmux wrapped` (or `python3 nightmux.py wrapped` in a clone) reads the logs Claude Code, Codex, OpenCode and Antigravity already keep in your home folder, and prints what the last 30 days would have cost at API list prices (`wrapped 7` for a week; `wrapped --json` for machine-readable output, and `--projects` to include top project names in JSON). No bot, no keys, no daemon. It also draws two cards: one with your project names, to keep, and one with counts only, safe to post. Nothing is uploaded.
 
 The dollar figure is the same tokens at the providers' public list prices, dated in the output. A subscription bills differently, so read it as a size, not an invoice. A model with no price in the table is named and left out, never counted as free; `"prices": {"my-model": [input, output, cache read, cache write]}` in `~/.nightmux.json` (dollars per million tokens; the last two are optional) adds a model or overrides a built-in one. The PNG needs Chromium, otherwise you get a web page to screenshot. Drawing a card fetches the Inter and JetBrains Mono fonts from Google Fonts; none of your numbers are in that request.
 
 #### Hit a limit mid-task?
 
-`nightmux handoff codex`, run in the repo from any terminal, writes what the last Claude Code or Codex conversation there left behind to `.nightmux/HANDOFF.md` and starts Codex on it: the instruction that was cut off, its last actions and notes, `git status`, the diffstat and the recent commits. The file stays out of `git status` (it goes in `.git/info/exclude`). Say what comes next after the agent's name: `nightmux handoff gemini "finish the tests"`. With no agent it only writes the file and shows it. No install: `uvx --from git+https://github.com/mmr710/nightmux nightmux handoff codex`.
+`nightmux handoff codex`, run in the repo from any terminal, writes what the last Claude Code or Codex conversation there left behind to `.nightmux/HANDOFF.md` and starts Codex on it: the instruction that was cut off, its last actions and notes, `git status`, the diffstat and the recent commits. The file stays out of `git status` (it goes in `.git/info/exclude`). Say what comes next after the agent's name: `nightmux handoff gemini "finish the tests"`. With no agent it only writes the file and shows it. No install: `uvx nightmux handoff codex`.
 
 It starts Claude Code, Codex, OpenCode, agy, Gemini and Qwen Code, the ones whose first-prompt flag was checked against their own `--help`; for any other agent it prints the prompt to paste. Only Claude Code and Codex conversations are read, and only Claude Code's give the last actions and notes. After anything else you get the git state and whatever you type after the agent's name. No bot, no keys, no daemon, and nothing leaves your machine except to the agent you named.
 
@@ -948,8 +935,7 @@ The dashboard trusts this machine and your tailnet — keep the port on `127.0.0
 [`deploy/cloud-init.yaml`](https://github.com/mmr710/nightmux/blob/main/deploy/cloud-init.yaml) into the provider's user-data
 box, then SSH in, log the agents in and run the one-liner above.
 
-Or from PyPI (may lag behind GitHub — the peer and dashboard features need
-the current version):
+Or from PyPI:
 ```bash
 pipx install nightmux
 nightmux --setup

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Telegram controller for Claude Code sessions running in tmux.
+"""Overnight runner and phone/dashboard controller for terminal coding agents in tmux.
 
-One forum topic per project -> one tmux session. Text in a topic is typed into
-that session's Claude Code prompt; new terminal scrollback is sent back to the
-topic. Stdlib only.
+- `nightmux run "<task>" --until "<check>"`: drive an agent until a check passes,
+  failing over across Claude Code, Codex, Gemini CLI and more with `.nightmux/HANDOFF.md`.
+- `nightmux wrapped [days] [--json]`: local token and API-list dollar report + share cards.
+- `nightmux handoff [agent]`: write a handoff brief and continue in another agent CLI.
+- `nightmux` / `nightmux up`: daemon binding one Telegram topic (or Discord thread,
+  Slack channel, or local web dashboard) per project to a tmux session, waiting out
+  usage limits and turning terminal menus into tap buttons. Python stdlib only.
 
 Config: ~/.nightmux.json
 {
