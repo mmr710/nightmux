@@ -775,6 +775,27 @@ GEMINI_CLI_MODELS = [
 ]
 
 
+def _agy_model_sort_key(item):
+    mid, name = item
+    fam_order = {"argon": 1, "hydrogen": 2, "flash": 3, "orchestrator": 4, "opus": 5, "sonnet": 6, "gpt": 7, "oss": 7}
+    fam_rank = 99
+    for f, r in fam_order.items():
+        if f in mid.lower():
+            fam_rank = r
+            break
+    if "xhigh" in mid.lower():
+        eff_rank = 0
+    elif "high" in mid.lower():
+        eff_rank = 1
+    elif "medium" in mid.lower():
+        eff_rank = 2
+    elif "low" in mid.lower():
+        eff_rank = 3
+    else:
+        eff_rank = 4
+    return (fam_rank, eff_rank, name)
+
+
 def get_agy_models():
     """Available models from agy, cached for 1 hour."""
     now = time.time()
@@ -789,6 +810,7 @@ def get_agy_models():
                 if len(parts) == 2:
                     models.append((parts[0], parts[1]))
             if models:
+                models.sort(key=_agy_model_sort_key)
                 _AGY_MODELS_CACHE["ts"] = now
                 _AGY_MODELS_CACHE["models"] = models
                 return models
@@ -6693,9 +6715,10 @@ def handle(cfg, state, lock, topic, text, mid=None):
     if cmd in ("!model", "/model"):
         got = model_cmd(sess, arg)
         if isinstance(got, list):
-            rows = [(n, f"!model {n}") for n in got if len(f"!model {n}".encode()) <= 64][:24]
+            step = 1 if any(len(n) > 16 for n in got) else 2
+            pairs = [(n, f"!model {n}") for n in got if len(f"!model {n}".encode()) <= 64][:24]
             send(cfg, topic, f"🧠 models on {sess} — tap one", mode="plain",
-                 buttons=kb([rows[i:i + 2] for i in range(0, len(rows), 2)]) if rows else None)
+                 buttons=kb([pairs[i:i + step] for i in range(0, len(pairs), step)]) if pairs else None)
             return None
         return got
     if cmd in ("!effort", "/effort"):
