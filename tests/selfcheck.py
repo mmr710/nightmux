@@ -4575,6 +4575,28 @@ def selfcheck():
     with stubbed(visible=lambda s_: scr_[0], tmux=ft_, tgt=lambda s_: s_, close_picker=lambda s_: None):
         assert model_cmd("x", "sonnet 5.5") == "🧠 x: Sonnet 5.5"
     assert keys_[-2:] == [("Down",), ("s",)], keys_
+    # agy model tests
+    agy_keys = []
+    def agy_ft_(*a):
+        agy_keys.append(a)
+    with stubbed(visible=lambda s_: ["Antigravity CLI"], pane_state=lambda s_: "idle",
+                 tmux=agy_ft_, tgt=lambda s_: s_, close_picker=lambda s_: None):
+        assert isinstance(model_cmd("t-agy", ""), list)
+        assert model_cmd("t-agy", "flash") == "🧠 t-agy: Gemini 3.8 Flash (High)"
+        assert model_cmd("t-agy", "argon") == "🧠 t-agy: Gemini 4 Argon (High)"
+    assert any("/model gemini-3.8-flash-high" in " ".join(k) for k in agy_keys)
+    assert any("/model gemini-4-argon-high" in " ".join(k) for k in agy_keys)
+    # close_picker dismissing Switch Model and banner
+    esc_keys = []
+    def esc_ft_(*a):
+        if "Escape" in a:
+            esc_keys.append("Escape")
+    with stubbed(visible=lambda s_: ["Switch Model", "esc Go Back"], tgt=lambda s_: s_, tmux=esc_ft_):
+        close_picker("t-agy")
+    assert "Escape" in esc_keys
+    # Arabic keyboard layout translation
+    assert "ظةخيثم".translate(AR_EN_MAP) == "/model"
+    assert "!ةخيثم".translate(AR_EN_MAP) == "!model"
     # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
     typed = []
     with stubbed(send=lambda *a, **k: None, inject=lambda s_, t: typed.append(t),

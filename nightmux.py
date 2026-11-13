@@ -667,14 +667,16 @@ PICKER = "esc Go back / Clear search"
 # dialogs end "esc dismiss" and stay with WAITING.
 OC_DIALOG = re.compile(r"^ {2,}\S.*?\S {3,}esc\s*$")
 OC_BAR = re.compile(r"╹▀{5,}")        # opencode's input box bottom edge
+AGY_PICKER = re.compile(r"esc (?:Go [bB]ack|Clear search|to dismiss)|(?:Switch Model|Set Effort)\s*$", re.I)
 
 
 def close_picker(sess):
-    """Leave agy's conversation picker or an opencode list: Esc clears agy's
-    search, the next goes back; opencode can stack two (model, then variant).
+    """Leave agy's conversation picker, Switch Model / Set Effort, banner dialogs,
+    or an opencode list: Esc clears agy's search, the next goes back; opencode can stack two.
     Stops the moment it is gone -- one Esc too many interrupts a running turn."""
     for _ in range(3):
-        if not any(PICKER in line or OC_DIALOG.match(line) for line in visible(sess)):
+        lines = visible(sess)
+        if not any(PICKER in line or OC_DIALOG.match(line) or AGY_PICKER.search(line) for line in lines):
             return
         tmux("send-keys", "-t", tgt(sess), "Escape")
         time.sleep(0.3)
@@ -741,6 +743,177 @@ def oc_model(sess, query):
     return f"🧠 opencode model: {now}"
 
 
+AGY_DEFAULT_MODELS = [
+    ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+    ("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
+    ("gemini-4-argon-low", "Gemini 4 Argon (Low)"),
+    ("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)"),
+    ("gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)"),
+    ("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)"),
+    ("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)"),
+    ("gemini-pro-orchestrator-g1-pro", "Orchestrator (Argon)"),
+    ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+    ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+    ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+    ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
+    ("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)"),
+    ("claude-opus-5-5-low", "Claude Opus 5.5 (Low)"),
+    ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)"),
+    ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)"),
+    ("claude-sonnet-5-5-low", "Claude Sonnet 5.5 (Low)"),
+    ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+]
+_AGY_MODELS_CACHE = {"ts": 0, "models": []}
+
+GEMINI_CLI_MODELS = [
+    "auto",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+]
+
+
+def get_agy_models():
+    """Available models from agy, cached for 1 hour."""
+    now = time.time()
+    if _AGY_MODELS_CACHE["models"] and (now - _AGY_MODELS_CACHE["ts"] < 3600):
+        return _AGY_MODELS_CACHE["models"]
+    try:
+        pr = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=5)
+        if pr.returncode == 0 and pr.stdout:
+            models = []
+            for line in pr.stdout.splitlines():
+                parts = [p.strip() for p in line.split("\t") if p.strip()]
+                if len(parts) == 2:
+                    models.append((parts[0], parts[1]))
+            if models:
+                _AGY_MODELS_CACHE["ts"] = now
+                _AGY_MODELS_CACHE["models"] = models
+                return models
+    except Exception:
+        pass
+    if _AGY_MODELS_CACHE["models"]:
+        return _AGY_MODELS_CACHE["models"]
+    return list(AGY_DEFAULT_MODELS)
+
+
+def resolve_agy_model(query, models=None):
+    if not query:
+        return None
+    if models is None:
+        models = get_agy_models()
+    key = lambda r: re.sub(r"\W+", "", r.lower())
+    q = key(query)
+    for mid, name in models:
+        if key(mid) == q or key(name) == q:
+            return mid, name
+    aliases = {
+        "flash": "gemini-3.8-flash-high",
+        "argon": "gemini-4-argon-high",
+        "hydrogen": "gemini-4-hydrogen-high",
+        "opus": "claude-opus-5-5-high",
+        "sonnet": "claude-sonnet-5-5-high",
+        "gptoss": "gpt-oss-120b-medium",
+        "oss": "gpt-oss-120b-medium",
+        "orchestrator": "gemini-pro-orchestrator-g1-pro",
+    }
+    if q in aliases:
+        target_id = aliases[q]
+        for mid, name in models:
+            if mid == target_id:
+                return mid, name
+    has_effort = any(e in q for e in ("low", "medium", "high", "xhigh"))
+    if not has_effort:
+        for mid, name in models:
+            if q in key(name) and "high" in mid and "xhigh" not in mid:
+                return mid, name
+            if q in key(mid) and "high" in mid and "xhigh" not in mid:
+                return mid, name
+    for mid, name in models:
+        if q in key(mid) or q in key(name):
+            return mid, name
+    for mid, name in models:
+        if key(query) in key(mid) or key(query) in key(name):
+            return mid, name
+    return None
+
+
+def is_agy(sess):
+    """True when the session is running Google Antigravity CLI."""
+    if _agent.get(sess) == "agy" or sess.endswith("-agy") or sess == "agy":
+        return True
+    try:
+        scr = "\n".join(visible(sess))
+        if "Antigravity CLI" in scr or "Switch Model" in scr:
+            return True
+        if re.search(r"Gemini .*·\s*(?:low|medium|high|xhigh)", scr, re.I):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def is_gemini(sess):
+    """True when the session is running Google Gemini CLI."""
+    if _agent.get(sess) == "gemini" or sess.endswith("-gemini") or sess == "gemini":
+        return True
+    try:
+        scr = "\n".join(visible(sess))
+        if "Gemini CLI" in scr or "geminicli.com" in scr:
+            return True
+        if "Failed to sign in" in scr and "Gemini Code Assist" in scr:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def agy_model(sess, query):
+    """!model on Antigravity CLI (agy).
+    Without an argument, returns model names for buttons.
+    With an argument, resolves model ID and runs `/model <id>` directly,
+    bypassing the interactive scrolling TUI picker."""
+    if pane_state(visible(sess)) == "busy":
+        return f"{sess} is working — !model when it is idle"
+    models = get_agy_models()
+    if not query:
+        return [name for mid, name in models]
+    resolved = resolve_agy_model(query, models)
+    if not resolved:
+        target_id, target_name = query.strip(), query.strip()
+    else:
+        target_id, target_name = resolved
+
+    close_picker(sess)
+    at = tgt(sess)
+    tmux("send-keys", "-t", at, "-l", "--", f"/model {target_id}")
+    time.sleep(0.3)
+    tmux("send-keys", "-t", at, "Enter")
+    time.sleep(0.8)
+    close_picker(sess)
+    return f"🧠 {sess}: {target_name}"
+
+
+def gemini_model(sess, query):
+    """!model on Gemini CLI."""
+    if pane_state(visible(sess)) == "busy":
+        return f"{sess} is working — !model when it is idle"
+    if not query:
+        return list(GEMINI_CLI_MODELS)
+    q = query.strip()
+    target = next((m for m in GEMINI_CLI_MODELS if m.lower() == q.lower() or q.lower() in m.lower()), q)
+    close_picker(sess)
+    at = tgt(sess)
+    tmux("send-keys", "-t", at, "-l", "--", f"/model set {target}")
+    time.sleep(0.3)
+    tmux("send-keys", "-t", at, "Enter")
+    time.sleep(0.8)
+    close_picker(sess)
+    return f"🧠 {sess}: {target}"
+
+
 # Every agent's /model is a picker of its own -- Claude Code and codex number
 # theirs, agy's is bare -- so "!model x" typed "/model x" and, everywhere but
 # Claude Code, left a dialog open that ate the next prompt. These read the
@@ -790,6 +963,10 @@ def model_cmd(sess, query):
         return f"{sess} is working — !model when it is idle"
     if any(OC_BAR.search(l) for l in scr):
         return oc_model(sess, query)
+    if is_agy(sess):
+        return agy_model(sess, query)
+    if is_gemini(sess):
+        return gemini_model(sess, query)
     close_picker(sess)
     at = tgt(sess)
     tmux("send-keys", "-t", at, "-l", "--", "/model")
@@ -4033,6 +4210,13 @@ def press(sess, key, confirm=False):
 #               Claude Code does NOT own, so nothing shadows a real slash command.
 #   PASSTHRU  — Claude Code's commands, registered purely so they autocomplete;
 #               they are typed into the session like any other text.
+# Map Arabic keyboard layout characters to English (for commands typed with Arabic layout like ظةخيثم -> /model)
+AR_EN_MAP = str.maketrans({
+    "ض": "q", "ص": "w", "ث": "e", "ق": "r", "ف": "t", "غ": "y", "ع": "u", "ه": "i", "خ": "o", "ح": "p", "ج": "[", "د": "]",
+    "ش": "a", "س": "s", "ي": "d", "ب": "f", "ل": "g", "ا": "h", "ت": "j", "ن": "k", "م": "l", "ك": ";", "ط": "'",
+    "ئ": "z", "ء": "x", "ؤ": "c", "ر": "v", "ى": "n", "ة": "m", "و": ",", "ز": ".", "ظ": "/",
+})
+
 TG_SLASH = {"ctl": "!ctl", "vibe": "!vibe", "teleport": "!teleport", "harvest": "!harvest",
             "topics": "!status", "sessions": "!sessions",
             "pane": "!pane", "git": "!git", "diff": "!diff", "get": "!get",
@@ -5731,6 +5915,17 @@ def commands_md():
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
+    # Arabic keyboard layout normalization (e.g. ظةخيثم -> /model, !ةخيثم -> !model)
+    if text and (text[0] in ("!", "/", "ظ") or any("\u0600" <= c <= "\u06ff" for c in text.split()[0])):
+        first_token = text.split()[0]
+        trans_token = first_token.translate(AR_EN_MAP)
+        if trans_token.startswith(("/", "!")) or f"!{trans_token}" in TG_SLASH or f"!{trans_token}" in (
+            "!model", "!effort", "!help", "!status", "!pane", "!stop", "!clear", "!resume", "!new"
+        ):
+            if not trans_token.startswith(("/", "!")):
+                trans_token = f"!{trans_token}"
+            rest = text[len(first_token):].strip()
+            text = f"{trans_token} {rest}".strip()
     # Telegram rewrites "/compact" as "/compact@thebot" in groups; Claude wants
     # the bare slash command.
     text = re.sub(r"^(/[\w:-]+)@\w+", r"\1", text)
@@ -6495,16 +6690,32 @@ def handle(cfg, state, lock, topic, text, mid=None):
         remember(state, sess, arg)
         started(cfg, state, topic, sess, mid)
         return None
-    if cmd in ("!model", "!effort"):  # sugar: type the slash command for you
-        if cmd == "!model":
-            got = model_cmd(sess, arg)
-            if isinstance(got, list):
-                rows = [(n, f"!model {n}") for n in got if len(f"!model {n}".encode()) <= 64][:24]
-                send(cfg, topic, f"🧠 models on {sess} — tap one", mode="plain",
-                     buttons=kb([rows[i:i + 2] for i in range(0, len(rows), 2)]) if rows else None)
-                return None
-            return got
-        text = f"/{cmd[1:]} {arg}".strip()
+    if cmd in ("!model", "/model"):
+        got = model_cmd(sess, arg)
+        if isinstance(got, list):
+            rows = [(n, f"!model {n}") for n in got if len(f"!model {n}".encode()) <= 64][:24]
+            send(cfg, topic, f"🧠 models on {sess} — tap one", mode="plain",
+                 buttons=kb([rows[i:i + 2] for i in range(0, len(rows), 2)]) if rows else None)
+            return None
+        return got
+    if cmd in ("!effort", "/effort"):
+        if not arg:
+            levels = ["low", "medium", "high"]
+            rows = [(lvl.title(), f"!effort {lvl}") for lvl in levels]
+            send(cfg, topic, f"🎯 effort on {sess} — tap one", mode="plain",
+                 buttons=kb([rows]))
+            return None
+        if is_agy(sess):
+            effort_val = arg.strip().lower()
+            close_picker(sess)
+            at = tgt(sess)
+            tmux("send-keys", "-t", at, "-l", "--", f"/effort {effort_val}")
+            time.sleep(0.3)
+            tmux("send-keys", "-t", at, "Enter")
+            time.sleep(0.5)
+            close_picker(sess)
+            return f"🎯 {sess} effort: {effort_val}"
+        text = f"/effort {arg}".strip()
     elif cmd.startswith("!"):
         plugin = run_plugin(sess_cwd(sess), cmd[1:], arg)
         if plugin is not None:
