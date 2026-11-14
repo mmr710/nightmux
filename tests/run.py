@@ -70,6 +70,8 @@ def main(argv):
         try:
             fn()
             print(f"  ok   {tid}", flush=True)
+        except KeyboardInterrupt:
+            raise
         except BaseException:           # a failing assert must name its line
             bad += 1
             print(f"  FAIL {tid}", flush=True)
