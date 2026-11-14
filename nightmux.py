@@ -5934,6 +5934,93 @@ def commands_md():
     return "\n".join(out)
 
 
+class Command:
+    """One registered !command. alias_of names the entry an alias points at."""
+    def __init__(self, fn, help, section, writes=False, hidden=False, alias_of=None):
+        self.fn, self.help, self.section = fn, help, section
+        self.writes, self.hidden, self.alias_of = writes, hidden, alias_of
+
+
+class Ctx:
+    """What a command body may use; handle() builds one per message."""
+    def __init__(self, cfg, state, lock, topic, mid, sess):
+        self.cfg, self.state, self.lock = cfg, state, lock
+        self.topic, self.mid, self.sess = topic, mid, sess
+
+
+COMMANDS = {}
+
+
+def command(name, help, section, writes=False, hidden=False, aliases=()):
+    def deco(fn):
+        COMMANDS[name] = Command(fn, help, section, writes, hidden)
+        for a in aliases:
+            COMMANDS[a] = Command(fn, help, section, writes, hidden, alias_of=name)
+        return fn
+    return deco
+
+
+@command("!version", section="setup", help="build, python, and which hooks are wired")
+def _cmd_version(ctx, arg):
+    return version_report()
+
+
+@command("!doctor", section="setup", help="diagnose the install", hidden=True, aliases=("!doc",))
+def _cmd_doctor(ctx, arg):
+    return doctor_report(ctx.cfg)
+
+
+@command("!stats", section="tokens", help="[days] = tokens, cache and prompts per agent")
+def _cmd_stats(ctx, arg):
+    days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
+    if ("fleet", days) not in _analysis:
+        send(ctx.cfg, ctx.topic, f"📊 reading {days} days of transcripts…", mode="plain")
+    return stats_report(fleet_analysis(ctx.cfg, days))
+
+
+@command("!tokens", section="tokens", help="[days] = tokens and API-list dollars per agent, what the cache saved")
+def _cmd_tokens(ctx, arg):
+    days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 7
+    if ("fleet", days) not in _analysis:
+        send(ctx.cfg, ctx.topic, f"🔢 reading {days} days of transcripts…", mode="plain")
+    return tokens_report(fleet_analysis(ctx.cfg, days), ctx.cfg["prices"] if isinstance(ctx.cfg.get("prices"), dict) else None)
+
+
+@command("!forecast", section="tokens", help="when each window fills")
+def _cmd_forecast(ctx, arg):
+    return forecast_report(ctx.cfg, ctx.state)
+
+
+@command("!saved", section="tokens", help="what the cache saved")
+def _cmd_saved(ctx, arg):
+    return saved_report()
+
+
+@command("!arena", section="team", help="every race you judged: wins per agent, and who wins which kind of task")
+def _cmd_arena(ctx, arg):
+    return arena_report()
+
+
+@command("!status", section="see", help="every topic and session at a glance")
+def _cmd_status(ctx, arg):
+    with ctx.lock:
+        return status_report(ctx.cfg, ctx.state)
+
+
+@command("!usage", section="tokens", help="usage line per bound session")
+def _cmd_usage(ctx, arg):
+    rows = []
+    for t, s in sorted(ctx.cfg["topics"].items(), key=lambda kv: int(kv[0])):
+        u = usage_line(ctx.cfg, (ctx.state.get(s) or {}).get("snap"), sep=" ")
+        rows.append(f"{s:<14}{u or ' no status-line data yet'}")
+    return "\n".join(rows) or "no topics bound"
+
+
+@command("!sessions", section="start", help="list the tmux sessions")
+def _cmd_sessions(ctx, arg):
+    return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -5970,10 +6057,9 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return ("🔒 this topic is read-only\n"
                 "it reports and searches; it does not type into the session.\n"
                 'change "modes" in the config and !reload to lift it')
-    if cmd == "!version":
-        return version_report()
-    if cmd in ("!doctor", "!doc"):
-        return doctor_report(cfg)
+    cmdobj = COMMANDS.get(cmd)
+    if cmdobj:
+        return cmdobj.fn(Ctx(cfg, state, lock, topic, mid, sess), arg)
     if cmd == "!upgrade":
         return upgrade_cmd(cfg, topic, arg)
     if cmd == "!skill":
@@ -5983,16 +6069,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "an agent update is already running"
         send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
         return update_report(update_agents(cfg, only=arg.split() or None))
-    if cmd == "!stats":
-        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 30
-        if ("fleet", days) not in _analysis:
-            send(cfg, topic, f"📊 reading {days} days of transcripts…", mode="plain")
-        return stats_report(fleet_analysis(cfg, days))
-    if cmd == "!tokens":
-        days = int(arg) if arg.isdigit() and 0 < int(arg) <= 365 else 7
-        if ("fleet", days) not in _analysis:
-            send(cfg, topic, f"🔢 reading {days} days of transcripts…", mode="plain")
-        return tokens_report(fleet_analysis(cfg, days), cfg["prices"] if isinstance(cfg.get("prices"), dict) else None)
     if cmd == "!goal":
         return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!brain":
@@ -6005,8 +6081,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return briefing_cmd(cfg, state, lock, topic, arg)
     if cmd == "!deps":
         return deps_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!forecast":
-        return forecast_report(cfg, state)
     if cmd == "!memory":
         return memory_cmd(cfg, state, lock, topic, sess, arg)
     if cmd in ("!issues", "!issue"):
@@ -6023,8 +6097,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return qa_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!leaderboard":
         return leaderboard_cmd(arg)
-    if cmd == "!saved":
-        return saved_report()
     if cmd == "!wrapped":
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
@@ -6037,8 +6109,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return look_cmd(cfg, arg)
     if cmd == "!relay":
         return relay_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!arena":
-        return arena_report()
     if cmd == "!race":
         return race_cmd(cfg, state, lock, topic, arg)
     if cmd == "!lint":
@@ -6147,9 +6217,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         with lock:
             cfg.update(load_cfg())
         return f"reloaded {CFG_PATH}\ntopics: {cfg['topics']}"
-    if cmd == "!status":
-        with lock:
-            return status_report(cfg, state)
     if cmd == "!tz":
         if arg:
             try:
@@ -6169,14 +6236,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
                 f"shown   {clock(cfg, now)}  "
                 + ("(server time; !tz Africa/Cairo to shift)" if tz is None
                    else f"({tz})" if isinstance(tz, str) else f"(UTC{tz:+g})"))
-    if cmd == "!usage":
-        rows = []
-        for t, s in sorted(cfg["topics"].items(), key=lambda kv: int(kv[0])):
-            u = usage_line(cfg, (state.get(s) or {}).get("snap"), sep=" ")
-            rows.append(f"{s:<14}{u or ' no status-line data yet'}")
-        return "\n".join(rows) or "no topics bound"
-    if cmd == "!sessions":
-        return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
     if cmd == "!plugins":
         try:
             names = sorted(n for n in os.listdir(PLUGIN_DIR)
