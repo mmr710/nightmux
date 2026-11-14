@@ -13,10 +13,12 @@ import sys
 
 from _h import ROOT, run
 
-MAX_TEST_FUNC = 200      # tests/selfcheck.py:selfcheck was 4,860 lines
-MAX_FUNC = 250           # nightmux.py: handle 804, do_GET 253
-MAX_SILENT_EXCEPT = 0    # `except ...: pass` with no reason on the line: 46
-MIN_TESTS = 150          # one function per behaviour once selfcheck is split
+# Ratchets for T2.2 / T2.3 PRs. Final values: MAX_TEST_FUNC 200, MAX_FUNC 250,
+# MAX_SILENT_EXCEPT 0, MIN_TESTS 150.
+MAX_TEST_FUNC = 4884     # tests/selfcheck.py:selfcheck
+MAX_FUNC = 804           # nightmux.py: handle (do_GET is 253)
+MAX_SILENT_EXCEPT = 44   # `except ...: pass` with no reason on the line
+MIN_TESTS = 20           # one function per behaviour once selfcheck is split
 
 
 def _funcs(path):
