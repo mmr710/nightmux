@@ -56,6 +56,10 @@ jobs:
         if: matrix.python == '3.12'
         run: python tests/acceptance/test_registry.py
 
+      - name: acceptance meta
+        if: matrix.python == '3.12'
+        run: python tests/acceptance/test_meta.py
+
       # The 3D office is a renderer inside a Python string: nothing else notices
       # when a desk state it cannot draw blanks the page. One version is enough; the
       # runner image ships google-chrome.
