@@ -5986,12 +5986,12 @@ def _cmd_tokens(ctx, arg):
     return tokens_report(fleet_analysis(ctx.cfg, days), ctx.cfg["prices"] if isinstance(ctx.cfg.get("prices"), dict) else None)
 
 
-@command("!forecast", section="tokens", help="when each window fills", hidden=True)
+@command("!forecast", section="tokens", help="when each window fills")
 def _cmd_forecast(ctx, arg):
     return forecast_report(ctx.cfg, ctx.state)
 
 
-@command("!saved", section="tokens", help="what the cache saved", hidden=True)
+@command("!saved", section="tokens", help="what the cache saved")
 def _cmd_saved(ctx, arg):
     return saved_report()
 
@@ -6016,7 +6016,7 @@ def _cmd_usage(ctx, arg):
     return "\n".join(rows) or "no topics bound"
 
 
-@command("!sessions", section="start", help="list the tmux sessions", hidden=True)
+@command("!sessions", section="start", help="list the tmux sessions")
 def _cmd_sessions(ctx, arg):
     return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
 
