@@ -6021,6 +6021,234 @@ def _cmd_sessions(ctx, arg):
     return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
 
 
+@command("!log", section="see", help="log (moved from handle)")
+def _cmd_log(ctx, arg):
+    return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
+
+
+@command("!plugins", section="setup", help="plugins (moved from handle)")
+def _cmd_plugins(ctx, arg):
+    try:
+        names = sorted(n for n in os.listdir(PLUGIN_DIR)
+                       if os.access(os.path.join(PLUGIN_DIR, n), os.X_OK))
+    except FileNotFoundError:
+        names = []
+    return ("!" + ", !".join(names) if names else
+            f"no plugins in {PLUGIN_DIR} — drop an executable file in, its "
+            "name becomes a command")
+
+
+@command("!agents", section="start", help="agents (moved from handle)")
+def _cmd_agents(ctx, arg):
+    return agent_report(ctx.cfg, ctx.state, ctx.topic)
+
+
+@command("!reload", section="setup", help="reload (moved from handle)", writes=True)
+def _cmd_reload(ctx, arg):
+    cfg, lock = ctx.cfg, ctx.lock
+    with lock:
+        cfg.update(load_cfg())
+    return f"reloaded {CFG_PATH}\ntopics: {cfg['topics']}"
+
+
+@command("!tz", section="setup", help="tz (moved from handle)", writes=True)
+def _cmd_tz(ctx, arg):
+    cfg, lock = ctx.cfg, ctx.lock
+    if arg:
+        try:
+            off = float(arg.lstrip("+"))
+        except ValueError:
+            # A zone name tracks DST; a fixed offset silently goes an hour
+            # wrong for half the year.
+            if not os.path.isfile(os.path.join(ZONEINFO, arg)):
+                return ("usage: !tz Africa/Cairo   (a zone, so DST follows)\n"
+                        "       !tz +3             (a fixed offset)")
+            off = arg
+        with lock:
+            cfg["tz_offset"] = off
+            save_cfg(cfg)
+    now, tz = time.time(), cfg.get("tz_offset")
+    return (f"server  {time.strftime('%H:%M %Z', time.localtime(now))}\n"
+            f"shown   {clock(cfg, now)}  "
+            + ("(server time; !tz Africa/Cairo to shift)" if tz is None
+               else f"({tz})" if isinstance(tz, str) else f"(UTC{tz:+g})"))
+
+
+@command("!bind", section="start", help="bind (moved from handle)", writes=True)
+def _cmd_bind(ctx, arg):
+    cfg, state, lock, topic = ctx.cfg, ctx.state, ctx.lock, ctx.topic
+    if not arg:
+        return "usage: !bind <tmux-session>"
+    name = real_session(arg)     # an abbreviation binds the session it names
+    if not name:
+        return f"no tmux session '{arg}'"
+    other = bound_to(cfg, name, topic)
+    if other:
+        return ("'%s' is topic %s's session -- one session, one topic\n"
+                "(they would share one scrape cursor, and one of them goes "
+                "silent)\n!unbind there first, or !<agent> here for a session "
+                "of your own" % (name, other))
+    with lock:
+        cfg["topics"][topic] = name
+        cfg.setdefault("dirs", {})[topic] = sess_cwd(name)  # bare !<agent> needs it to switch
+        save_cfg(cfg)
+    state.pop(name, None)
+    return f"topic bound to '{name}'"
+
+
+@command("!unbind", section="start", help="unbind (moved from handle)", writes=True)
+def _cmd_unbind(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    with lock:
+        old = cfg["topics"].pop(topic, None)
+        save_cfg(cfg)
+    return f"unbound '{old}'" if old else "not bound"
+
+
+@command("!quiet", section="talk", help="quiet (moved from handle)", writes=True)
+def _cmd_quiet(ctx, arg):
+    return quiet_cmd(ctx.cfg, ctx.lock, arg)
+
+
+@command("!voice", section="talk", help="voice (moved from handle)", writes=True)
+def _cmd_voice(ctx, arg):
+    return voice_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
+
+
+@command("!policy", section="talk", help="policy (moved from handle)", writes=True)
+def _cmd_policy(ctx, arg):
+    return policy_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
+
+
+@command("!rules", section="talk", help="rules (moved from handle)", writes=True)
+def _cmd_rules(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    s_ = cfg.get("topics", {}).get(str(topic))
+    return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
+
+
+@command("!consult", section="team", help="consult (moved from handle)", writes=True)
+def _cmd_consult(ctx, arg):
+    return consult_start(ctx.cfg, ctx.state, ctx.topic, arg)
+
+
+@command("!use", section="team", help="use (moved from handle)", writes=True)
+def _cmd_use(ctx, arg):
+    return use_prompt(ctx.cfg, ctx.state, ctx.topic, arg)
+
+
+@command("!plan", section="night", help="plan (moved from handle)", writes=True)
+def _cmd_plan(ctx, arg):
+    return plan_start(ctx.cfg, ctx.state, ctx.topic, arg)
+
+
+@command("!fan", section="night", help="fan (moved from handle)", writes=True)
+def _cmd_fan(ctx, arg):
+    return fan_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
+
+
+@command("!autoyes", section="talk", help="autoyes (moved from handle)", writes=True)
+def _cmd_autoyes(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
+    if arg in ("off", "none"):
+        with lock:
+            (cfg.setdefault("autoyes", {})).pop(str(topic), None)
+            save_cfg(cfg)
+        return "auto-yes off in this topic"
+    if arg:
+        bench = bench_of(cfg, topic)
+        if arg in ("on", "all", "yes", "true"):
+            live = (agent_key(cfg, topic, cfg.get("topics", {}).get(str(topic)))
+                    or (cfg.get("started") or {}).get(str(topic))
+                    or default_agent(cfg))
+            picks = [live] if arg in ("on", "yes", "true") else (list(bench.keys()) or [live])
+        else:
+            picks = [a for a in arg.replace(",", " ").split() if a in bench or a in AGENTS]
+        if not picks:
+            return ("usage: !autoyes <agent[,agent]> | off\n"
+                    "this topic has: " + (", ".join(sorted(bench)) or "nothing"))
+        with lock:
+            cfg.setdefault("autoyes", {})[str(topic)] = picks
+            save_cfg(cfg)
+        cur = picks
+    if not cur:
+        return ("auto-yes off — !autoyes <agent> answers that agent's own "
+                "permission menus for it\n"
+                "⚠️ a permission dialog is the last gate before an agent acts "
+                "on this machine; only the affirmative option is ever pressed, "
+                "every answer is announced, and it stops after "
+                f"{AUTOYES_MAX} in an hour")
+    return ("auto-yes on for: " + ", ".join(cur)
+            + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
+              "\n!autoyes off to stop")
+
+
+@command("!goal", section="night", help="goal (moved from handle)", writes=True)
+def _cmd_goal(ctx, arg):
+    return goal_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
+
+
+@command("!briefing", section="night", help="briefing (moved from handle)")
+def _cmd_briefing(ctx, arg):
+    return briefing_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
+
+
+@command("!deps", section="code", help="deps (moved from handle)", writes=True)
+def _cmd_deps(ctx, arg):
+    return deps_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!memory", section="tokens", help="memory (moved from handle)", writes=True)
+def _cmd_memory(ctx, arg):
+    return memory_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!errors", section="code", help="errors (moved from handle)", writes=True)
+def _cmd_errors(ctx, arg):
+    return errors_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!team", section="start", help="team (moved from handle)", writes=True)
+def _cmd_team(ctx, arg):
+    return team_cmd(ctx.cfg, arg)
+
+
+@command("!audit", section="start", help="audit (moved from handle)", writes=True)
+def _cmd_audit(ctx, arg):
+    return audit_cmd(arg)
+
+
+@command("!look", section="see", help="look (moved from handle)", writes=True)
+def _cmd_look(ctx, arg):
+    return look_cmd(ctx.cfg, arg)
+
+
+@command("!relay", section="team", help="relay (moved from handle)", writes=True)
+def _cmd_relay(ctx, arg):
+    return relay_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!race", section="team", help="race (moved from handle)", writes=True)
+def _cmd_race(ctx, arg):
+    return race_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
+
+
+@command("!vibe", section="talk", help="vibe (moved from handle)")
+def _cmd_vibe(ctx, arg):
+    return vibe_cmd(ctx.cfg, ctx.state, ctx.topic, ctx.sess)
+
+
+@command("!teleport", section="start", help="teleport (moved from handle)", writes=True)
+def _cmd_teleport(ctx, arg):
+    return teleport_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!harvest", section="tokens", help="harvest (moved from handle)", writes=True)
+def _cmd_harvest(ctx, arg):
+    return harvest_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -6069,24 +6297,14 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "an agent update is already running"
         send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
         return update_report(update_agents(cfg, only=arg.split() or None))
-    if cmd == "!goal":
-        return goal_cmd(cfg, lock, topic, arg)
     if cmd == "!brain":
         out = brain_cmd(cfg, lock, topic, arg)
         if out.startswith("🧠 brain set"):      # a new mission starts the work
             state.setdefault(sess, {}).setdefault("queue", []).append(
                 (cfg.get("brains") or {})[topic]["mission"])
         return out
-    if cmd == "!briefing":
-        return briefing_cmd(cfg, state, lock, topic, arg)
-    if cmd == "!deps":
-        return deps_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!memory":
-        return memory_cmd(cfg, state, lock, topic, sess, arg)
     if cmd in ("!issues", "!issue"):
         return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
-    if cmd == "!errors":
-        return errors_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!desktop":
         return desktop_cmd(cfg, topic, arg)
     if cmd == "!tools":
@@ -6101,16 +6319,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         return wrapped_cmd(cfg, topic, arg)
     if cmd == "!public":
         return public_cmd(cfg, lock, topic, arg)
-    if cmd == "!team":
-        return team_cmd(cfg, arg)
-    if cmd == "!audit":
-        return audit_cmd(arg)
-    if cmd == "!look":
-        return look_cmd(cfg, arg)
-    if cmd == "!relay":
-        return relay_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!race":
-        return race_cmd(cfg, state, lock, topic, arg)
     if cmd == "!lint":
         return lint_cmd(cfg, state, lock, topic, sess, arg, mid)
     if cmd == "!coach":
@@ -6199,127 +6407,12 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return ("usage: !failover <agent> — hand a limit-held topic to another "
                     "agent now · installed: " + ", ".join(installed_agents(cfg)))
         return failover(cfg, state, lock, topic, arg.split()[0].lower())
-    if cmd == "!teleport":
-        return teleport_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!harvest":
-        return harvest_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!vibe":
-        return vibe_cmd(cfg, state, topic, sess)
     if cmd == "!help":
         text, rows = help_text(cfg, arg)
         if rows:
             send(cfg, topic, text, mode="plain", buttons=kb(rows))
             return ""
         return text
-    if cmd == "!log":
-        return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
-    if cmd == "!reload":  # config is human-owned; pick up a hand edit without a restart
-        with lock:
-            cfg.update(load_cfg())
-        return f"reloaded {CFG_PATH}\ntopics: {cfg['topics']}"
-    if cmd == "!tz":
-        if arg:
-            try:
-                off = float(arg.lstrip("+"))
-            except ValueError:
-                # A zone name tracks DST; a fixed offset silently goes an hour
-                # wrong for half the year.
-                if not os.path.isfile(os.path.join(ZONEINFO, arg)):
-                    return ("usage: !tz Africa/Cairo   (a zone, so DST follows)\n"
-                            "       !tz +3             (a fixed offset)")
-                off = arg
-            with lock:
-                cfg["tz_offset"] = off
-                save_cfg(cfg)
-        now, tz = time.time(), cfg.get("tz_offset")
-        return (f"server  {time.strftime('%H:%M %Z', time.localtime(now))}\n"
-                f"shown   {clock(cfg, now)}  "
-                + ("(server time; !tz Africa/Cairo to shift)" if tz is None
-                   else f"({tz})" if isinstance(tz, str) else f"(UTC{tz:+g})"))
-    if cmd == "!plugins":
-        try:
-            names = sorted(n for n in os.listdir(PLUGIN_DIR)
-                           if os.access(os.path.join(PLUGIN_DIR, n), os.X_OK))
-        except FileNotFoundError:
-            names = []
-        return ("!" + ", !".join(names) if names else
-                f"no plugins in {PLUGIN_DIR} — drop an executable file in, its "
-                "name becomes a command")
-    if cmd == "!bind":
-        if not arg:
-            return "usage: !bind <tmux-session>"
-        name = real_session(arg)     # an abbreviation binds the session it names
-        if not name:
-            return f"no tmux session '{arg}'"
-        other = bound_to(cfg, name, topic)
-        if other:
-            return ("'%s' is topic %s's session -- one session, one topic\n"
-                    "(they would share one scrape cursor, and one of them goes "
-                    "silent)\n!unbind there first, or !<agent> here for a session "
-                    "of your own" % (name, other))
-        with lock:
-            cfg["topics"][topic] = name
-            cfg.setdefault("dirs", {})[topic] = sess_cwd(name)  # bare !<agent> needs it to switch
-            save_cfg(cfg)
-        state.pop(name, None)
-        return f"topic bound to '{name}'"
-    if cmd == "!unbind":
-        with lock:
-            old = cfg["topics"].pop(topic, None)
-            save_cfg(cfg)
-        return f"unbound '{old}'" if old else "not bound"
-    if cmd == "!consult":
-        return consult_start(cfg, state, topic, arg)
-    if cmd == "!use":
-        return use_prompt(cfg, state, topic, arg)
-    if cmd == "!plan":
-        return plan_start(cfg, state, topic, arg)
-    if cmd == "!fan":
-        return fan_cmd(cfg, state, lock, topic, arg)
-    if cmd == "!autoyes":
-        cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
-        if arg in ("off", "none"):
-            with lock:
-                (cfg.setdefault("autoyes", {})).pop(str(topic), None)
-                save_cfg(cfg)
-            return "auto-yes off in this topic"
-        if arg:
-            bench = bench_of(cfg, topic)
-            if arg in ("on", "all", "yes", "true"):
-                live = (agent_key(cfg, topic, cfg.get("topics", {}).get(str(topic)))
-                        or (cfg.get("started") or {}).get(str(topic))
-                        or default_agent(cfg))
-                picks = [live] if arg in ("on", "yes", "true") else (list(bench.keys()) or [live])
-            else:
-                picks = [a for a in arg.replace(",", " ").split() if a in bench or a in AGENTS]
-            if not picks:
-                return ("usage: !autoyes <agent[,agent]> | off\n"
-                        "this topic has: " + (", ".join(sorted(bench)) or "nothing"))
-            with lock:
-                cfg.setdefault("autoyes", {})[str(topic)] = picks
-                save_cfg(cfg)
-            cur = picks
-        if not cur:
-            return ("auto-yes off — !autoyes <agent> answers that agent's own "
-                    "permission menus for it\n"
-                    "⚠️ a permission dialog is the last gate before an agent acts "
-                    "on this machine; only the affirmative option is ever pressed, "
-                    "every answer is announced, and it stops after "
-                    f"{AUTOYES_MAX} in an hour")
-        return ("auto-yes on for: " + ", ".join(cur)
-                + f"\nonly a recognisable yes is pressed, max {AUTOYES_MAX}/hour"
-                  "\n!autoyes off to stop")
-    if cmd == "!voice":
-        return voice_cmd(cfg, lock, topic, arg)
-    if cmd == "!policy":
-        return policy_cmd(cfg, lock, topic, arg)
-    if cmd == "!quiet":
-        return quiet_cmd(cfg, lock, arg)
-    if cmd == "!rules":
-        s_ = cfg.get("topics", {}).get(str(topic))
-        return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
-    if cmd == "!agents":
-        return agent_report(cfg, state, topic)
     if cmd.startswith("@"):
         routed = address(cfg, state, topic, text)
         if routed is not None:
