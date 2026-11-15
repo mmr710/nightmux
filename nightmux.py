@@ -18867,13 +18867,11 @@ def stubbed(**globs):
 
 
 def selfcheck():
-    """The suite lives in tests/selfcheck.py; run it inside this module's namespace."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "selfcheck.py")
-    if not os.path.exists(path):
+    """The suite lives in tests/; tests/run.py runs the legacy selfcheck test."""
+    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "run.py")
+    if not os.path.exists(runner):
         sys.exit("selfcheck needs a git checkout: tests/selfcheck.py is not shipped in the pip package")
-    with open(path) as f:
-        exec(compile(f.read(), path, "exec"), globals())
-    globals()["selfcheck"]()
+    sys.exit(subprocess.call([sys.executable, runner, "-k", "test_selfcheck.py::"]))
 
 
 _drift = {}
