@@ -31,13 +31,15 @@ class Iso:
 def isolated(mod):
     iso = Iso()
     real = os.path.expanduser("~")
+    code = os.path.dirname(os.path.abspath(mod.__file__))  # a checkout under HOME (CI) keeps its paths
     saved_mod, saved_env = dict(vars(mod)), dict(os.environ)
     try:
         for k in ("TMUX", "TMUX_PANE"):
             os.environ.pop(k, None)
         os.environ["HOME"] = os.environ["TMUX_TMPDIR"] = iso.home
         for k, v in saved_mod.items():
-            if isinstance(v, str) and (v == real or v.startswith(real + os.sep)):
+            if (isinstance(v, str) and (v == real or v.startswith(real + os.sep))
+                    and not (v == code or v.startswith(code + os.sep))):
                 setattr(mod, k, iso.home + v[len(real):])
         mod.send = lambda c, t, x, *a, **kw: iso.sent.append((c, t, x, a, kw))
         mod.api = lambda c, m, **kw: iso.calls.append((m, kw)) or {}
