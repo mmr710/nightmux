@@ -6021,12 +6021,12 @@ def _cmd_sessions(ctx, arg):
     return tmux("list-sessions", "-F", "#{session_name}  #{session_windows}w  #{?session_attached,attached,detached}") or "no sessions"
 
 
-@command("!log", section="see", help="log (moved from handle)")
+@command("!log", section="see", help="daemon journal")
 def _cmd_log(ctx, arg):
     return run("journalctl", "--user", "-u", "nightmux", "-n", "40", "--no-pager")
 
 
-@command("!plugins", section="setup", help="plugins (moved from handle)")
+@command("!plugins", section="setup", help="executables in ~/.nightmux/plugins; each file is a command")
 def _cmd_plugins(ctx, arg):
     try:
         names = sorted(n for n in os.listdir(PLUGIN_DIR)
@@ -6038,12 +6038,12 @@ def _cmd_plugins(ctx, arg):
             "name becomes a command")
 
 
-@command("!agents", section="start", help="agents (moved from handle)")
+@command("!agents", section="start", help="this topic's agents")
 def _cmd_agents(ctx, arg):
     return agent_report(ctx.cfg, ctx.state, ctx.topic)
 
 
-@command("!reload", section="setup", help="reload (moved from handle)", writes=True)
+@command("!reload", section="setup", help="re-read the config", writes=True)
 def _cmd_reload(ctx, arg):
     cfg, lock = ctx.cfg, ctx.lock
     with lock:
@@ -6051,7 +6051,7 @@ def _cmd_reload(ctx, arg):
     return f"reloaded {CFG_PATH}\ntopics: {cfg['topics']}"
 
 
-@command("!tz", section="setup", help="tz (moved from handle)", writes=True)
+@command("!tz", section="setup", help="timezone", writes=True)
 def _cmd_tz(ctx, arg):
     cfg, lock = ctx.cfg, ctx.lock
     if arg:
@@ -6074,7 +6074,7 @@ def _cmd_tz(ctx, arg):
                else f"({tz})" if isinstance(tz, str) else f"(UTC{tz:+g})"))
 
 
-@command("!bind", section="start", help="bind (moved from handle)", writes=True)
+@command("!bind", section="start", help="<session> = bind this topic to a tmux session", writes=True)
 def _cmd_bind(ctx, arg):
     cfg, state, lock, topic = ctx.cfg, ctx.state, ctx.lock, ctx.topic
     if not arg:
@@ -6096,7 +6096,7 @@ def _cmd_bind(ctx, arg):
     return f"topic bound to '{name}'"
 
 
-@command("!unbind", section="start", help="unbind (moved from handle)", writes=True)
+@command("!unbind", section="start", help="unbind this topic", writes=True)
 def _cmd_unbind(ctx, arg):
     cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
     with lock:
@@ -6105,49 +6105,49 @@ def _cmd_unbind(ctx, arg):
     return f"unbound '{old}'" if old else "not bound"
 
 
-@command("!quiet", section="talk", help="quiet (moved from handle)", writes=True)
+@command("!quiet", section="talk", help="23:00-07:00 | off = updates land silently; questions, nudges, exits still ring", writes=True)
 def _cmd_quiet(ctx, arg):
     return quiet_cmd(ctx.cfg, ctx.lock, arg)
 
 
-@command("!voice", section="talk", help="voice (moved from handle)", writes=True)
+@command("!voice", section="talk", help="[on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)", writes=True)
 def _cmd_voice(ctx, arg):
     return voice_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
 
 
-@command("!policy", section="talk", help="policy (moved from handle)", writes=True)
+@command("!policy", section="talk", help="[on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)", writes=True)
 def _cmd_policy(ctx, arg):
     return policy_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
 
 
-@command("!rules", section="talk", help="rules (moved from handle)", writes=True)
+@command("!rules", section="talk", help="[clear|<n> off] = the always-yes answers saved from permission buttons", writes=True)
 def _cmd_rules(ctx, arg):
     cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
     s_ = cfg.get("topics", {}).get(str(topic))
     return rules_cmd(cfg, lock, s_, arg) if s_ else "topic not bound"
 
 
-@command("!consult", section="team", help="consult (moved from handle)", writes=True)
+@command("!consult", section="team", help="<question> = ask them separately, let them read each other, get one prompt back", writes=True)
 def _cmd_consult(ctx, arg):
     return consult_start(ctx.cfg, ctx.state, ctx.topic, arg)
 
 
-@command("!use", section="team", help="use (moved from handle)", writes=True)
+@command("!use", section="team", help="[agent] = run the consult result", writes=True)
 def _cmd_use(ctx, arg):
     return use_prompt(ctx.cfg, ctx.state, ctx.topic, arg)
 
 
-@command("!plan", section="night", help="plan (moved from handle)", writes=True)
+@command("!plan", section="night", help="<big task> = the agent splits it into steps, run one at a time", writes=True)
 def _cmd_plan(ctx, arg):
     return plan_start(ctx.cfg, ctx.state, ctx.topic, arg)
 
 
-@command("!fan", section="night", help="fan (moved from handle)", writes=True)
+@command("!fan", section="night", help="<big task> = the agent splits it into independent tasks; go opens a topic + worktree + agent for each, clean closes them", writes=True)
 def _cmd_fan(ctx, arg):
     return fan_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
 
 
-@command("!autoyes", section="talk", help="autoyes (moved from handle)", writes=True)
+@command("!autoyes", section="talk", help="<agent|off> = answer that agent's permission menus for it", writes=True)
 def _cmd_autoyes(ctx, arg):
     cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
     cur = list((cfg.get("autoyes") or {}).get(str(topic)) or [])
@@ -6184,67 +6184,67 @@ def _cmd_autoyes(ctx, arg):
               "\n!autoyes off to stop")
 
 
-@command("!goal", section="night", help="goal (moved from handle)", writes=True)
+@command("!goal", section="night", help="[n] <check> | off = run a check (tests, build) after every turn and send failures back until it passes", writes=True)
 def _cmd_goal(ctx, arg):
     return goal_cmd(ctx.cfg, ctx.lock, ctx.topic, arg)
 
 
-@command("!briefing", section="night", help="briefing (moved from handle)")
+@command("!briefing", section="night", help="[HH:MM|now|voice|off] = one morning message: done, waiting, limits (voice: also read aloud)")
 def _cmd_briefing(ctx, arg):
     return briefing_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
 
 
-@command("!deps", section="code", help="deps (moved from handle)", writes=True)
+@command("!deps", section="code", help="[fix | nightly [HH:MM|off]] = vulnerable and outdated packages", writes=True)
 def _cmd_deps(ctx, arg):
     return deps_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
-@command("!memory", section="tokens", help="memory (moved from handle)", writes=True)
+@command("!memory", section="tokens", help="[update|on|off] = project notes every agent reads on start", writes=True)
 def _cmd_memory(ctx, arg):
     return memory_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
-@command("!errors", section="code", help="errors (moved from handle)", writes=True)
+@command("!errors", section="code", help="[auto|ask|off|expose] = production errors (Sentry or any JSON) become fixes", writes=True)
 def _cmd_errors(ctx, arg):
     return errors_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
-@command("!team", section="start", help="team (moved from handle)", writes=True)
+@command("!team", section="start", help="[<user id> watch|prompt|admin] = roles for a shared group", writes=True)
 def _cmd_team(ctx, arg):
     return team_cmd(ctx.cfg, arg)
 
 
-@command("!audit", section="start", help="audit (moved from handle)", writes=True)
+@command("!audit", section="start", help="[n] = who sent what", writes=True)
 def _cmd_audit(ctx, arg):
     return audit_cmd(arg)
 
 
-@command("!look", section="see", help="look (moved from handle)", writes=True)
+@command("!look", section="see", help="<agent> shirt #hex hat cap | reset = dress that agent's avatar", writes=True)
 def _cmd_look(ctx, arg):
     return look_cmd(ctx.cfg, arg)
 
 
-@command("!relay", section="team", help="relay (moved from handle)", writes=True)
+@command("!relay", section="team", help="<planner>[,<reviewer>] <task> = one agent plans, this one builds step by step, another reviews each change", writes=True)
 def _cmd_relay(ctx, arg):
     return relay_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
-@command("!race", section="team", help="race (moved from handle)", writes=True)
+@command("!race", section="team", help="[claude,codex] <task> = each in its own worktree; you pick the winner", writes=True)
 def _cmd_race(ctx, arg):
     return race_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
 
 
-@command("!vibe", section="talk", help="vibe (moved from handle)")
+@command("!vibe", section="talk", help="1-tap Super-Intent cockpit (Build, Goal, Race, Teleport, Harvest, Wrapped)")
 def _cmd_vibe(ctx, arg):
     return vibe_cmd(ctx.cfg, ctx.state, ctx.topic, ctx.sess)
 
 
-@command("!teleport", section="start", help="teleport (moved from handle)", writes=True)
+@command("!teleport", section="start", help="[<agent>] [prompt] = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought", writes=True)
 def _cmd_teleport(ctx, arg):
     return teleport_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
-@command("!harvest", section="tokens", help="harvest (moved from handle)", writes=True)
+@command("!harvest", section="tokens", help="[add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset", writes=True)
 def _cmd_harvest(ctx, arg):
     return harvest_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
