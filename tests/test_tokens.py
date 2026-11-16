@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_tail_transcript_baselines_and_partials():
     with isolated(nightmux) as iso:
         tp = os.path.join(nightmux.FILE_DIR, "selfcheck.jsonl")

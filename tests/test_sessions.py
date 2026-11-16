@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_agentless_session_is_not_typed_into():
     with isolated(nightmux) as iso:
         # A topic with no recorded directory must not come back in $HOME: --continue

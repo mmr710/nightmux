@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_parse_reset_and_render():
     with isolated(nightmux) as iso:
         now = time.mktime((2026, 8, 7, 10, 0, 0, 0, 0, -1))

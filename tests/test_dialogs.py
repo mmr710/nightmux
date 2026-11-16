@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_agy_permission_menu():
     with isolated(nightmux) as iso:
         # agy: numbered permission menu, arrow-only trust prompt, spinner

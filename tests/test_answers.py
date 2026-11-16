@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_menu_buttons():
     with isolated(nightmux) as iso:
         menu = nightmux.menu_buttons(["Do you want to proceed?", "❯ 1. Yes",

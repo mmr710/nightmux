@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_run_times_out():
     with isolated(nightmux) as iso:
         # Something that always blocks. `tmux wait-for` only blocks once a server is

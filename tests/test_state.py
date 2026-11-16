@@ -8,9 +8,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
 
+
 def test_generated_docs_current():
     with isolated(nightmux) as iso:
-        PAIRED_TOKENS_FILE = os.path.join(__import__("tempfile").mkdtemp(), "paired_tokens.json")
         cmd_md = os.path.join(os.path.dirname(os.path.abspath(nightmux.__file__)), "docs", "COMMANDS.md")
         if os.path.exists(cmd_md):              # a git checkout, not a pip install
             with open(cmd_md) as f:
