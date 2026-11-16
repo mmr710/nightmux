@@ -1,4 +1,4 @@
-"""chunks(): message splitting. Duplicates the first asserts of selfcheck.py until it is gone."""
+"""chunks() and common_prefix()."""
 import os
 import sys
 
@@ -13,3 +13,8 @@ def test_chunks():
     big = "\n".join("y" * 100 for _ in range(100))
     assert all(len(c) <= LIMIT for c in chunks(big))
     assert "\n".join(chunks(big)) == big
+
+
+def test_common_prefix():
+    common_prefix = nightmux.common_prefix
+    assert common_prefix(["a", "b", "c"], ["a", "b", "z"]) == 2
