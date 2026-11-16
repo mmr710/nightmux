@@ -6249,6 +6249,222 @@ def _cmd_harvest(ctx, arg):
     return harvest_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
 
 
+@command("!kanban", section="start", help="every topic as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline")
+def _cmd_kanban(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    base_ = (cfg.get("office_url") or "").rsplit("/office", 1)[0]
+    if not base_.startswith("http"):
+        return "📋 the kanban needs office_url (!office shows how); locally: http://127.0.0.1:%s/board" % cfg.get("webhook_port", 9090)
+    send(cfg, topic, "📋 every topic as a card: needs you, running, queued, waiting, idle",
+         mode="plain", buttons=json.dumps({"inline_keyboard": [[{"text": "📋 open kanban", "url": base_ + "/board"}]]}))
+    return None
+
+
+@command("!office", section="see", help="the live office: a room per topic, a desk per agent · 🎨 there cycles skins")
+def _cmd_office(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    url = cfg.get("office_url")
+    if not url:
+        return ('🏢 the office needs the web server and a way in from your phone:\n'
+                '1. "webhook_port": 9090 in the config, restart nightmux\n'
+                '2. tailscale serve --bg 9090   (reachable from your tailnet only)\n'
+                '3. "office_url": "https://<this machine>.<tailnet>.ts.net/office", '
+                '!reload\nlocally it is already at http://127.0.0.1:<port>/office')
+    why = office_url_problem(url)
+    if why:
+        return f"🏢 {url} {why}, so the button would lead nowhere.\n" + office_fix(cfg, url)
+    send(cfg, topic, "🏢 the office — every topic a room, every agent a desk",
+         mode="plain", buttons=json.dumps(
+             {"inline_keyboard": [[{"text": "🏢 open office", "url": url}]]}))
+    return None
+
+
+@command("!server", section="start", help="[peer|local] = which machine runs this topic, or move it", writes=True)
+def _cmd_server(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    peers = cfg.get("peers") or {}
+    me = host_name(cfg)
+    if not arg:
+        where = peer_of(cfg, topic)
+        return (f"🖥 this topic runs on {where or me + ' (here)'}\n"
+                + ("peers: " + ", ".join(sorted(peers))
+                   + f"\n!server <peer> moves it, !server local (or !server {me}) brings it back" if peers
+                   else 'no peers yet — add "peers" to the config (README: two servers)'))
+    target = None
+    if arg.lower() in ("local", "here", me.lower()):
+        target = "local"
+    elif arg in peers:
+        target = arg
+    else:
+        for p in peers:
+            if arg.lower() == p.lower():
+                target = p
+                break
+    if not target:
+        return f"no peer '{arg}' — known: {', '.join(sorted(peers)) or 'none'}"
+    if target != "local" and cfg.get("topics", {}).get(topic):
+        return (f"this topic is bound here to '{cfg['topics'][topic]}' — !unbind it "
+                "first, or both machines would answer it")
+    with lock:
+        remote = cfg.setdefault("remote", {})
+        if target == "local":
+            remote.pop(topic, None)
+        else:
+            remote[topic] = target
+        save_cfg(cfg)
+    return (f"🔀 this topic runs here again ({me})" if target == "local" else
+            f"🔀 this topic now runs on {target}: everything typed here goes there.\n"
+            "!new <name> <dir> starts a session on it")
+
+
+@command("!failover", section="start", help="<agent> = out of usage? hand the held work to another agent now", writes=True)
+def _cmd_failover(ctx, arg):
+    cfg, state, lock, topic = ctx.cfg, ctx.state, ctx.lock, ctx.topic
+    if not arg:
+        return ("usage: !failover <agent> — hand a limit-held topic to another "
+                "agent now · installed: " + ", ".join(installed_agents(cfg)))
+    return failover(cfg, state, lock, topic, arg.split()[0].lower())
+
+
+@command("!coach", section="tokens", help="what your first-try prompts have in common")
+def _cmd_coach(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    send(cfg, topic, "🎯 reading your prompts…", mode="plain", quiet=True)
+    return coach_cmd(cfg, topic)
+
+
+@command("!lint", section="tokens", help="on|off = hold a vague prompt for ✨ improve", writes=True)
+def _cmd_lint(ctx, arg):
+    cfg, state, lock, topic, sess, mid = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, ctx.mid
+    return lint_cmd(cfg, state, lock, topic, sess, arg, mid)
+
+
+@command("!wrapped", section="see", help="[days] = two cards, one with project names and one to share")
+def _cmd_wrapped(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    return wrapped_cmd(cfg, topic, arg)
+
+
+@command("!public", section="see", help="on|expose|off = read-only office link", writes=True)
+def _cmd_public(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    return public_cmd(cfg, lock, topic, arg)
+
+
+@command("!ladder", section="tokens", help="on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when it struggles", writes=True)
+def _cmd_ladder(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    return ladder_cmd(cfg, lock, topic, arg)
+
+
+@command("!fresh", section="tokens", help="now|on|off = after a green !goal: notes to memory, /clear, re-read", writes=True)
+def _cmd_fresh(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return fresh_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!reel", section="see", help="[hours] | daily HH:MM | off = the night as a GIF")
+def _cmd_reel(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    return reel_cmd(cfg, lock, topic, arg)
+
+
+@command("!pair", section="team", help="<agent> [rounds] | off = a second agent reviews every change", writes=True)
+def _cmd_pair(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return pair_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!loopguard", section="night", help="[ping|auto|off] = notice an agent going in circles", writes=True)
+def _cmd_loopguard(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return loopguard_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!watch", section="code", help="pr [n] | merge | off = feed CI failures and review comments to the agent; merge button when green", writes=True)
+def _cmd_watch(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    return watch_cmd(cfg, lock, topic, arg)
+
+
+@command("!qa", section="night", help="03:00 [url] | now | off = the agent clicks through the app at night and files bugs as issues", writes=True)
+def _cmd_qa(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return qa_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!route", section="team", help="auto|off|stats = send each task to the agent that fits it, learned from results", writes=True)
+def _cmd_route(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    return route_cmd(cfg, lock, topic, arg)
+
+
+@command("!tools", section="see", help="[add|rm browser [all] | restart] = give the agent a browser", writes=True)
+def _cmd_tools(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return tools_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!desktop", section="see", help="[open <app>|shot|off] = a virtual desktop agents can drive", writes=True)
+def _cmd_desktop(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    return desktop_cmd(cfg, topic, arg)
+
+
+@command("!leaderboard", section="see", help="[post]", writes=True)
+def _cmd_leaderboard(ctx, arg):
+    return leaderboard_cmd(arg)
+
+
+@command("!upgrade", section="start", help="[all] = update nightmux on this machine and restart (agents keep running); all = every peer too", writes=True)
+def _cmd_upgrade(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    return upgrade_cmd(cfg, topic, arg)
+
+
+@command("!skill", section="talk", help="<name> = <prompt instructions>", writes=True, hidden=True)
+def _cmd_skill(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    return skill_cmd(cfg, topic, arg)
+
+
+@command("!update", section="start", help="[agent] = run each agent's own updater · !version", writes=True)
+def _cmd_update(ctx, arg):
+    cfg, topic = ctx.cfg, ctx.topic
+    if _updating.locked():
+        return "an agent update is already running"
+    send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
+    return update_report(update_agents(cfg, only=arg.split() or None))
+
+
+@command("!brain", section="night", help="[n] <mission> | resume | off = a supervisor reads every finished turn and sends the next step, or asks you when it needs a human", writes=True)
+def _cmd_brain(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    out = brain_cmd(cfg, lock, topic, arg)
+    if out.startswith("🧠 brain set"):      # a new mission starts the work
+        state.setdefault(sess, {}).setdefault("queue", []).append(
+            (cfg.get("brains") or {})[topic]["mission"])
+    return out
+
+
+@command("!idea", section="night", help="[@agent] <what to build> = new folder + git + SPEC.md, MVP and ./check.sh, looped until green", writes=True)
+def _cmd_idea(ctx, arg):
+    cfg, state, lock, topic = ctx.cfg, ctx.state, ctx.lock, ctx.topic
+    return idea_cmd(cfg, state, lock, topic, arg)
+
+
+@command("!po", section="night", help="<product goal> | edit <notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, then it runs each item as its own topic under !brain", writes=True)
+def _cmd_po(ctx, arg):
+    cfg, state, lock, topic, sess = ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess
+    return po_cmd(cfg, state, lock, topic, sess, arg)
+
+
+@command("!template", section="night", help="<api|cli|site|react|bot|scraper|mcp> <what for> = !idea with a stack picked", writes=True)
+def _cmd_template(ctx, arg):
+    cfg, state, lock, topic = ctx.cfg, ctx.state, ctx.lock, ctx.topic
+    return template_cmd(cfg, state, lock, topic, arg)
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -6288,125 +6504,18 @@ def handle(cfg, state, lock, topic, text, mid=None):
     cmdobj = COMMANDS.get(cmd)
     if cmdobj:
         return cmdobj.fn(Ctx(cfg, state, lock, topic, mid, sess), arg)
-    if cmd == "!upgrade":
-        return upgrade_cmd(cfg, topic, arg)
-    if cmd == "!skill":
-        return skill_cmd(cfg, topic, arg)
-    if cmd == "!update":
-        if _updating.locked():
-            return "an agent update is already running"
-        send(cfg, topic, "🔄 updating agents — can take a few minutes", mode="plain")
-        return update_report(update_agents(cfg, only=arg.split() or None))
-    if cmd == "!brain":
-        out = brain_cmd(cfg, lock, topic, arg)
-        if out.startswith("🧠 brain set"):      # a new mission starts the work
-            state.setdefault(sess, {}).setdefault("queue", []).append(
-                (cfg.get("brains") or {})[topic]["mission"])
-        return out
     if cmd in ("!issues", "!issue"):
         return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
-    if cmd == "!desktop":
-        return desktop_cmd(cfg, topic, arg)
-    if cmd == "!tools":
-        return tools_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!route":
-        return route_cmd(cfg, lock, topic, arg)
-    if cmd == "!qa":
-        return qa_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!leaderboard":
-        return leaderboard_cmd(arg)
-    if cmd == "!wrapped":
-        return wrapped_cmd(cfg, topic, arg)
-    if cmd == "!public":
-        return public_cmd(cfg, lock, topic, arg)
-    if cmd == "!lint":
-        return lint_cmd(cfg, state, lock, topic, sess, arg, mid)
-    if cmd == "!coach":
-        send(cfg, topic, "🎯 reading your prompts…", mode="plain", quiet=True)
-        return coach_cmd(cfg, topic)
-    if cmd == "!ladder":
-        return ladder_cmd(cfg, lock, topic, arg)
-    if cmd == "!fresh":
-        return fresh_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!reel":
-        return reel_cmd(cfg, lock, topic, arg)
-    if cmd == "!pair":
-        return pair_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!loopguard":
-        return loopguard_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!ship":
         return prompt_cmd(cfg, state, lock, topic, sess, ("ship " + arg).strip())
     if cmd == "!p":
         return prompt_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!watch":
-        return watch_cmd(cfg, lock, topic, arg)
     if cmd == "!shot" and arg.split()[:1] == ["android"]:
         return android_shot(cfg, topic)
     if cmd in ("!apk", "!android"):
         return android_cmd(cfg, state, lock, topic, sess, cmd, arg)
     if cmd in ("!preview", "!shot") and sess:
         return preview_cmd(cfg, topic, sess, cmd, arg)
-    if cmd == "!server":
-        peers = cfg.get("peers") or {}
-        me = host_name(cfg)
-        if not arg:
-            where = peer_of(cfg, topic)
-            return (f"🖥 this topic runs on {where or me + ' (here)'}\n"
-                    + ("peers: " + ", ".join(sorted(peers))
-                       + f"\n!server <peer> moves it, !server local (or !server {me}) brings it back" if peers
-                       else 'no peers yet — add "peers" to the config (README: two servers)'))
-        target = None
-        if arg.lower() in ("local", "here", me.lower()):
-            target = "local"
-        elif arg in peers:
-            target = arg
-        else:
-            for p in peers:
-                if arg.lower() == p.lower():
-                    target = p
-                    break
-        if not target:
-            return f"no peer '{arg}' — known: {', '.join(sorted(peers)) or 'none'}"
-        if target != "local" and cfg.get("topics", {}).get(topic):
-            return (f"this topic is bound here to '{cfg['topics'][topic]}' — !unbind it "
-                    "first, or both machines would answer it")
-        with lock:
-            remote = cfg.setdefault("remote", {})
-            if target == "local":
-                remote.pop(topic, None)
-            else:
-                remote[topic] = target
-            save_cfg(cfg)
-        return (f"🔀 this topic runs here again ({me})" if target == "local" else
-                f"🔀 this topic now runs on {target}: everything typed here goes there.\n"
-                "!new <name> <dir> starts a session on it")
-    if cmd == "!kanban":
-        base_ = (cfg.get("office_url") or "").rsplit("/office", 1)[0]
-        if not base_.startswith("http"):
-            return "📋 the kanban needs office_url (!office shows how); locally: http://127.0.0.1:%s/board" % cfg.get("webhook_port", 9090)
-        send(cfg, topic, "📋 every topic as a card: needs you, running, queued, waiting, idle",
-             mode="plain", buttons=json.dumps({"inline_keyboard": [[{"text": "📋 open kanban", "url": base_ + "/board"}]]}))
-        return None
-    if cmd == "!office":
-        url = cfg.get("office_url")
-        if not url:
-            return ('🏢 the office needs the web server and a way in from your phone:\n'
-                    '1. "webhook_port": 9090 in the config, restart nightmux\n'
-                    '2. tailscale serve --bg 9090   (reachable from your tailnet only)\n'
-                    '3. "office_url": "https://<this machine>.<tailnet>.ts.net/office", '
-                    '!reload\nlocally it is already at http://127.0.0.1:<port>/office')
-        why = office_url_problem(url)
-        if why:
-            return f"🏢 {url} {why}, so the button would lead nowhere.\n" + office_fix(cfg, url)
-        send(cfg, topic, "🏢 the office — every topic a room, every agent a desk",
-             mode="plain", buttons=json.dumps(
-                 {"inline_keyboard": [[{"text": "🏢 open office", "url": url}]]}))
-        return None
-    if cmd == "!failover":
-        if not arg:
-            return ("usage: !failover <agent> — hand a limit-held topic to another "
-                    "agent now · installed: " + ", ".join(installed_agents(cfg)))
-        return failover(cfg, state, lock, topic, arg.split()[0].lower())
     if cmd == "!help":
         text, rows = help_text(cfg, arg)
         if rows:
@@ -6417,12 +6526,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
         routed = address(cfg, state, topic, text)
         if routed is not None:
             return routed          # not addressed to anyone: falls through as text
-    if cmd == "!idea":
-        return idea_cmd(cfg, state, lock, topic, arg)
-    if cmd == "!po":
-        return po_cmd(cfg, state, lock, topic, sess, arg)
-    if cmd == "!template":
-        return template_cmd(cfg, state, lock, topic, arg)
     if cmd == "!new" or cmd[1:] in agents(cfg):
         # Bare !<agent> in a topic that already knows its directory means "switch
         # this topic to that agent" -- same project, different agent, and the one
