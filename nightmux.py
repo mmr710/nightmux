@@ -19,6 +19,7 @@ Config: ~/.nightmux.json
 }
 """
 import calendar
+import collections
 import concurrent.futures
 import contextlib
 import datetime
@@ -48,6 +49,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+
+_SWALLOWED = collections.deque(maxlen=50)   # (time, where, repr) of errors deliberately not raised
+
+_NO_ROUTE = object()   # do_GET helpers return this when the path is not theirs
+
+
+def _swallowed(where, e):
+    _SWALLOWED.append((time.time(), where, f"{type(e).__name__}: {e}"[:200]))
 import zlib
 
 VERSION = "1.6.0"
@@ -278,8 +287,8 @@ def chat_log(topic, who, text, buttons=None):
                 "inline_keyboard") or []:
             rows.append([{"text": b.get("text", ""), "data": b.get("callback_data"),
                           "url": b.get("url")} for b in row])
-    except (ValueError, AttributeError):
-        pass
+    except (ValueError, AttributeError) as e:
+        _swallowed("tg.buttons", e)
     _chat_n[0] += 1
     log = _chat.setdefault(str(topic), [])
     log.append({"id": _chat_n[0], "t": round(time.time()), "who": who, "text": text, "buttons": rows})
@@ -816,8 +825,8 @@ def get_agy_models():
                 _AGY_MODELS_CACHE["ts"] = now
                 _AGY_MODELS_CACHE["models"] = models
                 return models
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("agy.models", e)
     if _AGY_MODELS_CACHE["models"]:
         return _AGY_MODELS_CACHE["models"]
     return list(AGY_DEFAULT_MODELS)
@@ -874,7 +883,7 @@ def is_agy(sess):
             return True
         if re.search(r"Gemini .*·\s*(?:low|medium|high|xhigh)", scr, re.I):
             return True
-    except Exception:
+    except Exception:  # why: screen probe; a pane we cannot capture just is not agy
         pass
     return False
 
@@ -889,7 +898,7 @@ def is_gemini(sess):
             return True
         if "Failed to sign in" in scr and "Gemini Code Assist" in scr:
             return True
-    except Exception:
+    except Exception:  # why: screen probe; a pane we cannot capture just is not gemini
         pass
     return False
 
@@ -1224,7 +1233,7 @@ def harden_state():
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
         if os.stat(STATE_DIR).st_mode & 0o077:
             os.chmod(STATE_DIR, 0o700)
-    except OSError:
+    except OSError:  # why: best-effort chmod; a failure here is retried on the next start
         pass
 
 
@@ -1968,7 +1977,7 @@ def teleport_packet(cfg, state, topic, sess, was=None, last=None, force=False, c
                         txt = " ".join((b.get("text") or "").strip().split())
                         if len(txt) > 20:
                             notes.append("- " + txt[:240])
-        except OSError:
+        except OSError:  # why: transcript unreadable or vanished; the digest just skips it
             pass
     scr = strip_noise(pane(sess))[-12:] if sess and has_session(sess) else []
 
@@ -2138,7 +2147,7 @@ def latest_chat(root, home=None):
             cwd = _chat_cwd(path, codex)
             if cwd and (cwd == root or cwd.startswith(root + os.sep)):
                 return ("codex" if codex else "claude"), path, _chat_last(path, codex)
-        except OSError:
+        except OSError:  # why: transcript vanished while scanning; try the next candidate
             pass
     return None, None, ""
 
@@ -3556,7 +3565,7 @@ def flush_new(cfg, state, topic, sess, pane_id=None):
             st.pop(k, None)
         try:
             os.remove(os.path.join(STATE_DIR, f".notify-{sess}"))
-        except OSError:
+        except OSError:  # why: notify marker already gone
             pass
     if fresh and st["mode"] == "waiting":
         # A restart must not swallow a prompt that is already on screen.
@@ -3803,7 +3812,7 @@ def prune(now, last, live=()):
                 if os.path.getmtime(p) >= cut:
                     continue
                 os.remove(p)
-            except OSError:
+            except OSError:  # why: state file already removed or in use; the next sweep retries
                 pass
     return now
 
@@ -4481,7 +4490,7 @@ def code_newer_than(started):
         try:
             if os.stat(os.path.join(HERE, f)).st_mtime > started + 2:
                 return True
-        except OSError:
+        except OSError:  # why: source file vanished mid-check; treat as unchanged
             pass
     return False
 
@@ -5167,8 +5176,8 @@ def policy_hit(cfg, topic, text):
     for p in pol.get("deny") or []:
         try:
             pats.append(re.compile(p, re.I))
-        except re.error:
-            pass
+        except re.error as e:
+            _swallowed("policy.deny_regex", e)
     for rx in pats:
         m = rx.search(text)
         if m:
@@ -7634,8 +7643,8 @@ def pr_events(cwd, pr, seen):
                 try:
                     log = "\n".join(gh(cwd, "run", "view", m.group(1), "--log-failed")
                                     .splitlines()[-60:])
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    _swallowed("gh.ci_log", e)
             ev.append(("fail", key, f"{name}\n{log}".strip()))
     if checks and all(verdict(c) in ("SUCCESS", "SKIPPED", "NEUTRAL") for c in checks) \
             and f"green:{sha[:12]}" not in seen:
@@ -7649,8 +7658,8 @@ def pr_events(cwd, pr, seen):
         talk += [(f"inl:{c['id']}", c["user"]["login"],
                   f"on {c.get('path')}:{c.get('line') or c.get('original_line')}", c.get("body"))
                  for c in json.loads(gh(cwd, "api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/comments"))]
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        _swallowed("gh.pr_comments", e)
     # Bots are not reviewers: their comments are deploy links and coverage
     # tables, and fed to the agent as "review feedback" they were noise.
     human = [t for t in talk if not is_bot(t[1])]
@@ -7687,8 +7696,8 @@ def pr_previews(cwd, sha, checks, bot_bodies):
                                            "/statuses?per_page=1"))
             if st and st[0].get("state") == "success":
                 urls.append(st[0].get("environment_url") or st[0].get("target_url") or "")
-    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
+        _swallowed("gh.deploy_urls", e)
     for c in checks:
         name = (c.get("name") or c.get("context") or "").lower()
         if re.search(r"preview|deploy", name) and (c.get("state") or c.get("conclusion") or
@@ -8170,7 +8179,7 @@ def switch_cost(days=30):
                     continue
                 if r.get("switch") and r.get("t", 0) >= since:
                     sw.append(r)
-    except OSError:
+    except OSError:  # why: switch log missing or unreadable; no switches to report
         pass
     if not sw:
         return f"\nswitches ({days}d): none"
@@ -8186,8 +8195,8 @@ def coach_log(rec):
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(os.path.join(STATE_DIR, "corrections.jsonl"), "a") as f:
             f.write(json.dumps(rec) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        _swallowed("corrections.append", e)
 
 
 def ladder_on(cfg, topic):
@@ -8340,12 +8349,12 @@ def prompt_lessons(home=None):
                                 cur_seq = [t]
                             else:
                                 cur_seq.append(t)
-                except Exception:
+                except Exception:  # why: foreign agent DB with a schema we do not own; skip it
                     pass
             for a, b in zip(cur_seq, cur_seq[1:]):
                 rows.append((a, not is_correction(b)))
             con.close()
-        except Exception:
+        except Exception:  # why: foreign agent DB with a schema we do not own; skip it
             pass
 
     # 3. Agy transcripts (if present)
@@ -8365,11 +8374,11 @@ def prompt_lessons(home=None):
                                     c = (d.get("content") or "").strip()
                                     if c and not c.startswith(("<", "/", "!")) and not NUDGE.match(c):
                                         seq.append(c)
-                            except Exception:
+                            except Exception:  # why: one malformed record in a foreign transcript; skip the row
                                 pass
                 for a, b in zip(seq, seq[1:]):
                     rows.append((a, not is_correction(b)))
-        except Exception:
+        except Exception:  # why: foreign transcript unreadable; skip the file
             pass
 
     stats = {}
@@ -8406,7 +8415,7 @@ def lint_rewrite(cfg, topic, sess, draft):
             p = subprocess.run([claude, "-p", "--model", "haiku", ask], capture_output=True,
                                text=True, timeout=90, cwd=STATE_DIR, stdin=subprocess.DEVNULL)
             better = p.stdout.strip() if p.returncode == 0 else ""
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):  # why: optional claude -p rephrase; fall back to the plain text
             pass
     if not better or len(better) > 4000:
         better = improve_plain(cfg, topic, sess, draft)
@@ -9180,8 +9189,8 @@ def sav_save():
             with open(sav_path() + ".tmp", "w") as f:
                 json.dump(sav_data(), f)
             os.replace(sav_path() + ".tmp", sav_path())
-        except OSError:
-            pass
+        except OSError as e:
+            _swallowed("sav.write", e)
 
 
 def sav_ctx(st, new):
@@ -9585,8 +9594,8 @@ def upload_media(data, ext="png"):
         url = json.loads(res)["files"][0]["url"]
         if url:
             return url
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("upload.url", e)
     # Fallback to litterbox.catbox.moe (72h ephemeral image host)
     body_cb = (f"--{boundary}\r\n"
                'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
@@ -11370,7 +11379,7 @@ def idea_ledger():
                     out.setdefault(rec["id"], {}).update(rec)
                 except (ValueError, KeyError, TypeError):
                     continue
-    except OSError:
+    except OSError:  # why: ideas log missing; start empty
         pass
     return out
 
@@ -11379,8 +11388,8 @@ def idea_note(**rec):
     try:
         with open(os.path.join(COMPANION_DIR, "ideas.jsonl"), "a") as f:
             f.write(json.dumps(dict(rec, t=int(time.time()))) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        _swallowed("ideas.append", e)
 
 
 def idea_stats(now=None):
@@ -11446,7 +11455,7 @@ def companion_allowance(cfg, now=None):
                 m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) topic=(\S+)", line)
                 if m and time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M")) >= start - 60:
                     acted.add(m.group(2))
-    except OSError:
+    except OSError:  # why: actions log missing; nothing acted yet
         pass
     try:
         with open(sav_path()) as f:
@@ -11536,8 +11545,8 @@ def companion_log(a, text):
     try:
         with open(os.path.join(COMPANION_DIR, "actions.log"), "a") as f:
             f.write(line)
-    except OSError:
-        pass
+    except OSError as e:
+        _swallowed("actions.log", e)
 
 
 def companion_night(cfg, state, arg):
@@ -11868,7 +11877,7 @@ def mem_exclude(cwd):
             if ".nightmux/" not in have.split():
                 with open(ex, "a") as f:
                     f.write(("\n" if have and not have.endswith("\n") else "") + ".nightmux/\n")
-        except OSError:
+        except OSError:  # why: git info/exclude not writable; .nightmux/ just shows as untracked
             pass
 
 
@@ -12506,9 +12515,9 @@ def replay_frames():
                 for line in f:
                     try:
                         fr.append(json.loads(line))
-                    except ValueError:
-                        pass
-        except OSError:
+                    except ValueError as e:
+                        _swallowed("replay.parse", e)
+        except OSError:  # why: replay file vanished mid-read; keep the frames read so far
             pass
         _replay["file_n"] = len(fr)
         _replay["frames"] = [x for x in fr if x.get("t", 0) > time.time() - REPLAY_KEEP]
@@ -12679,7 +12688,7 @@ def server_metrics():
            "sessions": len(live_sessions() or {})}
     try:
         out["load"] = [round(x, 2) for x in os.getloadavg()]
-    except OSError:
+    except OSError:  # why: getloadavg unsupported on this platform; field stays None
         pass
     try:
         with open("/proc/stat") as f:
@@ -12697,7 +12706,7 @@ def server_metrics():
         with open("/proc/self/status") as f:
             out["rss_mb"] = next(round(int(l.split()[1]) / 1024, 1)
                                  for l in f if l.startswith("VmRSS"))
-    except (OSError, ValueError, KeyError, IndexError, StopIteration):
+    except (OSError, ValueError, KeyError, IndexError, StopIteration):  # why: /proc not available here; fields stay None
         pass
     du = shutil.disk_usage(os.path.expanduser("~"))
     out["disk_pct"] = round(100 * du.used / du.total, 1)
@@ -12875,7 +12884,7 @@ def deps_scan(cwd):
                                      text=True, timeout=300).stdout
                 out["vulns"] += [("high", "go", l.split(":", 1)[-1].strip()[:90])
                                  for l in txt.splitlines() if l.startswith("Vulnerability #")]
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired):  # why: govulncheck missing or timed out; scan reports without Go vulns
                 pass
         else:
             out["notes"].append("Go: go install golang.org/x/vuln/cmd/govulncheck@latest")
@@ -13457,7 +13466,7 @@ def _scan_opencode(stats, home, since):
                     d = json.loads(data) if isinstance(data, str) else (data or {})
                     if d.get("type") == "text" and not d.get("synthetic"):
                         _chat_prompt(b, d.get("text") or "", (at or 0) / 1000 or None, cwd)
-            except Exception:
+            except Exception:  # why: foreign opencode DB with a schema we do not own; skip it
                 pass
     finally:
         con.close()
@@ -13522,7 +13531,7 @@ def _scan_agy_transcript(b, home, cid):
                                 th = th or u.get("thinking_tokens") or u.get("thinking") or 0
                             _chat_call(b, "agy", i or 0, cr or 0, 0, o or 0, th or 0,
                                        (js.get("created_at") or "")[:10])
-                    except Exception:
+                    except Exception:  # why: foreign agy record we cannot parse; skip it
                         pass
                 elif "USER_INPUT" in line:
                     try:
@@ -13533,9 +13542,9 @@ def _scan_agy_transcript(b, home, cid):
                             clean_c = m_req.group(1).strip() if m_req else c.strip()
                             if clean_c:
                                 _chat_prompt(b, clean_c)
-                    except Exception:
+                    except Exception:  # why: foreign agy record we cannot parse; skip it
                         pass
-    except Exception:
+    except Exception:  # why: foreign agy transcript unreadable; skip it
         pass
 
 
@@ -16966,7 +16975,7 @@ def office_url_problem(url):
         return None if e.code in (401, 403) else f"answers HTTP {e.code}"
     except urllib.error.URLError as e:
         return "refuses the connection" if isinstance(e.reason, ConnectionRefusedError) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError):  # why: probe could not tell; report nothing
         pass
     return None
 
@@ -17323,8 +17332,8 @@ def save_paired_tokens(tokens):
             json.dump(list(_paired_tokens), f)
         os.chmod(tmp, 0o600)
         os.replace(tmp, PAIRED_TOKENS_FILE)
-    except OSError:
-        pass
+    except OSError as e:
+        _swallowed("paired_tokens.save", e)
 
 
 def new_pairing_code():
@@ -18050,7 +18059,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         try:
             ipaddress.ip_address(name)
             return True
-        except ValueError:
+        except ValueError:  # why: name is not an IP literal; fall through to the hostname rules
             pass
         cfg = getattr(getattr(self, "server", None), "cfg", None) or {}
         mine = {str(h).lower() for h in cfg.get("allowed_hosts") or []}
@@ -18095,11 +18104,8 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def do_GET(self):
-        if not self.peer_gate():
-            return
-        if not self.auth_gate():
-            return
+    def _get_pages(self):
+        """pairing, dashboard and share routes; _NO_ROUTE when none matched"""
         if self.path.startswith("/pair"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             code = (q.get("code") or [""])[0]
@@ -18178,6 +18184,10 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             base = (public_base(self.server.cfg) or (f"{proto}://{host}" if host else ""))
             return self.reply(inject_telemetry(self.server.cfg, share_page_html(self.server.cfg, q, base)),
                               "text/html; charset=utf-8")
+        return _NO_ROUTE
+
+    def _get_api(self):
+        """metrics, analysis, app shell and static routes; _NO_ROUTE when none matched"""
         if self.path == "/api/metrics":
             cfg = self.server.cfg
             with self.server.lock:
@@ -18222,6 +18232,10 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
                 return
         if self.path == "/sw.js":       # installable as an app; no offline cache
             return self.reply("self.addEventListener('fetch', () => {});", "text/javascript")
+        return _NO_ROUTE
+
+    def _get_topic_api(self):
+        """chat, term, review, setup and status routes; _NO_ROUTE when none matched"""
         if self.path.startswith("/api/chat/"):
             u = urllib.parse.urlsplit(self.path)
             topic = u.path[len("/api/chat/"):].strip("/")
@@ -18318,6 +18332,16 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             if not self.peer:
                 data = with_peers(self.server.cfg, self.path, data)
             return self.reply(json.dumps(data), "application/json")
+        return _NO_ROUTE
+
+    def do_GET(self):
+        if not self.peer_gate():
+            return
+        if not self.auth_gate():
+            return
+        for route in (self._get_pages, self._get_api, self._get_topic_api):
+            if (res := route()) is not _NO_ROUTE:
+                return res
         parts = self.path.strip('/').split('/')
         if len(parts) != 2 or parts[0] != 'topic':
             self.send_response(404)
@@ -18664,8 +18688,8 @@ def main():
         cfg = {"webhook_port": 9090, "chat_id": "local", "allow_users": [0], "topics": {}}
         try:
             save_cfg(cfg)
-        except Exception:
-            pass
+        except Exception as e:
+            _swallowed("cfg.save_default", e)
     except json.JSONDecodeError as e:
         sys.exit(bad_cfg(e))
     local_ = not cfg.get("token")
@@ -18714,7 +18738,7 @@ def main():
             print(phone_pairing(cfg), flush=True)
             try:    # not /pair?code=: this browser would spend the code the QR carries
                 webbrowser.open(f"http://127.0.0.1:{cfg['webhook_port']}/")
-            except Exception:
+            except Exception:  # why: no browser to open; the URL is printed above
                 pass
         else:
             print(f"nightmux up as a peer (not polling). topics={cfg['topics']}", flush=True)
@@ -19143,7 +19167,7 @@ class WS:
     def close(self):
         try:
             self.s.close()
-        except OSError:
+        except OSError:  # why: socket already closed
             pass
 
 
@@ -19599,6 +19623,8 @@ def doctor():
         ok = ok and passed is not False
         print(f"{mark} {label}" + (f" — {fix}" if fix and not passed else
                                    f" — {fix}" if fix and passed and label.startswith(("Claude", "agents")) else ""))
+    for ts, where, err in list(_SWALLOWED)[-10:]:
+        print(f"  swallowed {time.strftime('%H:%M:%S', time.localtime(ts))} {where}: {err}")
     return ok
 
 
@@ -19693,7 +19719,7 @@ def demo_serve(port=8099):
           "   Ctrl-C to stop · the real thing: nightmux --setup")
     try:
         srv.serve_forever()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # why: Ctrl-C is the documented way to stop the demo
         pass
 
 
