@@ -21,6 +21,8 @@ Config: ~/.nightmux.json
 import calendar
 import concurrent.futures
 import contextlib
+import datetime
+import sqlite3
 import difflib
 import hmac
 import glob
@@ -5817,7 +5819,7 @@ HELP = [
         "toward this target, even when the project is idle; reports cover targeted projects only",
     ]),
     ("tokens", "🪙 Tokens and limits", [
-        "!usage | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
+        "!usage | !quota = what is left per agy/opencode account and model group | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
         "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
@@ -6014,6 +6016,11 @@ def _cmd_usage(ctx, arg):
         u = usage_line(ctx.cfg, (ctx.state.get(s) or {}).get("snap"), sep=" ")
         rows.append(f"{s:<14}{u or ' no status-line data yet'}")
     return "\n".join(rows) or "no topics bound"
+
+
+@command("!quota", section="tokens", help="remaining quota per agy/opencode account and model group", writes=False)
+def _cmd_quota(ctx, arg):
+    return quota_report()
 
 
 @command("!sessions", section="start", help="list the tmux sessions")
@@ -12529,10 +12536,6 @@ def claude_limits(snap=None):
     return windows
 
 
-def opencode_limits(home=None):
-    return []
-
-
 def gemini_limits(home=None):
     return []
 
@@ -12625,9 +12628,11 @@ def agent_limits(cfg, state, home=None):
     ag_ad = AGENT_ADAPTERS.get("agy", {}) if "AGENT_ADAPTERS" in globals() else {}
     if ag_ad.get("limit_reader"):
         ag_lim = ag_ad["limit_reader"]() or {}
-        if ag_lim.get("pct"):
-            rows.setdefault("agy", dict(blank, agent="agy", windows=[]))["windows"].append(
-                {"label": "5h", "pct": ag_lim["pct"], "resets_at": None})
+        for x in ag_lim.get("rows", []):
+            if x["pct"] is not None:
+                short = x["group"].replace(" Models", "").replace("Claude and GPT models", "Claude+GPT")
+                rows.setdefault("agy", dict(blank, agent="agy", windows=[]))["windows"].append(
+                    {"label": f"{short} {x['window']}", "pct": 100 - x["pct"], "resets_at": x["resets_at"] or None})
 
     for r in rows.values():
         for w in r["windows"]:
@@ -13415,7 +13420,7 @@ def chat_tips(stats):
     return tips
 
 
-_agy_usage = {"at": 0, "tried": 0, "pct": 0, "claude_pct": 0}
+_agy_usage = {"at": 0, "tried": 0, "pct": 0, "claude_pct": 0, "rows": []}
 
 
 def agy_limits():
@@ -13428,19 +13433,179 @@ def agy_limits():
     return _agy_usage
 
 
-def _agy_read():
+def _agy_read(home=None, timeout=5):
+    """Parse every row of `agy -p /usage` (group, label, "N%"|"disabled", reset) into
+    dicts. With no home it also fills the legacy _agy_usage pct keys; `home` runs agy
+    as that profile. Returns [] when agy fails."""
+    env = {**os.environ, "HOME": home} if home else None
     try:
-        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=5,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(["agy", "-p", "/usage"], capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError):
-        return
-    m_gem = re.search(r"Gemini Models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-    m_cla = re.search(r"Claude and GPT models\s+Five Hour Limit Remaining\s+(\d+)%", r.stdout)
-    if m_gem:
-        _agy_usage["pct"] = 100 - int(m_gem.group(1))
-    if m_cla:
-        _agy_usage["claude_pct"] = 100 - int(m_cla.group(1))
-    _agy_usage["at"] = time.time()
+        return []
+    rows = []
+    for line in r.stdout.splitlines():
+        f = re.split(r"\t| {2,}", line.strip())  # tabs; older agy builds pad with spaces
+        if len(f) < 3:
+            continue
+        m = re.match(r"(\d+)%", f[2].strip())
+        rows.append({"group": f[0].strip(), "pct": int(m.group(1)) if m else None,
+                     "disabled": f[2].strip().lower() == "disabled",
+                     "window": "5h" if "five hour" in f[1].lower() else "7d" if "weekly" in f[1].lower() else f[1].strip(),
+                     "resets_at": f[3].strip() if len(f) > 3 else ""})
+    if not home:
+        for g, k in (("Gemini Models", "pct"), ("Claude and GPT models", "claude_pct")):
+            for x in rows:
+                if x["group"] == g and x["window"] == "5h" and x["pct"] is not None:
+                    _agy_usage[k] = 100 - x["pct"]
+        _agy_usage["rows"] = rows
+        _agy_usage["at"] = time.time()
+    return rows
+
+
+# ---------- !quota: remaining quota per agy/opencode account ----------
+# Accounts are the default agy/opencode plus every ~/.ai-profiles/{agy,opencode}N
+# (made by contrib/aiprof symlinks). Readings come from agy's /usage and, for
+# opencode, from each provider's own quota endpoint with the key it issued.
+# All subprocess/network work runs on one refresh thread; !quota only reads the cache.
+_quota = {"tried": 0, "rows": {}}
+
+
+def quota_accounts():
+    h = os.path.expanduser("~")
+    acc = [("agy", "agy", h), ("opencode", "opencode", os.path.join(h, ".local", "share"))]
+    prof = os.path.join(h, ".ai-profiles")
+    for n in sorted(os.listdir(prof)) if os.path.isdir(prof) else []:
+        m = re.fullmatch(r"(agy|opencode)\d+", n)
+        if m:
+            p = os.path.join(prof, n)
+            acc.append((n, m.group(1), p if m.group(1) == "agy" else os.path.join(p, "data")))
+    return acc
+
+
+def _quota_get(url, hdr):
+    """GET json; on failure {"_err": "<ExcName> <code>"} so a key can never leak into it."""
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "nightmux", **hdr})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"_err": f"{type(e).__name__} {getattr(e, 'code', '')}".strip()}
+
+
+def _qrow(group, window="", pct=None, note="", resets_at=""):
+    return {"group": group, "window": window, "pct": pct, "disabled": False, "note": note, "resets_at": resets_at}
+
+
+def _ms_iso(ms):
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ms else ""
+
+
+def _copilot_rows(c):
+    j = _quota_get("https://api.github.com/copilot_internal/user",
+                   {"Authorization": "token " + (c.get("refresh") or c.get("access", ""))})
+    if "_err" in j:
+        return [_qrow("github-copilot", note="error " + j["_err"])]
+    q = j.get("quota_snapshots") or {}
+    if not q:
+        return [_qrow("github-copilot", note="no Copilot plan on this GitHub account")]
+    return [_qrow("github-copilot", k, None if v.get("unlimited") else round(v.get("percent_remaining") or 0),
+                  "unlimited" if v.get("unlimited") else f"{v.get('remaining')}/{v.get('entitlement')} left",
+                  j.get("quota_reset_date", "")) for k, v in q.items()]
+
+
+def _zai_rows(c):
+    j = _quota_get("https://api.z.ai/api/monitor/usage/quota/limit", {"Authorization": "Bearer " + c.get("key", "")})
+    if "_err" in j:
+        return [_qrow("zai", note="error " + j["_err"])]
+    if not j.get("success"):
+        return [_qrow("zai", note="no coding plan (pay per token)" if j.get("code") == 500 else "error " + str(j.get("msg")))]
+    return [_qrow("zai", l.get("type", "?"), round(100 - float(l.get("percentage", 0))),
+                  resets_at=_ms_iso(l.get("nextResetTime"))) for l in (j.get("data") or {}).get("limits", [])] \
+        or [_qrow("zai", note="no limits in reply")]
+
+
+# ponytail: opencode-go has no quota API; spend is from this machine's db only and the
+# caps are a guess for a $60 model. Exact numbers are on the opencode.ai console.
+_GO_WIN, _GO_CAP = (("5h", 5 * 3600), ("7d", 7 * 86400), ("30d", 30 * 86400)), {"5h": 12, "7d": 30, "30d": 60}
+
+
+def _go_rows(data):
+    db = os.path.join(data, "opencode", "opencode.db")
+    if not os.path.exists(db):
+        return [_qrow("opencode-go", note="no local usage db")]
+    now = time.time()
+    try:
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = [(t, json.loads(d).get("cost") or 0) for t, d in c.execute(
+                "select time_created, data from session_message where type='assistant' and time_created > ? "
+                "and json_extract(data,'$.model.providerID')='opencode-go'", ((now - 30 * 86400) * 1000,))]
+        finally:
+            c.close()
+    except (sqlite3.Error, ValueError):
+        return [_qrow("opencode-go", note="local usage db unreadable")]
+    return [_qrow("opencode-go", w, note=f"${sum(c for t, c in rows if t >= (now - s) * 1000):.2f} used (cap ~${_GO_CAP[w]})")
+            for w, s in _GO_WIN]
+
+
+def opencode_limits(data_dir=None):
+    """Quota rows for one opencode data dir (default ~/.local/share): one per provider
+    window. Does network and sqlite work: call it from the refresh thread only."""
+    data = data_dir or os.path.join(os.path.expanduser("~"), ".local", "share")
+    try:
+        with open(os.path.join(data, "opencode", "auth.json")) as f:
+            auth = json.load(f)
+    except (OSError, ValueError):
+        return [_qrow("opencode", note="not signed in to any provider")]
+    out = []
+    for prov, c in auth.items():
+        c = c if isinstance(c, dict) else {}
+        out += (_copilot_rows(c) if prov == "github-copilot" else _zai_rows(c) if prov in ("zai", "zai-coding-plan")
+                else _go_rows(data) if prov == "opencode-go" else [_qrow(prov, note="no quota API known")])
+    return out
+
+
+def _quota_one(name, kind, path):
+    if kind == "opencode":
+        return opencode_limits(path)
+    if name != "agy" and not os.path.exists(os.path.join(path, ".gemini", "antigravity-cli", "antigravity-oauth-token")):
+        return [_qrow("agy", note="not signed in")]
+    return _agy_read(path, timeout=90) or [_qrow("agy", note="no output from agy /usage")]
+
+
+def _quota_refresh():
+    for name, kind, path in quota_accounts():
+        try:
+            _quota["rows"][name] = _quota_one(name, kind, path)
+        except Exception as e:
+            _quota["rows"][name] = [_qrow(kind, note="error " + type(e).__name__)]
+
+
+def quota_report():
+    """The cached readings as text; kicks a background refresh at most every 5 minutes."""
+    if time.time() - _quota["tried"] >= 300:
+        _quota["tried"] = time.time()
+        threading.Thread(target=_quota_refresh, daemon=True).start()
+    lines = []
+    for name, kind, path in quota_accounts():
+        rows = _quota["rows"].get(name)
+        if rows is None:
+            lines.append(f"{name:<11} refreshing…")
+        for r in rows or []:
+            if r.get("note") and r["pct"] is None or not r["group"]:
+                left = r["note"]
+            else:
+                left = "disabled" if r["disabled"] else f"{r['pct']}% left" + (f" ({r['note']})" if r.get("note") else "")
+            reset = ""
+            if r.get("resets_at"):
+                try:
+                    reset = "  resets " + datetime.datetime.fromisoformat(
+                        r["resets_at"].replace("Z", "+00:00")).strftime("%-d %b %H:%M")
+                except ValueError:
+                    reset = "  resets " + r["resets_at"]
+            lines.append(f"{name:<11} {r['group']:<22} {r.get('window', ''):<4} {left}{reset}".rstrip())
+    return "\n".join(lines)
 
 
 # Unified Agent Adapter Table: launch command, screen-state detector,
