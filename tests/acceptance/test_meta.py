@@ -16,7 +16,7 @@ from _h import ROOT, run
 # Ratchets for T2.2 / T2.3 PRs. Final values: MAX_TEST_FUNC 200, MAX_FUNC 250,
 # MAX_SILENT_EXCEPT 0, MIN_TESTS 150.
 MAX_TEST_FUNC = 200      # longest test function; final value, selfcheck() is gone (T2.2d)
-MAX_FUNC = 528           # nightmux.py: handle (do_GET is 253)
+MAX_FUNC = 253           # nightmux.py: do_GET (handle is 106)
 MAX_SILENT_EXCEPT = 44   # `except ...: pass` with no reason on the line
 MIN_TESTS = 198          # tests/run.py --list after T2.2d (final); never fewer
 
