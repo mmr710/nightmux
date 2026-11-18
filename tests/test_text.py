@@ -1,4 +1,4 @@
-"""test_text: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_text: cut from the old monolithic selfcheck() (pre-stub part)."""
 import calendar
 import os
 import sys
@@ -7,6 +7,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
+from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_parse_reset_and_render():
@@ -107,3 +108,11 @@ def test_detail_lines():
         assert nightmux.DETAIL.match("  ⎿  Read 200 lines") and nightmux.DETAIL.match("     … +12 lines")
         assert nightmux.DETAIL.match("▸ Thought for 3s, 282 tokens")
         assert not nightmux.DETAIL.match("● here is the answer")
+
+
+def test_arabic_layout_translation():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # Arabic keyboard layout translation
+        assert "ظةخيثم".translate(nightmux.AR_EN_MAP) == "/model"
+        assert "!ةخيثم".translate(nightmux.AR_EN_MAP) == "!model"

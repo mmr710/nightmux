@@ -1,4 +1,4 @@
-"""test_builds: cut from tests/selfcheck.py (stubbed part)."""
+"""test_builds: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import socket
@@ -140,6 +140,7 @@ def test_error_feed_sentry_and_plain():
             nightmux.error_in(ecfg_, est_, "8", {"title": "other"})
             assert "Reproduce it" in est_["e"]["queue"][0]
             assert nightmux.error_in(ecfg_, est_, "9", {})[0] == 404
+            nightmux._err_log.clear()   # error_in appends; the next test must not see it
         ocfg["hook_key"] = "k" * 24
         for key_, want_ in (("bad", 403), ("k" * 24, 404)):
             try:

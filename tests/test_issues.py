@@ -1,4 +1,4 @@
-"""test_issues: cut from tests/selfcheck.py (stubbed part)."""
+"""test_issues: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import sys

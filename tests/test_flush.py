@@ -1,4 +1,4 @@
-"""test_flush: cut from tests/selfcheck.py (stubbed part)."""
+"""test_flush: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
 import re
 import sys

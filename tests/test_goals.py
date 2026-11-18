@@ -1,4 +1,4 @@
-"""test_goals: cut from tests/selfcheck.py (stubbed part)."""
+"""test_goals: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
 import sys
 import tempfile

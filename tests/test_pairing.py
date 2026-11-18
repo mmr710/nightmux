@@ -1,4 +1,4 @@
-"""test_pairing: cut from tests/selfcheck.py (stubbed part)."""
+"""test_pairing: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import socket
