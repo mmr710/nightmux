@@ -16,7 +16,7 @@ from _h import ROOT, run
 # Ratchets for T2.2 / T2.3 PRs. Final values: MAX_TEST_FUNC 200, MAX_FUNC 250,
 # MAX_SILENT_EXCEPT 0, MIN_TESTS 150.
 MAX_TEST_FUNC = 2242     # tests/selfcheck.py:selfcheck (T2.2c cut the first half of the stubbed part)
-MAX_FUNC = 669           # nightmux.py: handle (do_GET is 253)
+MAX_FUNC = 528           # nightmux.py: handle (do_GET is 253)
 MAX_SILENT_EXCEPT = 44   # `except ...: pass` with no reason on the line
 MIN_TESTS = 123          # tests/run.py --list after T2.2c; more as selfcheck keeps splitting
 

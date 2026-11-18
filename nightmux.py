@@ -6472,6 +6472,75 @@ def _cmd_template(ctx, arg):
     return template_cmd(cfg, state, lock, topic, arg)
 
 
+@command("!issues", section="code", help="[auto [label]|auto off] = GitHub issues as buttons -> branch, fix, PR; auto also answers '/nightmux <task>' comments from collaborators", writes=True)
+def _cmd_issues(ctx, arg):
+    return issues_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, "!issues", arg)
+
+
+@command("!issue", section="code", help="<n> = this one issue -> branch, fix, PR", writes=True)
+def _cmd_issue(ctx, arg):
+    return issues_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, "!issue", arg)
+
+
+@command("!ship", section="talk", help="[notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)", writes=True)
+def _cmd_ship(ctx, arg):
+    return prompt_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, ("ship " + arg).strip())
+
+
+@command("!p", section="talk", help="[name] [args] = saved prompts as buttons (review, fix-tests, spec, explain, tidy, ship); !p save <name> <text>", writes=True)
+def _cmd_p(ctx, arg):
+    return prompt_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, arg)
+
+
+@command("!apk", section="see", help="[install]", writes=True)
+def _cmd_apk(ctx, arg):
+    return android_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, "!apk", arg)
+
+
+@command("!android", section="see", help="connect|pair <ip:port> [code]", writes=True)
+def _cmd_android(ctx, arg):
+    return android_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, ctx.sess, "!android", arg)
+
+
+@command("!resume", section="start", help="[agent] = relaunch this topic's dir with --continue", writes=True, aliases=("!restore",))
+def _cmd_resume(ctx, arg):
+    return resume_session(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
+
+
+@command("!companion", section="team", help="[agent] = a persona over every project: keeps its own memory, hands work to role agents, acts alone only where a !budget is set", writes=True)
+def _cmd_companion(ctx, arg):
+    return companion_cmd(ctx.cfg, ctx.state, ctx.lock, ctx.topic, arg)
+
+
+@command("!center", section="team", help="[off] = this topic watches every session", writes=True)
+def _cmd_center(ctx, arg):
+    cfg, lock, topic = ctx.cfg, ctx.lock, ctx.topic
+    with lock:
+        prev = cfg.get("center_topic")
+        cfg["center_topic"] = None if arg == "off" else topic
+        save_cfg(cfg)
+    if arg == "off":
+        return "command center off" if prev else "no command center was set"
+    if prev and str(prev) != str(topic):
+        return f"command center moved here from topic {prev}"
+    return "this topic is now the command center — try !board"
+
+
+@command("!board", section="team", help="all at a glance")
+def _cmd_board(ctx, arg):
+    return board_report(ctx.cfg, ctx.state)
+
+
+@command("!all", section="team", help="<sess1,sess2|--all> <prompt> = one prompt to several sessions", writes=True)
+def _cmd_all(ctx, arg):
+    return broadcast(ctx.cfg, ctx.state, ctx.topic, arg)
+
+
+@command("!stopall", section="team", help="[off] = interrupt every agent and hold every queue, shift, goal and schedule until !stopall off", writes=True)
+def _cmd_stopall(ctx, arg):
+    return stop_all(ctx.cfg, ctx.state, arg)
+
+
 def handle(cfg, state, lock, topic, text, mid=None):
     """Return reply text, or None when the message was typed into the session."""
     sess = cfg["topics"].get(topic)
@@ -6511,16 +6580,8 @@ def handle(cfg, state, lock, topic, text, mid=None):
     cmdobj = COMMANDS.get(cmd)
     if cmdobj:
         return cmdobj.fn(Ctx(cfg, state, lock, topic, mid, sess), arg)
-    if cmd in ("!issues", "!issue"):
-        return issues_cmd(cfg, state, lock, topic, sess, cmd, arg)
-    if cmd == "!ship":
-        return prompt_cmd(cfg, state, lock, topic, sess, ("ship " + arg).strip())
-    if cmd == "!p":
-        return prompt_cmd(cfg, state, lock, topic, sess, arg)
     if cmd == "!shot" and arg.split()[:1] == ["android"]:
         return android_shot(cfg, topic)
-    if cmd in ("!apk", "!android"):
-        return android_cmd(cfg, state, lock, topic, sess, cmd, arg)
     if cmd in ("!preview", "!shot") and sess:
         return preview_cmd(cfg, topic, sess, cmd, arg)
     if cmd == "!help":
@@ -6541,10 +6602,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return switch_agent(cfg, state, lock, topic, cmd[1:])
         return start_session(cfg, state, lock, topic, arg,
                              default_agent(cfg) if cmd == "!new" else cmd[1:])
-    if cmd in ("!resume", "!restore"):    # !restore: same relaunch, easier to guess
-        return resume_session(cfg, state, lock, topic, arg)
-    if cmd == "!companion":
-        return companion_cmd(cfg, state, lock, topic, arg)
     if cmd == "!suggest":
         verb, _, sid = arg.partition(" ")
         rec = idea_ledger().get(sid.strip()) or {}
@@ -6557,22 +6614,6 @@ def handle(cfg, state, lock, topic, text, mid=None):
             return "no session here to send it to"
         idea_note(id=rec["id"], status="sent")
         return send_prompt(cfg, state, topic, sess, rec["prompt"])
-    if cmd == "!center":
-        with lock:
-            prev = cfg.get("center_topic")
-            cfg["center_topic"] = None if arg == "off" else topic
-            save_cfg(cfg)
-        if arg == "off":
-            return "command center off" if prev else "no command center was set"
-        if prev and str(prev) != str(topic):
-            return f"command center moved here from topic {prev}"
-        return "this topic is now the command center — try !board"
-    if cmd == "!board":
-        return board_report(cfg, state)
-    if cmd == "!all":
-        return broadcast(cfg, state, topic, arg)
-    if cmd == "!stopall":
-        return stop_all(cfg, state, arg)
     if cmd == "!digest" and str(topic) == str(cfg.get("center_topic") or ""):
         if arg:
             return "!digest here is report-only — schedule it from each session's own topic"
