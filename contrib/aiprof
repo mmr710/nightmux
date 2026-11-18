@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# aiprof: extra accounts for agy and opencode. Called through symlinks named agyN / opencodeN:
+#   ln -s aiprof ~/.local/bin/agy3       -> `agy3` = agy with its own login (first run asks to sign in)
+#   ln -s aiprof ~/.local/bin/opencode3  -> `opencode3` = opencode with its own logins (`opencode3 auth login`)
+# Plain `agy` / `opencode` stay the default account. Profiles live in ~/.ai-profiles/<name>/.
+# agy has no config-dir option, so an agy profile gets its own HOME made of symlinks to the real one,
+# except the login files. opencode keeps HOME and gets its own data/state dirs + a private server.
+set -eu
+name=$(basename "$0"); R=$HOME; P=$R/.ai-profiles/$name
+link_all() {  # link_all SRC DST EXCLUDE...: symlink every entry of SRC into DST except EXCLUDE
+  local s=$1 d=$2 e; shift 2; mkdir -p "$d"
+  for e in "$s"/.[!.]* "$s"/*; do
+    [ -e "$e" ] || continue; b=${e##*/}
+    case " $* " in *" $b "*) continue;; esac
+    [ -e "$d/$b" ] || [ -L "$d/$b" ] || ln -s "$e" "$d/$b"
+  done
+}
+case "$name" in
+  agy[0-9]*)
+    link_all "$R" "$P" .gemini .config .ai-profiles
+    link_all "$R/.config" "$P/.config" antigravity
+    link_all "$R/.gemini" "$P/.gemini" antigravity-cli oauth_creds.json google_accounts.json gemini-credentials.json
+    mkdir -p "$P/.gemini/antigravity-cli"
+    for b in settings.json mcp plugins builtin bin knowledge; do  # shared setup, never the token or history
+      [ -e "$R/.gemini/antigravity-cli/$b" ] && [ ! -e "$P/.gemini/antigravity-cli/$b" ] && ln -s "$R/.gemini/antigravity-cli/$b" "$P/.gemini/antigravity-cli/$b"
+    done
+    HOME=$P exec "$R/.local/bin/agy" "$@" ;;
+  opencode[0-9]*)
+    mkdir -p "$P/data" "$P/state"
+    XDG_DATA_HOME=$P/data XDG_STATE_HOME=$P/state exec "$R/.opencode/bin/opencode" --standalone "$@" ;;
+  *) echo "aiprof: call me through a symlink named agyN or opencodeN" >&2; exit 2 ;;
+esac
