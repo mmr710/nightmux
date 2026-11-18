@@ -18,4 +18,7 @@ def test_swallowed_ring_and_doctor():
         nightmux.doctor()
     out = buf.getvalue()
     assert "site59: ValueError: bad 59" in out and "site49" not in out
+    with nightmux.stubbed(setup_checks=lambda *a: []):
+        rep = nightmux.doctor_report({})      # !doctor, in the daemon where they pile up
+    assert "site59: ValueError: bad 59" in rep and "site49" not in rep
     nightmux._SWALLOWED.clear()

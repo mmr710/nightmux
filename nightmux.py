@@ -19637,6 +19637,9 @@ def doctor_report(cfg=None):
         if fix and (not passed or label.startswith(("Claude", "agents", "reader"))):
             line += f" — {fix}"
         lines.append(line)
+    # The daemon is where these pile up: --doctor runs in a fresh process.
+    lines += [f"swallowed {time.strftime('%H:%M:%S', time.localtime(ts))} {where}: {err}"
+              for ts, where, err in list(_SWALLOWED)[-10:]]
     return "\n".join(lines)
 
 
