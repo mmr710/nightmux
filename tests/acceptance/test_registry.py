@@ -13,11 +13,11 @@ import sys
 
 from _h import need, nightmux, run
 
-MAX_HANDLE = 556
+MAX_HANDLE = 528
 # Ratchets for the migration PRs (T2.1 a-e). Final values: MAX_HANDLE 120,
 # MIN_COMMANDS 80, MAX_UNMIGRATED 0.
-MIN_COMMANDS = 66
-MAX_UNMIGRATED = 57
+MIN_COMMANDS = 80
+MAX_UNMIGRATED = 44
 
 
 def test_registry_shape():
