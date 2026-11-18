@@ -34,6 +34,25 @@ def test_session_commands_pass_the_gate():
             del nightmux.COMMANDS["!gatetest"], nightmux.KEYS["!gatetest"]
 
 
+def test_one_decorator_feeds_help_docs_and_gate():
+    cfg = {"agents": {}}
+    names = ("!regw", "!regr", "!regc")
+    try:
+        nightmux.command("!regw", section="talk", help="w line", writes=True)(lambda ctx, arg: "")
+        nightmux.command("!regr", section="talk", help="r line")(lambda ctx, arg: "")
+        nightmux.command("!regc", section="talk", help="c line", writes=lambda a: a == "now")(lambda ctx, arg: "")
+        for n in names:
+            assert f"- `{n}` c line".replace("c line", nightmux.COMMANDS[n].help) in nightmux.commands_md()
+            assert f"• {n} " in nightmux.help_text(cfg, "talk")[0]
+        w = nightmux.writes
+        assert w(cfg, "!regw") and not w(cfg, "!regr")
+        assert w(cfg, "!regc", "now") and not w(cfg, "!regc", "")
+    finally:
+        for n in names:
+            nightmux.COMMANDS.pop(n, None)
+
+
 if __name__ == "__main__":
     test_session_commands_pass_the_gate()
+    test_one_decorator_feeds_help_docs_and_gate()
     print("ok")

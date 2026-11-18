@@ -5650,52 +5650,18 @@ def status_report(cfg, state):
     return "\n".join(rows)
 
 
-# Everything that reaches the keyboard of a live session, or ends one. Bare text
-# is the other half and is caught separately, being everything that is not a
-# command. Listed rather than inferred: a command added later is read-only until
-# someone says otherwise, which is the safe direction for the list to be wrong in.
-WRITE_CMDS = ("!sandbox", "!undo", "!upgrade", "!skill", "!raw", "!keys", "!kill", "!new", "!resume", "!restore", "!model",
-              "!consult", "!use", "!plan", "!fan", "!autoyes", "!policy", "!rules", "!quiet",
-              "!effort", "!bind", "!unbind", "!reload", "!autocompact", "!tz",
-              "!at", "!every", "!spendcap", "!budget", "!events", "!relay", "!team", "!audit", "!look", "!shift", "!center", "!companion", "!suggest", "!all", "!stopall",
-              "!update", "!upgrade",   # run installers on the host: no business in a read-only topic
-              "!failover", "!cron",
-              "!failover", "!voice",
-              "!failover", "!ship",
-              "!server",   # re-routes the topic to another machine
-              "!goal",     # runs a shell command after every turn
-              "!brain",    # types prompts on its own
-              "!po",       # starts agents on its own
-              "!preview",  # opens a port to the tailnet
-              "!p",        # types a prompt
-              "!idea",     # creates a project and starts an agent
-              "!template",
-              "!loopguard",  # interrupts or switches the agent
-              "!memory",   # types a prompt
-              "!deps",     # runs the package managers, types a prompt
-              "!pair",     # starts a second agent and types to it
-              "!route",    # switches the topic's agent per prompt
-              "!lint",     # types the held prompt
-              "!race",     # starts agents, applies a racer's changes
-              "!public",   # can publish a page to the internet
-              "!qa",       # schedules prompts, adds a tool
-              "!leaderboard",  # posts to GitHub
-              "!ladder",   # switches the agent's model
-              "!fresh",    # clears the agent's context
-              "!tools",    # changes agent config, restarts the agent
-              "!desktop",  # starts programs, opens a VNC port to the tailnet
-              "!errors",   # can publish a port to the internet
-              "!issues", "!issue",   # sets the agent to work on an issue
-              "!apk", "!android",    # builds, installs on a phone
-              "!teleport", "!harvest",  # switches agent / queues backlog tasks
-              "!watch")    # can merge a pull request
-
-
+# Whether a command reaches the keyboard of a live session, or ends one, is the
+# writes= flag on its @command (bare text is the other half: everything that is
+# not a command). The flag defaults to False: a command added later is read-only
+# until someone says otherwise, which is the safe direction to be wrong in.
 def writes(cfg, cmd, arg=""):
     """True when this would type into the session, or take it away."""
-    return (not cmd.startswith("!") or cmd in KEYS or cmd in WRITE_CMDS
-            or cmd[1:] in agents(cfg)                # !claude, !agy: starts one
-            or (cmd == "!queue" and arg == "now"))   # releasing a hold sends
+    if not cmd.startswith("!"):
+        return True
+    c = COMMANDS.get(cmd)
+    if c:
+        return bool(c.writes(arg) if callable(c.writes) else c.writes)
+    return cmd[1:] in agents(cfg)                # !claude, !agy: starts one
 
 
 # ---------- plugins: an executable file becomes a command ----------
@@ -5743,18 +5709,17 @@ HELP = [
         "them, without switching",
         "!bind <session> | !unbind | !sessions | !kill",
         "!resume [agent] / !restore = relaunch this topic's dir with --continue",
-        "!failover <agent> = out of usage? hand the held work to another agent now",
-        "!teleport [<agent>] [prompt] = package live context (.nightmux/HANDOFF.md) and switch agents mid-thought",
-        "!server [peer|local] = which machine runs this topic, or move it",
+        "!failover",
+        "!teleport",
+        "!server",
         "!worktrees = git worktrees of this repo, and who is in each",
-        "!sandbox [on|off] = run this session's agent in a Docker container that sees only its folder and its own login (!restore to apply)",
+        "!sandbox",
         "!kanban = every topic as a card in columns: needs you, running, queued, waiting for a limit, idle (review), offline",
         "!review = what the agent changed against main: files, +/−, PR checks, and a web page with the full diff",
-        "!update [agent] = run each agent's own updater · !version",
+        "!update",
         "!team [<user id> watch|prompt|admin] = roles for a shared group · !audit [n] = "
         "who sent what",
-        "!upgrade [all] = update nightmux on this machine and restart (agents keep running); "
-        "all = every peer too",
+        "!upgrade",
     ]),
     ("talk", "💬 Talking to the agent", [
         "anything else, and /slash commands -> typed into the agent",
@@ -5763,54 +5728,44 @@ HELP = [
         "!1..!9 menu pick | !y !n !esc !int !enter !up !down !tab !mode",
         "!keys <tmux keys> | !raw <text> (types even with a menu open)",
         "!model <name> | !effort <low|medium|high> (!model alone: the agent's models as buttons)",
-        "!p [name] [args] = saved prompts as buttons (review, fix-tests, spec, "
-        "explain, tidy, ship); !p save <name> <text>",
-        "!autoyes <agent|off> = answer that agent's permission menus for it",
-        "!cron <m h dom mon dow> <prompt> = recurring prompt on a crontab schedule (see !sched)",
-        "!voice [on|off] = also send each finished turn as a voice note (needs espeak-ng or ffmpeg flite)",
-        "!ship [notes] = commit, push, open a PR, then watch CI and fix red checks until green (never merges)",
-        "!policy [on|off|deny <regex>] = dialogs auto-yes must leave to you (rm -rf, push, sudo...)",
+        "!p",
+        "!autoyes",
+        "!cron",
+        "!voice",
+        "!ship",
+        "!policy",
         "♾ always (button) = yes, and the same request is answered yes from then on · !rules [clear|<n> off]",
-        "!quiet 23:00-07:00 | off = updates land silently; questions, nudges, exits still ring",
+        "!quiet",
         "!pane [lines] | !verbose | !ctl · type / for autocomplete",
     ]),
     ("night", "🌙 Overnight and schedules", [
-        "!po <product goal> | edit <notes> | go [n,n] | off = the brain drafts a roadmap, you approve it, "
-        "then it runs each item as its own topic under !brain",
-        "!brain [n] <mission> | resume | off = a supervisor reads every finished turn and sends "
-        "the next step, or asks you when it needs a human",
-        "!goal [n] <check> | off = run a check (tests, build) after every turn "
-        "and send failures back until it passes",
-        "!shift then one prompt per line = a sequential overnight plan",
-        "!plan <big task> = the agent splits it into steps, run one at a time",
+        "!po",
+        "!brain",
+        "!goal",
+        "!shift",
+        "!plan",
         "!fan <big task> = the agent splits it into independent tasks; !fan go opens a topic + worktree + agent for each, !fan clean closes them",
         "!at 03:00 <prompt> | !at +90m … | !every 4h … | !sched [clear]",
-        "!queue [clear|now] = prompts waiting for the agent",
-        "!idea [@agent] <what to build> = new folder + git + SPEC.md, MVP and "
-        "./check.sh, looped until green",
-        "!template <api|cli|site|react|bot|scraper|mcp> <what for> = !idea with a stack picked",
-        "!qa 03:00 [url] | now | off = the agent clicks through the app at night "
-        "and files bugs as issues",
-        "!loopguard [ping|auto|off] = notice an agent going in circles",
-        "!briefing [HH:MM|now|voice|off] = one morning message: done, waiting, limits "
-        "(voice: also read aloud)",
-        "!digest [HH:MM|off] = what happened while you slept",
+        "!queue",
+        "!idea",
+        "!template",
+        "!qa",
+        "!loopguard",
+        "!briefing",
+        "!digest",
     ]),
     ("team", "👥 Several agents at once", [
         "!consult <question> = ask them separately, let them read each other, "
         "get one prompt back · !use [agent] runs it",
-        "!pair <agent> [rounds] | off = a second agent reviews every change",
-        "!race [claude,codex] <task> = each in its own worktree; you pick the winner",
-        "!relay <planner>[,<reviewer>] <task> = one agent plans, this one builds step "
-        "by step, another reviews each change",
+        "!pair",
+        "!race",
+        "!relay",
         "!arena = every race you judged: wins per agent, and who wins which kind of task",
-        "!route auto|off|stats = send each task to the agent that fits it, "
-        "learned from results",
-        "!all <sess1,sess2|--all> <prompt> = one prompt to several sessions",
-        "!stopall [off] = interrupt every agent and hold every queue, shift, goal and schedule until !stopall off",
+        "!route",
+        "!all",
+        "!stopall",
         "!center [off] = this topic watches every session · !board = all at a glance",
-        "!companion [agent] = a persona over every project: keeps its own memory, hands "
-        "work to role agents, acts alone only where a !budget is set",
+        "!companion",
         "!companion night [01:00] [07:30] | night off = rounds every 2h through the night, "
         "a morning summary at the end",
         "!companion watch [3h] | watch off = by day: progress per project and ideas you tap "
@@ -5820,49 +5775,44 @@ HELP = [
     ]),
     ("tokens", "🪙 Tokens and limits", [
         "!usage | !quota = what is left per agy/opencode account and model group | !ctx | !cost [days|top [days]] | !forecast = when each window fills",
-        "!harvest [add <task>|now|ceiling 85|window 60|clear|on|off] = burn unused 5-hour quota window capacity before reset",
+        "!harvest",
         "!autocompact <pct|150k|off> = /compact at a share or a token count "
         "(default 200k; Claude also compacts mid-turn there) · "
         "!autocompact park <45m|off> = compact sessions idle that long over 100k (default 45m) · !idlectx <pct|off>",
-        "!ladder on|off = Claude on haiku/sonnet/opus (or Agy low/med/high) by task, up a step when "
-        "it struggles",
-        "!fresh now|on|off = after a green !goal: notes to memory, /clear, re-read",
-        "!spendcap <turns|500k|2M|off> = interrupt a runaway loop",
+        "!ladder",
+        "!fresh",
+        "!spendcap",
         "!budget <50M|$20> [day|week|month] | off = a token or dollar allowance for this project; "
         "once spent, new prompts wait for the next period",
         "!lint on|off = hold a vague prompt for ✨ improve · !coach = what your "
         "first-try prompts have in common",
-        "!memory [update|on|off] = project notes every agent reads on start",
+        "!memory",
         "!stats [days] = tokens, cache and prompts per agent · !saved",
         "!tokens [days] = tokens and API-list dollars per agent, what the cache saved, "
         "today's pace, costly habits",
     ]),
     ("code", "🔧 Git, PRs and production", [
         "!git | !diff | !get <path> = the session's repo and files",
-        "!undo [n] = snapshots taken before every prompt; n restores one (undoable)",
-        "!watch pr [n] | merge | off = feed CI failures and review comments "
-        "to the agent; merge button when green",
-        "!issues [auto [label]|auto off] = GitHub issues as buttons -> branch, "
-        "fix, PR; auto also answers '/nightmux <task>' comments from collaborators",
-        "!issue <n> = this one issue -> branch, "
-        "fix, PR",
-        "!errors [auto|ask|off|expose] = production errors (Sentry or any JSON) "
-        "become fixes",
-        "!deps [fix | nightly [HH:MM|off]] = vulnerable and outdated packages",
+        "!undo",
+        "!watch",
+        "!issues",
+        "!issue",
+        "!errors",
+        "!deps",
     ]),
     ("see", "👀 Watch and share", [
         "!office = the live office: a room per topic, a desk per agent · 🎨 there "
         "cycles skins",
-        "!look <agent> shirt #hex hat cap | reset = dress that agent's avatar",
+        "!look",
         "!events <url> | ntfy [topic] | test | off = POST needs_input/done/limit/resumed to a URL "
         "(Home Assistant, lights)",
         "!status | !board | !log (daemon journal) | !grep <text> [days]",
         "!preview = the app this session serves, on your phone · "
         "!shot [:port][/path|url] = phone-size screenshot",
-        "!tools [add|rm browser [all] | restart] = give the agent a browser",
-        "!desktop [open <app>|shot|off] = a virtual desktop agents can drive",
+        "!tools",
+        "!desktop",
         "!apk [install] · !android connect|pair <ip:port> [code] · !shot android",
-        "!reel [hours] | daily HH:MM | off = the night as a GIF",
+        "!reel",
         "!wrapped [days] = two cards, one with project names and one to share · !public on|expose|off = "
         "read-only office link · !leaderboard [post]",
     ]),
@@ -5894,10 +5844,24 @@ def vibe_cmd(cfg, state, topic, sess):
     return ""
 
 
+def _help_lines(key, lines):
+    """A section's lines: a bare "!name" token expands to its registered help, and
+    visible commands of the section that no line mentions are appended."""
+    out = []
+    for l in lines:
+        m = re.fullmatch(r"![\w-]+", l)
+        out.append(f"{l} {COMMANDS[l].help}" if m and l in COMMANDS else l)
+    seen = "\n".join(out)
+    for name, c in COMMANDS.items():
+        if c.section == key and not c.hidden and not c.alias_of and not re.search(re.escape(name) + r"(?![\w-])", seen):
+            out.append(f"{name} {c.help}")
+    return out
+
+
 def help_text(cfg, arg=""):
     """(text, button rows). Rows only for the index, so a tap opens a section."""
     fill = lambda l: l.replace("{agents}", ", ".join(agents(cfg))).replace("{plugins}", PLUGIN_DIR)
-    section = lambda k, t, ls: t + "\n" + "\n".join("• " + fill(l) for l in ls)
+    section = lambda k, t, ls: t + "\n" + "\n".join("• " + fill(l) for l in _help_lines(k, ls))
     q = arg.strip().lower().lstrip("!")
     if q == "all":
         return "\n\n".join(section(*h) for h in HELP), None
@@ -5905,7 +5869,7 @@ def help_text(cfg, arg=""):
         if q == k:
             return section(k, t, ls) + "\n\n!help = all sections", None
     if q:
-        hits = [fill(l) for _, _, ls in HELP for l in ls if q in l.lower()]
+        hits = [fill(l) for k, _, ls in HELP for l in _help_lines(k, ls) if q in l.lower()]
         return ("\n".join("• " + l for l in hits) if hits
                 else f"nothing about '{arg}'. !help for the sections"), None
     lines = ["nightmux — tap a section, or !help <section|command|all>", ""]
@@ -5918,14 +5882,15 @@ def help_text(cfg, arg=""):
 
 
 def commands_md():
-    """docs/COMMANDS.md, from HELP — selfcheck fails when the two drift apart."""
+    """docs/COMMANDS.md, from the registry (each command's help) plus the HELP skeleton
+    (section order, combined lines); selfcheck fails when the file drifts."""
     out = ["# Commands", "", "<!-- generated by `nightmux --commands`; edit HELP in nightmux.py -->",
            "", "Everything works as `!cmd`; the common ones are also `/cmd` so Telegram "
            "autocompletes them. Anything else, including the agent's own `/compact` or "
            "`/clear`, is typed into the session. In Telegram, `!help` shows these as buttons.", ""]
     for k, t, ls in HELP:
         out += [f"## {t}", "", f"`!help {k}`", ""]
-        for l in ls:
+        for l in _help_lines(k, ls):
             l = re.sub(r"((?<![\w`])[!@/][\w<>-]+(?: <[^>]+>| \[[^\]]+\])*)", r"`\1`",
                        l.replace("{agents}", "claude, codex, agy, opencode, …")
                        .replace("{plugins}", "~/.nightmux/plugins"))
@@ -6924,7 +6889,8 @@ def _press_key(ctx, arg, cmd):
     return None
 
 
-@command("!queue", section="night", help='[clear|now] = prompts waiting for the agent', session=True)
+@command("!queue", section="night", help='[clear|now] = prompts waiting for the agent', session=True,
+         writes=lambda arg: arg == "now")      # releasing a hold sends
 def _cmd_queue(ctx, arg):
     cfg, state, sess = ctx.cfg, ctx.state, ctx.sess
     st = state.setdefault(sess, {})
