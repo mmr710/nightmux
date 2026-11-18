@@ -22,7 +22,7 @@ def test_doctor_lines_and_overall():
             assert nightmux.doctor() is False               # no config at all: nothing else to check
         with nightmux.stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]}, reader_drift=lambda: [],
                     api=lambda c, m, **kw: {"ok": True}, wired=lambda: ["stop"],
-                    run=lambda *a, **kw: "process" if "KillMode" in a else "active",
+                    run=lambda *a, **kw: "process" if "KillMode" in a else "com.nightmux" if a[0] == "launchctl" else "active",
                     shutil=_FakeShutil(), installed_agents=lambda c: ["claude"]):
             assert nightmux.doctor() is True                # every check stubbed healthy
         with nightmux.stubbed(load_cfg=lambda: {"token": "t", "chat_id": 1, "allow_users": [1]},

@@ -56,7 +56,7 @@ _NO_ROUTE = object()   # do_GET helpers return this when the path is not theirs
 
 
 def _swallowed(where, e):
-    _SWALLOWED.append((time.time(), where, f"{type(e).__name__}: {e}"[:200]))
+    _SWALLOWED.append((time.time(), where, f"{type(e).__name__}: {e}".splitlines()[0][:200]))   # gh errors run to many lines
 import zlib
 
 VERSION = "1.6.0"
