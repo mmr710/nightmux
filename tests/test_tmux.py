@@ -1,4 +1,4 @@
-"""test_tmux: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_tmux: cut from the old monolithic selfcheck() (pre-stub part)."""
 import os
 import sys
 

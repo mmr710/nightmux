@@ -1,4 +1,4 @@
-"""test_rooms: cut from tests/selfcheck.py (stubbed part)."""
+"""test_rooms: cut from the old monolithic selfcheck() (stubbed part)."""
 import contextlib
 import gzip
 import http.client, http.server

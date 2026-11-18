@@ -1,4 +1,4 @@
-"""test_dialogs: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_dialogs: cut from the old monolithic selfcheck() (pre-stub part)."""
 import json
 import os
 import sys
@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
+from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_agy_permission_menu():
@@ -205,3 +206,102 @@ def test_pane_state_busy_idle():
         assert nightmux.pane_state(["Do you want to proceed?", "❯ 1. Yes", "  2. No"]) == "waiting"
         assert nightmux.pane_state(["● Twitter moved.", "", "  Do you want me to restart egx_scrape?", "",
                            "✻ Crunched for 13s", "─" * 9, "❯ ", "─" * 9]) == "idle"
+
+
+def test_opencode_session_and_model_lists():
+    # slow
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # opencode's lists (captured from v2.0.24): the session switcher a prompt
+        # was typed into, and the model list over the chat it is drawn on.
+        ocs_ = ["      Sessions for proj                                   esc",
+                "      rsonal data. Reply with one line: memory updated.Update",
+                "      No sessions found",
+                "      delete ctrl+d  rename ctrl+r            all projects ctrl+a",
+                "   ┃  Build · GLM-5.3-Flash Free OpenCode · high",
+                "   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀"]
+        screens_, keys_ = [ocs_, ocs_[4:]], []
+        with nightmux.stubbed(visible=lambda s_: screens_.pop(0) if len(screens_) > 1 else screens_[0],
+                     tmux=lambda *a: keys_.append(a)):
+            nightmux.close_picker("x")
+        assert [a[-1] for a in keys_] == ["Escape"], keys_
+        assert not any(nightmux.OC_DIALOG.match(l) for l in ["  ┃  ↑↓ select  enter submit  esc dismiss",
+                                                   "  ⬝⬝⬝ working   esc interrupt"])
+        ocm_ = ["                    Select model                                     esc",
+                "                    glm 5.2",
+                "                    GLM-5.2                                         Z.AI",
+                "         ┃          GLM-5.2                                  OpenCode Go",
+                "         ╹▀▀▀▀▀▀    Iceman Contributor Free                         Free    ▀▀▀",
+                "                    Connect an integration ctrl+a  Favorite ctrl+f"]
+        assert nightmux.oc_rows(ocm_) == ("Select model", ["GLM-5.2 · Z.AI", "GLM-5.2 · OpenCode Go",
+                                                  "Iceman Contributor Free · Free"]), nightmux.oc_rows(ocm_)
+        assert nightmux.oc_rows(ocs_[4:]) is None
+        keys_ = []                           # "glm-5.2 opencode go" is the second row
+        with nightmux.stubbed(visible=lambda s_: ocm_ + ["   ┃  Build · GLM-5.2 OpenCode Go"], settle=lambda *a: True,
+                     close_picker=lambda s_: None, tmux=lambda *a: keys_.append(a[3:]), tgt=lambda s_: s_):
+            assert nightmux.oc_model("x", "glm-5.2 opencode go") == "🧠 opencode model: GLM-5.2 OpenCode Go"
+        assert ("Down",) in keys_ and keys_.index(("Down",)) < keys_.index(("Enter",), 2), keys_
+
+
+def test_model_pickers_captured():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # The /model pickers, captured: Claude Code (numbered, ❯), codex (›), agy (bare >).
+        cl_ = ["  Select model", "  Switch between Claude models. Your pick becomes the default",
+               "  specify with --model.",
+               "    1.  Default (recommended)  Opus 5.5 · Best for everyday",
+               "  ❯ 2.  Opus 5.5 ✔             For complex work",
+               "    3.  Sonnet 5.5             Most efficient",
+               "  ↓ 4.  Opus 4.8               Best for everyday", "     … +3 models",
+               "  ◐ Medium effort (default) ←/→ to adjust",
+               "  Enter to set as default · s to use this session only · Esc to cancel"]
+        assert nightmux.model_rows(cl_) == (["Default", "Opus 5.5", "Sonnet 5.5", "Opus 4.8"], 1), nightmux.model_rows(cl_)
+        cx_ = ["  /model - choose what model and reasoning effort to use", "  Select Model and Effort",
+               "› 1. GPT-6-Luna (default)  Fast and affordable model.",
+               "  2. GPT-5.6-Terra         Older balanced model.", "  enter select · esc back"]
+        assert nightmux.model_rows(cx_) == (["GPT-6-Luna", "GPT-5.6-Terra"], 0), nightmux.model_rows(cx_)
+        ag_ = ["> /model", "Switch Model", "  Search:", "          ────────────", "  Gemini 4 Argon",
+               "> Gemini 3.8 Flash      (current)", "  Claude Opus 5.5",
+               "  Effort  ◂        ●━━━━━━━●━━━━━◉", "Keyboard: ↑/↓ Navigate  enter Select  esc Go Back"]
+        assert nightmux.model_rows(ag_) == (["Gemini 4 Argon", "Gemini 3.8 Flash", "Claude Opus 5.5"], 1), nightmux.model_rows(ag_)
+        assert nightmux.model_rows(["❯ ", "  Select model and go"]) is None
+        keys_, scr_ = [], [cl_]       # tap "Sonnet 5.5": one Down, then this-session-only
+        def ft_(*a):
+            keys_.append(a[3:])
+            if a[3:] == ("Down",):
+                scr_[0] = [l.replace("  ❯ 2.", "    2.").replace("    3.  Sonnet", "  ❯ 3.  Sonnet") for l in cl_]
+            if a[3:] == ("s",):
+                scr_[0] = ["❯ "]
+        with nightmux.stubbed(visible=lambda s_: scr_[0], tmux=ft_, tgt=lambda s_: s_, close_picker=lambda s_: None):
+            assert nightmux.model_cmd("x", "sonnet 5.5") == "🧠 x: Sonnet 5.5"
+        assert keys_[-2:] == [("Down",), ("s",)], keys_
+
+
+def test_agy_model_selection():
+    # slow
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # agy model tests
+        agy_keys = []
+        def agy_ft_(*a):
+            agy_keys.append(a)
+        with nightmux.stubbed(visible=lambda s_: ["Antigravity CLI"], pane_state=lambda s_: "idle",
+                     tmux=agy_ft_, tgt=lambda s_: s_, close_picker=lambda s_: None):
+            assert isinstance(nightmux.model_cmd("t-agy", ""), list)
+            assert nightmux.model_cmd("t-agy", "flash") == "🧠 t-agy: Gemini 3.8 Flash (High)"
+            assert nightmux.model_cmd("t-agy", "argon") == "🧠 t-agy: Gemini 4 Argon (High)"
+        assert any("/model gemini-3.8-flash-high" in " ".join(k) for k in agy_keys)
+        assert any("/model gemini-4-argon-high" in " ".join(k) for k in agy_keys)
+
+
+def test_close_picker_dismisses_switch_model():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # close_picker dismissing Switch Model and banner
+        esc_keys = []
+        def esc_ft_(*a):
+            if "Escape" in a:
+                esc_keys.append("Escape")
+        with nightmux.stubbed(visible=lambda s_: ["Switch Model", "esc Go Back"], tgt=lambda s_: s_, tmux=esc_ft_):
+            nightmux.close_picker("t-agy")
+        assert "Escape" in esc_keys

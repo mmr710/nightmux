@@ -1,12 +1,14 @@
-"""test_state: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_state: cut from the old monolithic selfcheck() (pre-stub part)."""
 import json
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
+from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_generated_docs_current():
@@ -133,3 +135,28 @@ def test_snapshot_newest_fresh_and_prune():
         os.utime(os.path.join(nightmux.STATE_DIR, "e.json"), (0, 0))
         nightmux.prune(time.time(), 0)
         assert nightmux.snapshot("%1") is None                   # ... a day of it does
+
+
+def test_prune_skips_non_snapshot_json():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # A non-snapshot JSON in the shared state dir (a list, from another tool)
+        # once crash-looped the daemon at startup inside snapped().
+        with tempfile.TemporaryDirectory() as sd_, nightmux.stubbed(STATE_DIR=sd_):
+            with open(os.path.join(sd_, "stray.json"), "w") as f:
+                json.dump(["x"], f)
+            with open(os.path.join(sd_, "s1.json"), "w") as f:
+                json.dump({"pane": "%9", "ts": time.time()}, f)
+            assert list(nightmux.snapped()) == ["%9"] and list(nightmux.snapped()) == ["%9"]
+
+
+def test_prune_ignores_non_snapshot_state_json():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # A non-snapshot json in the state dir must not stop prune (and the watcher).
+        with tempfile.TemporaryDirectory() as td_:
+            with open(os.path.join(td_, "paired_tokens.json"), "w") as f_:
+                json.dump(["x"], f_)
+            with nightmux.stubbed(STATE_DIR=td_):
+                assert nightmux.snap_pane(os.path.join(td_, "paired_tokens.json")) is None
+                nightmux.prune(time.time(), 0.0, {"%1"})

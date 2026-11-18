@@ -6,9 +6,12 @@
 `screen` is what pane()/visible() return; `sent` collects the text of every send().
 Call it inside isolated(): that is what puts the module's globals back afterwards.
 """
+import os
 
 
 def legacy_stubs(mod):
+    for d in (mod.FILE_DIR, mod.STATE_DIR):
+        os.makedirs(d, exist_ok=True)
     cfg, state, screen, sent = {"topics": {}, "chat_id": -1}, {}, [], []
     mod.send = lambda c, t, x, mode="mono", buttons=None, quiet=False: (sent.append(x), 77)[1]
     mod.has_session = lambda s: True

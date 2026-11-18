@@ -1,4 +1,4 @@
-"""test_integrations: cut from tests/selfcheck.py (stubbed part)."""
+"""test_integrations: cut from the old monolithic selfcheck() (stubbed part)."""
 import http.client, http.server
 import json
 import os

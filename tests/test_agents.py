@@ -1,9 +1,10 @@
-"""test_agents: cut from tests/selfcheck.py (stubbed part)."""
+"""test_agents: cut from the old monolithic selfcheck() (stubbed part)."""
 import contextlib
 import json
 import os
 import shutil
 import sys
+import tempfile
 import threading
 import time
 
@@ -133,3 +134,24 @@ def test_failover_hands_work_to_other_agent():
             n = len(fsent)
             nightmux.failover_tick(fcfg, fstate, lk_)                         # refused once,
             assert len(fsent) == n and fstate["p"]["queue"] == ["x"]  # not every tick
+
+
+def test_agent_defaults_and_claude_has_chat():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
+        assert nightmux.agent(cfg2, "claude") == ("claude", "--continue")
+        with tempfile.TemporaryDirectory() as pj_:
+            old_pj_ = nightmux.PROJECTS
+            nightmux.PROJECTS = pj_
+            try:
+                assert not nightmux.claude_has_chat("/www/agent")
+                os.makedirs(os.path.join(pj_, "-www-agent"))
+                open(os.path.join(pj_, "-www-agent", "s.jsonl"), "w").close()
+                assert nightmux.claude_has_chat("/www/agent") and not nightmux.claude_has_chat("/www/other")
+            finally:
+                nightmux.PROJECTS = old_pj_
+        assert nightmux.agent(cfg2, "opencode") == ("opencode", "--resume")    # added by config
+        assert nightmux.agent(cfg2, "nope") == ("nope", "")   # one-off: the key is the command
+        assert nightmux.default_agent(cfg2) == "claude"
+        assert nightmux.default_agent({"agent": "codex"}) == "codex"

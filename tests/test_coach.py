@@ -1,4 +1,4 @@
-"""test_coach: cut from tests/selfcheck.py (stubbed part)."""
+"""test_coach: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import re

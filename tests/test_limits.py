@@ -1,5 +1,7 @@
-"""test_limits: cut from tests/selfcheck.py (stubbed part)."""
+"""test_limits: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
+import queue
+import re
 import sys
 import threading
 import time
@@ -211,3 +213,109 @@ def test_scheduled_prompt_waits_behind_hold():
             except ValueError:
                 pass
         assert nightmux.parse_every("no duration here") == 0
+
+
+def test_limit_hold_resume_refused_trace_and_banner_chain():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+
+        # A turn cut off mid-flight has nothing left in the queue to bring it back,
+        # so the hold queues its own continuation and the ordinary drain runs it.
+        st["mode"], st["queue"], typed[:] = "busy", [], []
+        st.pop("last", None)                          # nothing typed just before it
+        st["snap"] = {"ts": time.time(),
+                      "five_hour": {"used_percentage": 100, "resets_at": time.time() + 5}}
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, True)
+        assert st["queue"] == ["continue"] and "resuming itself" in sent[-1], sent[-1]
+        st["mode"], st["limit_until"] = "idle", time.time() - 1
+        nightmux.drain(cfg, state, "1", "s")
+        assert typed == ["continue"] and st["queue"] == [], typed
+        st.pop("limit_line", None), st.pop("prog_msg", None)
+        # That resume landed on a window that was still shut: the prompt it just sent
+        # never got a turn, so it goes back rather than being lost to the refusal.
+        st["queue"], st["limit_line"] = [], None
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, False)
+        assert st["queue"] == ["continue"], st["queue"]
+        st["queue"], st["limit_line"] = [], None      # an idle session with nothing
+        st.pop("last")                                # outstanding is left alone
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, False)
+        assert st["queue"] == [] and st["limit_until"] > time.time()
+        st.pop("limit_until"), st.pop("limit_line")
+        # A prompt refused the moment it was typed did no work: it goes back whole,
+        # rather than a `continue` that would resume nothing.
+        st["mode"], st["queue"] = "busy", []
+        st["last"], st["last_at"], st["ran"] = "the refused prompt", time.time(), False
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, True)
+        assert st["queue"] == ["the refused prompt"], st["queue"]
+        # ...and it does not need a busy pane to notice, because a prompt that was
+        # refused is exactly the case where nothing was running to see it.
+        st["queue"], st["limit_line"] = [], None
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, False)
+        assert st["queue"] == ["the refused prompt"], st["queue"]
+        # A prompt whose turn did run is a different thing, and must not be re-sent.
+        st["queue"], st["limit_line"], st["ran"] = [], None, True
+        nightmux.check_limit(cfg, st, "1", "s", screen, False, False)
+        assert st["queue"] == [], st["queue"]
+        st["ran"], st["queue"] = False, ["the refused prompt"]   # for what follows
+        # ...and a window that reopens onto a pane that cannot take it says so, once,
+        # instead of looking like a hold that never lifted.
+        st["mode"], st["limit_until"], n = "busy", time.time() - 1, len(sent)
+        nightmux.drain(cfg, state, "1", "s")
+        assert "1 queued, but the pane is busy" in sent[-1], sent[-1]
+        nightmux.drain(cfg, state, "1", "s")
+        assert len(sent) == n + 1 and st["queue"] == ["the refused prompt"]
+        for k in ("snap", "queue", "last", "last_at", "resumed", "limit_line"):
+            st.pop(k, None)
+
+        # The turn is open until its output lands, and the pane reads idle for the
+        # tick or two between a refusal and the status line admitting the window is
+        # spent — so the live trace, not the pane's mode, is what says work was cut.
+        st["mode"], st["queue"], screen[:] = "idle", [], ["● done"] + box
+        st["prog_msg"], st["snap"] = 77, {
+            "ts": time.time(),
+            "five_hour": {"used_percentage": 100, "resets_at": time.time() + 5}}
+        st.pop("last", None), st.pop("limit_line", None)
+        with nightmux.stubbed(snapshot=lambda p: st["snap"]):
+            nightmux.flush_new(cfg, state, "1", "s")
+        assert st["queue"] == ["continue"], st["queue"]
+        # The same, for a session driven from its own terminal: no prompt of ours was
+        # typed, so no live trace exists and the pane can read idle at the very tick
+        # the window is found spent. A transcript that grew seconds ago is the turn.
+        for k in ("queue", "limit_until", "limit_line", "prog_msg"):
+            st.pop(k, None)
+        st["mode"], st["last_gain"] = "idle", time.time()
+        with nightmux.stubbed(snapshot=lambda p: st["snap"]):
+            nightmux.flush_new(cfg, state, "1", "s")
+        assert st["queue"] == ["continue"], st["queue"]
+        st["last_gain"] = time.time() - nightmux.ACTIVE_RECENT - 1   # ...but not hours later
+        for k in ("queue", "limit_until", "limit_line"):
+            st.pop(k, None)
+        with nightmux.stubbed(snapshot=lambda p: st["snap"]):
+            nightmux.flush_new(cfg, state, "1", "s")
+        assert not st.get("queue"), st.get("queue")
+        st.pop("last_gain")
+        for k in ("queue", "limit_until", "limit_line", "prog_msg", "snap"):
+            st.pop(k, None)
+
+        # A banner that is merely still on screen is not a new limit: only what the
+        # tick actually gained is evidence, or every resume re-holds on its own past.
+        st["mode"], screen[:] = "idle", ["You've hit your 5-hour limit · resets in 1h 0m"]
+        nightmux.flush_new(cfg, state, "1", "s")                # first sight: a real hold
+        assert st["limit_until"] > time.time() and st.get("queue") is None
+        st.pop("limit_until")
+        nightmux.flush_new(cfg, state, "1", "s")                # same screen, nothing gained
+        assert "limit_until" not in st
+        st.pop("limit_line", None)

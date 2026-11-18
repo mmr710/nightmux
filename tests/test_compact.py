@@ -1,6 +1,7 @@
-"""test_compact: cut from tests/selfcheck.py (stubbed part)."""
+"""test_compact: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -130,3 +131,27 @@ def test_context_warnings_and_autocompact():
         st["ctx_tok"] = 10000                        # compacted: re-arm
         nightmux.autocompact(tokc, state, "1", "s")
         assert "compacted" not in st and typed == ["/compact"] * 2
+
+
+def test_park_compact():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
+        typed = []
+        with nightmux.stubbed(send=lambda *a, **k: None, inject=lambda s_, t: typed.append(t),
+                     remember=lambda *a: None, agent_key=lambda *a: "claude"):
+            pc = {"autocompact": "200k", "park_compact": 20}
+            nightmux.autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                                   "changed": time.time() - 30 * 60}}, "1", "s")
+            nightmux.autocompact(pc, {"s": {"mode": "idle", "ctx_tok": 110000,
+                                   "changed": time.time() - 5 * 60}}, "1", "s")
+            nightmux.autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                         "changed": time.time() - 30 * 60}}, "1", "s")      # default 45m: not yet
+            nightmux.autocompact({"autocompact": "200k"}, {"s": {"mode": "idle", "ctx_tok": 110000,
+                         "changed": time.time() - 50 * 60}}, "1", "s")      # default 45m: now
+            nightmux.autocompact({"autocompact": "200k", "park_compact": None}, {"s": {"mode": "idle",
+                         "ctx_tok": 110000, "changed": time.time() - 50 * 60}}, "1", "s")  # off
+        assert typed == ["/compact", "/compact"], typed
+        with nightmux.stubbed(save_cfg=lambda c: None, has_session=lambda n: True):
+            ac_ = nightmux.handle({"topics": {"1": "s"}, "autocompact": "200k"}, {}, threading.Lock(), "1", "!autocompact")
+        assert "200,000 tokens" in ac_ and "idle 45m" in ac_, ac_

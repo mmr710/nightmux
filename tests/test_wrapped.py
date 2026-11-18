@@ -1,4 +1,4 @@
-"""test_wrapped: cut from tests/selfcheck.py (stubbed part)."""
+"""test_wrapped: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import subprocess

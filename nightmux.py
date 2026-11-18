@@ -19252,7 +19252,7 @@ def process(cfg, state, lock, allow, upd):
 
 @contextlib.contextmanager
 def stubbed(**globs):
-    """Swap module globals for one section of the selfcheck, and put them back.
+    """Swap module globals for one test, and put them back.
 
     A stub left standing is the worst kind of failure here: the section that set
     it passes, and one three hundred lines later fails for a reason that has
@@ -19269,11 +19269,11 @@ def stubbed(**globs):
 
 
 def selfcheck():
-    """The suite lives in tests/; tests/run.py runs the legacy selfcheck test."""
+    """Run the whole suite: tests/run.py, every tests/test_*.py function."""
     runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "run.py")
     if not os.path.exists(runner):
-        sys.exit("selfcheck needs a git checkout: tests/selfcheck.py is not shipped in the pip package")
-    sys.exit(subprocess.call([sys.executable, runner, "-k", "test_selfcheck.py::"]))
+        sys.exit("selfcheck needs a git checkout: tests/ is not shipped in the pip package")
+    sys.exit(subprocess.call([sys.executable, runner]))
 
 
 _drift = {}
@@ -19820,7 +19820,7 @@ USAGE = """usage: nightmux [command | option]
   --mcp-desktop        MCP server for the desktop app
   --commands           every command, as markdown
   --version            version and what it runs on
-  --selfcheck          the built-in tests
+  --selfcheck          run the whole test suite (tests/run.py; needs a git checkout)
   -h, --help           this text
 """
 

@@ -4,14 +4,19 @@
 Tests every reader against recorded fixtures from real CLI output to guard
 against schema and format drift (e.g. OpenCode v1 vs v2, Agy transcripts, Codex rollouts).
 """
+import datetime
+import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
+from _iso import isolated  # noqa: E402
+from _legacy import legacy_stubs  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -144,3 +149,33 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_agy_context_of_newest_conversation():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # agy: the context of its newest conversation in this folder, 0 after its CHECKPOINT
+        with tempfile.TemporaryDirectory() as ah_:
+            root_ = os.path.join(ah_, ".gemini", "antigravity-cli")
+            os.makedirs(os.path.join(root_, "brain", "c2", ".system_generated", "logs"))
+            con_ = sqlite3.connect(os.path.join(root_, "conversation_summaries.db"))
+            con_.execute("CREATE TABLE conversation_summaries (conversation_id text, workspace_uris text, "
+                         "nesting_depth integer, last_modified_time datetime)")
+            con_.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?)",
+                             [("c1", '["file:///w/app"]', 0, "2026-10-01"), ("c2", '["file:///w/app"]', 0, "2026-10-02"),
+                              ("c3", '["file:///w/app2"]', 0, "2026-10-03"), ("c4", '["file:///w/app"]', 1, "2026-10-04")])
+            con_.commit()
+            con_.close()
+            tf_ = os.path.join(root_, "brain", "c2", ".system_generated", "logs", "transcript.jsonl")
+            with open(tf_, "w") as f:
+                f.write(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 3000, "cache_read_tokens": 140000}) + "\n")
+            assert nightmux.agy_ctx("/w/app", home=ah_) == 143000 and nightmux.agy_ctx("/w/none", home=ah_) is None
+            with open(tf_, "a") as f:
+                f.write(json.dumps({"type": "CHECKPOINT"}) + "\n")
+            assert nightmux.agy_ctx("/w/app/", home=ah_) == 0
+        screens_ = [["Search: Continue", "  esc Go back / Clear search"], ["  esc Go back / Clear search"], [">"]]
+        keys_ = []
+        with nightmux.stubbed(visible=lambda s_: screens_.pop(0) if len(screens_) > 1 else screens_[0],
+                     tmux=lambda *a: keys_.append(a)):
+            nightmux.close_picker("x")
+        assert [a[-1] for a in keys_] == ["Escape", "Escape"], keys_   # two, never a third

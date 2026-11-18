@@ -1,4 +1,4 @@
-"""test_bridge: cut from tests/selfcheck.py (stubbed part)."""
+"""test_bridge: cut from the old monolithic selfcheck() (stubbed part)."""
 import html
 import json
 import os

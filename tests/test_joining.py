@@ -1,4 +1,4 @@
-"""test_joining: cut from tests/selfcheck.py (stubbed part)."""
+"""test_joining: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import socket

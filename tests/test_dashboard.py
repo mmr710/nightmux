@@ -1,4 +1,4 @@
-"""test_dashboard: cut from tests/selfcheck.py (stubbed part)."""
+"""test_dashboard: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
 import sys
@@ -169,3 +169,21 @@ def test_dashboard_extras_metrics_limits_chat():
             assert tl_["lines"][0] == "one" and "ghp_" + "a" * 36 not in json.dumps(tl_), tl_
             assert tl_["mode"] == "busy" and len(tl_["lines"]) == 2, tl_
         assert nightmux.term_lines({"topics": {}}, {}, "7")["error"] == "topic not bound"
+
+
+def test_board_page_and_office_url():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
+        spawned, lk = [], threading.Lock()
+        nightmux.spawn = lambda n, cwd, line, cfg=None: spawned.append((n, cwd, line))
+        nightmux.has_session = lambda n: False
+        nightmux.start_session(cfg2, {}, lk, "9", "box ~ --sandbox", "codex")
+
+        # the board: page served, !board without and with office_url
+        assert "/api/topics" in nightmux.BOARD_HTML and "'needs'" in nightmux.BOARD_HTML
+        sent_b = []
+        with nightmux.stubbed(send=lambda *a, **k: sent_b.append((a, k))):
+            assert "kanban needs office_url" in nightmux.handle(dict(cfg2, office_url=None), {}, lk, "9", "!kanban")
+            assert nightmux.handle(dict(cfg2, office_url="https://b.ts.net:9090/office"), {}, lk, "9", "!kanban") is None
+            assert "https://b.ts.net:9090/board" in sent_b[-1][1]["buttons"], sent_b

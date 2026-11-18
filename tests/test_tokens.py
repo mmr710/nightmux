@@ -1,4 +1,4 @@
-"""test_tokens: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_tokens: cut from the old monolithic selfcheck() (pre-stub part)."""
 import json
 import os
 import re

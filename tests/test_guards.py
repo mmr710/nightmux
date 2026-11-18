@@ -1,10 +1,12 @@
-"""test_guards: cut from tests/selfcheck.py (stubbed part)."""
+"""test_guards: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
@@ -85,3 +87,74 @@ def test_loop_guard_two_signs():
             assert len(lsaid_) == 1                  # cooldown
             nightmux._loop.clear()
             shutil.rmtree(lgit_)
+
+
+def test_unhandled_command_cancel_button_is_real():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+
+        n, t = len(sent), len(typed)                  # kill asks before it kills
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!kill") is None
+        assert sent[-1].startswith("⚠️ kill tmux session 's'?"), sent[-1]
+        assert cfg["topics"].get("1") == "s"          # nothing killed, still bound
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!cancel") == "cancelled"
+        # An unhandled !command is typed into the session as text, so the cancel
+        # button has to be a real command or declining would inject "!cancel".
+        assert len(sent) == n + 1 and len(typed) == t, (sent[n:], typed[t:])
+        screen[:] = ["● done"] + box
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "next task") is None
+        assert typed[-1] == "next task", typed
+
+
+def test_readonly_topic_never_reaches_keyboard():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+
+        # A read-only topic reports and searches, and never reaches the keyboard.
+        cfg["modes"], ro_typed = {"1": "readonly"}, len(typed)
+        for blocked in ("hello there", "!raw rm -rf /", "!1", "!kill", "!new x",
+                        "!queue now", "!claude"):
+            assert nightmux.handle(cfg, state, threading.Lock(), "1", blocked).startswith("🔒"), blocked
+        assert len(typed) == ro_typed and cfg["topics"].get("1") == "s"   # nothing typed
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!status") == nightmux.status_report(cfg, state)
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!queue").startswith("0 queued")
+        cfg.pop("modes")                              # full again for what follows
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!queue clear") is not None
+
+
+def test_prompt_calling_model_said_once():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # A prompt that keeps calling the model: said once, with an esc button.
+        sent_c = []
+        with nightmux.stubbed(send=lambda c, t, x, **k: sent_c.append(x), agent_key=lambda c, t, s: "agy"):
+            stc = {"calls": nightmux.CALLS_WARN, "ctx_tok": 150000}
+            nightmux.warn_ctx({}, stc, "1", "s")
+            nightmux.warn_ctx({}, stc, "1", "s")
+            assert len(sent_c) == 1 and f"{nightmux.CALLS_WARN} model calls" in sent_c[0] and "150k" in sent_c[0], sent_c

