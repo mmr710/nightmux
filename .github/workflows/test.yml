@@ -5,6 +5,27 @@ on:
   pull_request:
 
 jobs:
+  # Real bugs only, no style: undefined names, syntax errors, mutable or call
+  # defaults. tests/ is not linted yet: ~230 unused imports and locals there,
+  # left over from the selfcheck split, none of them a bug.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: pipx run ruff check --select F,E9,B006,B008 --output-format github *.py
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: brew install tmux
+      - run: python nightmux.py --selfcheck
+
   selfcheck:
     # 22.04 is the newest runner image setup-python still has 3.8 for, and 3.8 is
     # the floor nightmux supports — it is what Ubuntu 20.04 LTS ships, and that is a
