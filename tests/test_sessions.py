@@ -200,7 +200,7 @@ def test_no_dir_gets_own_folder():
         nightmux.spawn = lambda n, cwd, line, cfg=None: spawned.append((n, cwd, line))
         nightmux.has_session = lambda n: False
         nightmux.start_session(cfg2, {}, lk, "9", "box ~ --sandbox", "codex")
-        repo = tempfile.mkdtemp(prefix="nightmux-selfcheck-")
+        repo = os.path.realpath(tempfile.mkdtemp(prefix="nightmux-selfcheck-"))
         subprocess.run(["git", "init", "-q", repo], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)

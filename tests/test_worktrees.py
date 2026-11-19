@@ -14,7 +14,7 @@ def test_worktrees_and_snapshot_before_prompt():
     with isolated(nightmux) as iso:
         legacy_stubs(nightmux)
         # git worktrees + snapshot-before-unattended-prompt, against a real throwaway repo.
-        repo = tempfile.mkdtemp(prefix="nightmux-selfcheck-")
+        repo = os.path.realpath(tempfile.mkdtemp(prefix="nightmux-selfcheck-"))
         subprocess.run(["git", "init", "-q", repo], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
@@ -33,7 +33,7 @@ def test_worktrees_and_snapshot_before_prompt():
 def test_sandbox_cmd_shape():
     with isolated(nightmux) as iso:
         legacy_stubs(nightmux)
-        repo = tempfile.mkdtemp(prefix="nightmux-selfcheck-")
+        repo = os.path.realpath(tempfile.mkdtemp(prefix="nightmux-selfcheck-"))
         subprocess.run(["git", "init", "-q", repo], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
         subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)

@@ -56,7 +56,7 @@ _NO_ROUTE = object()   # do_GET helpers return this when the path is not theirs
 
 
 def _swallowed(where, e):
-    _SWALLOWED.append((time.time(), where, f"{type(e).__name__}: {e}"[:200]))
+    _SWALLOWED.append((time.time(), where, f"{type(e).__name__}: {e}".splitlines()[0][:200]))   # gh errors run to many lines
 import zlib
 
 VERSION = "1.6.0"
@@ -6575,7 +6575,7 @@ def _cmd_get(ctx, arg):
 
 @command("!autocompact", section="tokens", help='<pct|150k|off> = /compact at a share or a token count · !autocompact park <45m|off>', writes=True, session=True)
 def _cmd_autocompact(ctx, arg):
-    cfg, lock, mid = ctx.cfg, ctx.lock, ctx.mid
+    cfg, lock = ctx.cfg, ctx.lock
     m = re.fullmatch(r"park(?:\s+(off|\d+)m?)?", arg or "")
     if m:
         if m.group(1):
@@ -6764,7 +6764,7 @@ def _cmd_worktrees(ctx, arg):
 
 @command("!undo", section="code", help='[n] = snapshots taken before every prompt; n restores one (undoable)', writes=True, session=True)
 def _cmd_undo(ctx, arg):
-    state, sess = ctx.state, ctx.sess
+    sess = ctx.sess
     cwd = sess_cwd(sess)
     rows = [l for l in tmux_git(
         cwd, "for-each-ref", "--sort=-creatordate",
@@ -6821,7 +6821,7 @@ def _cmd_cancel(ctx, arg):
 
 @command("!kill", section="start", help="kill this topic's tmux session", writes=True, session=True)
 def _cmd_kill(ctx, arg):
-    cfg, lock, topic, mid, sess = ctx.cfg, ctx.lock, ctx.topic, ctx.mid, ctx.sess
+    cfg, lock, topic, sess = ctx.cfg, ctx.lock, ctx.topic, ctx.sess
     # One tap on a phone, and a session mid-turn is gone. The conversation
     # itself survives in the transcript — !resume relaunches it — but the
     # running claude, its pane and this topic's binding do not.
