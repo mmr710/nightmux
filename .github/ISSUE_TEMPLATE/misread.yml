@@ -1,0 +1,28 @@
+name: The bot misread my screen
+description: nightmux took a busy, idle or waiting agent for something else
+labels: [bug, good first issue]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The best report is a pane fixture, and a pull request. See "The bot misread my screen" in CONTRIBUTING.md: `nightmux record-pane <session> <busy|idle|waiting> [slug]` makes the file and prints the git commands. Read the file for anything private before you push it.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and its version
+      placeholder: claude 2.x, codex 0.x ...
+    validations:
+      required: true
+  - type: dropdown
+    id: should
+    attributes:
+      label: What the screen really was
+      options: [busy, idle, waiting]
+    validations:
+      required: true
+  - type: textarea
+    id: pane
+    attributes:
+      label: What nightmux did instead, and the last lines of the screen
+      description: Only if you are not sending a pull request. Remove anything private.
+      render: text
