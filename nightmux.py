@@ -12726,10 +12726,6 @@ def claude_limits(snap=None):
     return windows
 
 
-def gemini_limits(home=None):
-    return []
-
-
 _codex_rl = {"at": 0, "val": None}
 
 
@@ -12796,33 +12792,10 @@ def agent_limits(cfg, state, home=None):
     snaps = [s["snap"] for s in state.values() if isinstance(s, dict) and s.get("snap")]
     fresh = max(snaps, key=lambda s: s.get("ts", 0), default={})
 
-    # Claude limit windows
-    c_ad = AGENT_ADAPTERS.get("claude", {}) if "AGENT_ADAPTERS" in globals() else {}
-    lr_c = c_ad.get("limit_reader") or claude_limits
-    wins_c = lr_c(fresh)
-    if wins_c:
-        rows.setdefault("claude", dict(blank, agent="claude", windows=[]))["windows"].extend(wins_c)
-
-    # Codex limit windows
-    cx_ad = AGENT_ADAPTERS.get("codex", {}) if "AGENT_ADAPTERS" in globals() else {}
-    lr_cx = cx_ad.get("limit_reader") or codex_limits
-    rl = lr_cx(home) or {}
-    for k in ("primary", "secondary"):
-        w = rl.get(k)
-        if w and w.get("used_percent") is not None and (w.get("resets_at") or now + 1) > now:
-            rows.setdefault("codex", dict(blank, agent="codex", windows=[]))["windows"].append(
-                {"label": _win_label(w.get("window_minutes") or 0),
-                 "pct": w["used_percent"], "resets_at": w.get("resets_at")})
-
-    # Agy limit windows
-    ag_ad = AGENT_ADAPTERS.get("agy", {}) if "AGENT_ADAPTERS" in globals() else {}
-    if ag_ad.get("limit_reader"):
-        ag_lim = ag_ad["limit_reader"]() or {}
-        for x in ag_lim.get("rows", []):
-            if x["pct"] is not None:
-                short = x["group"].replace(" Models", "").replace("Claude and GPT models", "Claude+GPT")
-                rows.setdefault("agy", dict(blank, agent="agy", windows=[]))["windows"].append(
-                    {"label": f"{short} {x['window']}", "pct": 100 - x["pct"], "resets_at": x["resets_at"] or None})
+    for name in ("claude", "codex", "agy"):
+        wins = limits_for(name, home, fresh)
+        if wins:
+            rows.setdefault(name, dict(blank, agent=name, windows=[]))["windows"].extend(wins)
 
     for r in rows.values():
         for w in r["windows"]:
@@ -13548,10 +13521,6 @@ def _scan_agy_transcript(b, home, cid):
         pass
 
 
-def _scan_gemini(stats, home, since):
-    pass
-
-
 def chat_tips(stats):
     """What to change, per agent, from the numbers — each tip names its evidence."""
     tips = []
@@ -13799,13 +13768,16 @@ def quota_report():
 
 
 # Unified Agent Adapter Table: launch command, screen-state detector,
-# transcript/usage reader, limit reader, and version check.
+# transcript/usage reader, limit reader (None = not read), version check, and a tier:
+# full = both readers and busy/idle/waiting fixtures, partial = one reader,
+# basic = screen reading only.
 AGENT_ADAPTERS = {
     "claude": {
         "launch": AGENTS["claude"],
         "screen_state": pane_state,
         "usage_reader": _scan_claude,
         "limit_reader": claude_limits,
+        "tier": "full",
         "version_cmd": ["claude", "--version"],
     },
     "agy": {
@@ -13813,6 +13785,7 @@ AGENT_ADAPTERS = {
         "screen_state": pane_state,
         "usage_reader": _scan_agy,
         "limit_reader": agy_limits,
+        "tier": "partial",
         "version_cmd": ["agy", "--version"],
     },
     "codex": {
@@ -13820,6 +13793,7 @@ AGENT_ADAPTERS = {
         "screen_state": pane_state,
         "usage_reader": _scan_codex,
         "limit_reader": codex_limits,
+        "tier": "partial",
         "version_cmd": ["codex", "--version"],
     },
     "opencode": {
@@ -13827,48 +13801,55 @@ AGENT_ADAPTERS = {
         "screen_state": pane_state,
         "usage_reader": _scan_opencode,
         "limit_reader": opencode_limits,
+        "tier": "full",
         "version_cmd": ["opencode", "--version"],
     },
     "gemini": {
         "launch": AGENTS["gemini"],
         "screen_state": pane_state,
-        "usage_reader": _scan_gemini,
-        "limit_reader": gemini_limits,
+        "usage_reader": None,
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["gemini", "--version"],
     },
     "aider": {
         "launch": AGENTS["aider"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["aider", "--version"],
     },
     "cursor": {
         "launch": AGENTS["cursor"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["cursor-agent", "--version"],
     },
     "amp": {
         "launch": AGENTS["amp"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["amp", "--version"],
     },
     "goose": {
         "launch": AGENTS["goose"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["goose", "--version"],
     },
     "qwen": {
         "launch": AGENTS["qwen"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": ["qwen", "--version"],
     },
 }
@@ -13883,9 +13864,41 @@ def adapter_for(name):
         "launch": [name, "--continue"],
         "screen_state": pane_state,
         "usage_reader": None,
-        "limit_reader": lambda *a, **k: [],
+        "limit_reader": None,
+        "tier": "basic",
         "version_cmd": [name, "--version"],
     }
+
+
+def limits_for(name, home=None, snap=None):
+    """Usage windows for one agent, [] when its reader is None. claude/codex/agy come back
+    as {label, pct, resets_at} windows (pct = used); other readers return their own rows.
+    An explicit `home` never launches agy: its reading comes from its own CLI."""
+    fn = adapter_for(name).get("limit_reader")
+    if fn is None:
+        return []
+    if name == "claude":
+        return fn(snap)
+    if name == "codex":
+        now, rl = time.time(), fn(home) or {}
+        return [{"label": _win_label(w.get("window_minutes") or 0), "pct": w["used_percent"], "resets_at": w.get("resets_at")}
+                for w in (rl.get("primary"), rl.get("secondary"))
+                if w and w.get("used_percent") is not None and (w.get("resets_at") or now + 1) > now]
+    if name == "agy":
+        rows = [] if home else (fn() or {}).get("rows", [])
+        return [{"label": f"{x['group'].replace(' Models', '').replace('Claude and GPT models', 'Claude+GPT')} {x['window']}",
+                 "pct": 100 - x["pct"], "resets_at": x["resets_at"] or None} for x in rows if x["pct"] is not None]
+    r = fn(os.path.join(home, ".local", "share") if home else None)
+    return r if isinstance(r, list) else []
+
+
+def agents_md():
+    """The README's agent table, from the adapters (nightmux --agents-md)."""
+    yn = lambda v: "✓" if v else "–"
+    rows = ["| Agent | Tier | Usage windows | Tokens and cost |", "|---|---|---|---|"]
+    rows += [f"| `{n}` | {ad['tier']} | {yn(ad['limit_reader'])} | {yn(ad['usage_reader'])} |"
+             for n, ad in AGENT_ADAPTERS.items()]
+    return "\n".join(rows) + "\n"
 
 
 def analyze_chats(days=30, home=None):
@@ -19988,6 +20001,7 @@ USAGE = """usage: nightmux [command | option]
   --mcp [--companion]  MCP server on stdio
   --mcp-desktop        MCP server for the desktop app
   --commands           every command, as markdown
+  --agents-md          the README agent table, from the adapters
   --version            version and what it runs on
   --selfcheck          run the whole test suite (tests/run.py; needs a git checkout)
   -h, --help           this text
@@ -20019,6 +20033,8 @@ def cli():
         print(version_report())
     elif "--commands" in sys.argv:
         print(commands_md(), end="")
+    elif "--agents-md" in sys.argv:
+        print(agents_md(), end="")
     elif "--mcp-desktop" in sys.argv:
         mcp_desktop()
     elif "--mcp" in sys.argv:
