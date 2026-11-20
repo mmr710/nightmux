@@ -18800,7 +18800,15 @@ SECRETS = [(name, re.compile(rx)) for name, rx in (
     ("AWS access key", r"\bAKIA[0-9A-Z]{16}\b"),
     ("Google API key", r"\bAIza[\w-]{35}"),
     ("Slack token", r"\bxox[abprs]-[\w-]{10,}"),
-    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    # The header and everything after it: a pasted key's body is base64 that no other rule sees.
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"),
+    ("SSH public key", r"\b(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp\d+)\s+AAAA[\w+/=]{20,}"),
+    ("JSON web token", r"\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+"),
+    ("bearer token", r"(?i)\bbearer\s+[\w.~+/=-]{16,}"),
+    ("password in a URL", r"\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"),
+    # TOKEN=..., "api_key": "...", ?access_token=...: the name says it is one
+    ("credential assignment", r"(?i)\b[\w-]*(?:token|secret|passw(?:or)?d|api[_-]?key|[_-]key|credential)[\w-]*"
+                              r"[\"']?\s*(?:=\s*|:\s*[\"'])[\"']?[^\s'\"]{6,}"),
 )]
 
 
@@ -18813,6 +18821,84 @@ def redact(text):
     for _, rx in SECRETS:
         text = rx.sub("[redacted]", text)
     return text
+
+
+PANE_STATES = ("busy", "idle", "waiting")
+PANE_KEEP = 25      # what pane_state reads
+# Any /home/<user>/... or /Users/<user>/... path, not only this machine's HOME: a pane shows other people's too
+_PANE_PATH = re.compile(r"(?:/home|/Users)/[^/\s]+(?:/[^\s'\"│┃╮╯╭╰)\]>,;]*)?")
+_PANE_MAIL = re.compile(r"[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_PANE_IP = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def pane_fixture(lines, agent, slug, state, dest, home=None):
+    """Write the last PANE_KEEP lines of a captured pane to dest/<agent>_<slug>.<state>.txt, redacted.
+
+    A fixture is public once pushed, so this is redact() (credentials) plus what only a screen
+    shows: the home directory and every folder under it become ~/project, e-mail addresses
+    become user@redacted.invalid, IPv4 addresses 0.0.0.0, the user name 'user'. The TUI chrome stays.
+    ValueError on a bad agent, state or slug; FileExistsError rather than replacing a reviewed file.
+    """
+    slug = re.sub(r"[^a-z0-9_]+", "_", str(slug).lower()).strip("_")
+    if agent not in AGENTS or state not in PANE_STATES or not slug:
+        raise ValueError(f"agent {agent!r} (one of {', '.join(AGENTS)}), state {state!r} "
+                         f"(one of {', '.join(PANE_STATES)}) and a slug with a letter or digit are needed")
+    home = (home or os.path.expanduser("~")).rstrip("/")
+    text = redact("\n".join(l.rstrip() for l in list(lines)[-PANE_KEEP:]))
+    if len(home) > 1:
+        text = re.sub(re.escape(home) + r"(?:/[^\s'\"│┃╮╯╭╰)\]>,;]*)?", "~/project", text)
+    text = _PANE_PATH.sub("~/project", text)
+    user = os.path.basename(home)
+    if len(user) >= 3:
+        text = re.sub(r"(?<![\w-])" + re.escape(user) + r"(?![\w-])", "user", text)
+    text = _PANE_IP.sub("0.0.0.0", _PANE_MAIL.sub("user@redacted.invalid", text))
+    text = re.sub(r"\buser@(?!redacted\.invalid)[\w-]+(?:\.[\w-]+)*", "user@host", text)   # the shell prompt's host
+    os.makedirs(dest, exist_ok=True)
+    path = os.path.join(dest, f"{agent}_{slug}.{state}.txt")
+    with open(path, "x", encoding="utf-8") as f:     # "x": never replace a reviewed fixture
+        f.write(text + "\n")
+    return path
+
+
+RECORD_PANE_USAGE = """usage: nightmux record-pane <session> <busy|idle|waiting> [slug] [--agent <agent>]
+
+  Capture the session's screen as a classifier fixture in tests/panes/ (run from a git
+  checkout): last 25 lines, credentials, e-mail addresses, IPs, your home path and user
+  name removed. Read the file before you push it: a fixture is public.
+"""
+
+
+def record_pane_cli(args):
+    """`nightmux record-pane`: tmux capture-pane -> pane_fixture, then say what the classifier makes of it."""
+    agent_arg = None
+    if "--agent" in args:
+        i = args.index("--agent")
+        agent_arg, args = args[i + 1:i + 2], args[:i] + args[i + 2:]
+    if not 2 <= len(args) <= 3 or args[1] not in PANE_STATES or agent_arg == []:
+        print(RECORD_PANE_USAGE, end="", file=sys.stderr)
+        sys.exit(2)
+    sess, state, slug = args[0], args[1], (args[2] if len(args) > 2 else "capture")
+    cmd = tmux_out("display-message", "-p", "-t", sess + ":", "#{pane_current_command}")
+    if cmd is None:
+        sys.exit(f"nightmux record-pane: no tmux session {sess!r}")
+    key = agent_arg[0] if agent_arg else cmd.strip()
+    if key not in AGENTS:
+        sys.exit(f"nightmux record-pane: cannot tell which agent runs in {sess!r} (it shows {key!r}); add --agent <{'|'.join(AGENTS)}>")
+    dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "panes")
+    if not os.path.isdir(dest):
+        sys.exit("nightmux record-pane: run it from a git checkout (tests/panes/ not found)")
+    try:
+        path = pane_fixture(pane(sess), key, slug, state, dest)
+    except (ValueError, FileExistsError) as e:
+        sys.exit(f"nightmux record-pane: {e}")
+    got = pane_state(open(path, encoding="utf-8").read().splitlines(), quiet=True)
+    name = os.path.basename(path)
+    print(f"wrote {path}\nthe classifier reads it as {got!r}; you asked for {state!r}: "
+          + ("they match." if got == state else "they DIFFER. That is the bug to report; open the file, check it, and name it for the state it should read."))
+    print("Read it for anything private, then:\n"
+          f"  git switch -c fixture/{name.rsplit('.', 2)[0]}\n"
+          f"  git add tests/panes/{name} && git commit -m 'test(panes): {name}'\n"
+          "  git push -u origin HEAD   # then open the pull request from the link it prints")
 
 
 # ---------- team: roles and an audit log ----------
@@ -19993,6 +20079,8 @@ USAGE = """usage: nightmux [command | option]
                        (--json for the numbers alone, --projects adds project names)
   run "<task>"         drive an agent until --until passes, failing over on a limit; no bot, no keys
   handoff [agent]      hand this folder's work to another agent, with a brief; no bot, no keys
+  record-pane <session> <busy|idle|waiting> [slug]
+                       save a redacted screen as a classifier fixture for a pull request; no bot, no keys
   --setup              first run: bot token, group, hooks, service
   --doctor             find what is wrong with this install
   --demo [port]        the office with a made-up night; no bot, no keys
@@ -20014,6 +20102,8 @@ def cli():
         handoff_cli(sys.argv[2:])
     elif sys.argv[1:2] == ["run"]:
         run_cli(sys.argv[2:])
+    elif sys.argv[1:2] == ["record-pane"]:
+        record_pane_cli(sys.argv[2:])
     elif "-h" in sys.argv or "--help" in sys.argv:
         print(USAGE, end="")
     elif "--selfcheck" in sys.argv:

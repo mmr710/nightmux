@@ -29,7 +29,16 @@ If you are submitting code, it must align with the core architectural decisions 
 - The Android app lives in `android/` (plain Java, no Kotlin, no AndroidX beyond the platform): `gradle -p android assembleDebug`.
 - New to the code? Issues labelled [good first issue](https://github.com/mmr710/nightmux/labels/good%20first%20issue) are small and self-contained; [ROADMAP.md](ROADMAP.md) is what is planned.
 
-### 4. Submitting Pull Requests
+### 4. The bot misread my screen: send the pane
+nightmux decides busy, idle or waiting from the last 25 lines of a pane, and the corpus in `tests/panes/` is how it learns your agent's screen. From a git checkout:
+
+    python3 nightmux.py record-pane <session> <busy|idle|waiting> [slug] [--agent <agent>]
+
+It writes `tests/panes/<agent>_<slug>.<state>.txt`, says what the classifier reads from it (and whether that is the state you asked for), and prints the three git commands to open a PR. It never overwrites a file. Name the state the screen *should* read as: a fixture where the two differ is the bug report.
+
+A fixture is public once pushed, so **read the file before you commit it**. Credentials, e-mail addresses, IPs, your home path and your user name are removed automatically. Not removed: other people's names (a `git log` author line, a teammate's bare user name), host names other than the one in your prompt, and anything private that has no recognisable shape, such as client or project names in prose. Edit those out by hand; reconstructed chrome is fine.
+
+### 5. Submitting Pull Requests
 - Keep PRs strictly focused on a single issue or feature.
 - Ensure the code passes all existing self-checks by running `python3 nightmux.py --selfcheck` (and the same flag on the hook scripts).
 - Update the `CHANGELOG.md` if necessary.
