@@ -17,6 +17,10 @@ def test_generated_docs_current():
         if os.path.exists(cmd_md):              # a git checkout, not a pip install
             with open(cmd_md) as f:
                 assert f.read() == nightmux.commands_md(), "docs/COMMANDS.md is stale: nightmux --commands > docs/COMMANDS.md"
+        rd = os.path.join(os.path.dirname(os.path.abspath(nightmux.__file__)), "README.md")
+        if os.path.exists(rd):
+            with open(rd, encoding="utf-8") as f:
+                assert nightmux.agents_md().strip() in f.read(), "README agent table is stale: nightmux --agents-md"
         plugin = os.path.join(os.path.dirname(os.path.abspath(nightmux.__file__)), ".claude-plugin", "plugin.json")
         if os.path.exists(plugin):              # the Claude Code plugin ships at the same version
             with open(plugin) as f:

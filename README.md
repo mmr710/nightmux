@@ -90,18 +90,24 @@ What the daemon adds on top of `run`:
 
 Any terminal coding agent works: nightmux types into its `tmux` pane and reads the screen back.
 
-| Agent | Dialogs it turns into buttons | Usage windows | Tokens and cost | Started every night in CI |
-|---|---|---|---|---|
-| Claude Code | permissions, menus, folder trust | 5-hour and weekly | ✓ | ✓ |
-| Codex | menus | 5-hour and weekly | ✓ | ✓ |
-| agy | permissions | ✓ | ✓ | – |
-| OpenCode | questions | – | ✓ | ✓ |
-| Gemini CLI | folder trust | – | – | ✓ |
-| Aider | (Y)es/(N)o questions | – | – | ✓ |
-| Qwen Code | not yet | – | – | ✓ |
-| Cursor, Amp, Goose | not tested | – | – | – |
+<!-- agents:start (generated: nightmux --agents-md) -->
+| Agent | Tier | Usage windows | Tokens and cost |
+|---|---|---|---|
+| `claude` | full | ✓ | ✓ |
+| `agy` | partial | ✓ | ✓ |
+| `codex` | partial | ✓ | ✓ |
+| `opencode` | full | ✓ | ✓ |
+| `gemini` | basic | – | – |
+| `aider` | basic | – | – |
+| `cursor` | basic | – | – |
+| `amp` | basic | – | – |
+| `goose` | basic | – | – |
+| `qwen` | basic | – | – |
+<!-- agents:end -->
 
-The last column is the [drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml): every night CI installs the newest release of each agent and verifies how nightmux classifies its initial screen.
+Tier: **full** = usage windows, tokens and every screen state (busy, idle, waiting) covered by fixtures; **partial** = one of those readers; **basic** = nightmux reads the screen and types, nothing more. Tiers are earned by tests, not claimed.
+
+Every night the [drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml) installs the newest release of each agent in CI and verifies how nightmux classifies its initial screen.
 
 ### More than one account of agy or OpenCode
 
