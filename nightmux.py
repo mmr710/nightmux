@@ -456,6 +456,11 @@ def tgt(sess):
     return _target.get(sess, sess)
 
 
+def shell_name(c):
+    """tmux shows a login shell as "-bash" (macOS) or by full path: compare the bare name."""
+    return os.path.basename((c or "").lstrip("-"))
+
+
 SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh"}
 
 # Session name -> its pane is sitting at a shell prompt, filled by the same
@@ -616,7 +621,7 @@ def live_sessions():
                  default=running.get(s) or active.get(s) or pids[0])
           for s, pids in seen.items()}
     _shell.clear()
-    _shell.update({s: cmd.get(p) in SHELLS for s, p in at.items()})
+    _shell.update({s: shell_name(cmd.get(p)) in SHELLS for s, p in at.items()})
     # Free: this call already walked every pane, and track_cwd asking each
     # session separately was one `display-message` spawn per session per tick,
     # on the same single-threaded tmux server that these timeouts come from.
@@ -19981,7 +19986,7 @@ def _run_loop(a, mine, say, finish):
                 if idle:
                     ctx["cmd"] = c
                 return False
-            return c != ctx["cmd"] and c in SHELLS
+            return c != ctx["cmd"] and shell_name(c) in SHELLS
 
         def wait(secs, pre=None):
             """'ready' (idle on two polls in a row and, with `pre`, the turn was seen busy

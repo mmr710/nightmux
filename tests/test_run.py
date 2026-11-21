@@ -187,8 +187,6 @@ WRAPPED = "#!/bin/sh\nexport PS1='user@host:~/proj$ '\n%s\nexec bash --norc\n"
 
 
 def test_shell_left_behind_is_not_the_agent():
-    if sys.platform == "darwin":
-        return   # ponytail: known gap, on macOS the leftover shell is not told apart from the agent yet
     home, work = setup(inner=EXITS.replace("sleep 0.5", "sleep 1"))
     wrap = os.path.join(home, "wrap")
     with open(wrap, "w") as f:
