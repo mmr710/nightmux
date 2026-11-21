@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "acc
 from _h import cli, fake_home, run  # noqa: E402
 
 FAST = {"NIGHTMUX_RUN_POLL": "0.3"}
+DEADLINE = 300   # a generous cap, not a speed check: a loaded box needs minutes, a hung run still fails
 
 # An idle prompt, and a "turn" for the lines it knows. Anything else is ignored.
 # The busy footer is erased when the turn ends, as a real TUI does.
@@ -64,9 +65,9 @@ def setup(**scripts):
 
 def go(home, work, *args, **kw):
     try:
-        return cli("run", *args, home=home, cwd=work, env=dict(FAST, **kw.get("env", {})), timeout=90)
+        return cli("run", *args, home=home, cwd=work, env=dict(FAST, **kw.get("env", {})), timeout=DEADLINE)
     except subprocess.TimeoutExpired:
-        raise AssertionError("nightmux run did not finish in 90s")
+        raise AssertionError("nightmux run did not finish in %ds" % DEADLINE)
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True,
                        env={"PATH": os.environ["PATH"], "TMUX_TMPDIR": home})
@@ -143,7 +144,7 @@ def test_existing_sessions_are_left_alone():
     names = ("proj", "proj-a", "proj-api")    # the plain name, the old fallback name, a prefix
     bystanders(home, *names)
     try:
-        r = cli("run", "do the thing", "--agents", "a", home=home, cwd=work, env=FAST, timeout=90)
+        r = cli("run", "do the thing", "--agents", "a", home=home, cwd=work, env=FAST, timeout=DEADLINE)
         assert r.returncode == 0, out(r)
         untouched(home, names, "do the thing", "fake ready", "did:")
     finally:
@@ -172,7 +173,7 @@ def test_prefix_session_is_never_targeted():
     os.chmod(os.path.join(shim, "tmux"), 0o755)
     bystanders(home, "proj-api")
     try:
-        r = cli("run", "do the thing", "--agents", "a", home=home, cwd=work, timeout=90,
+        r = cli("run", "do the thing", "--agents", "a", home=home, cwd=work, timeout=DEADLINE,
                 env=dict(FAST, PATH=shim + ":" + os.environ["PATH"], SHIMDIR=shim,
                          REALTMUX=shutil.which("tmux")))
         assert os.path.exists(os.path.join(shim, "fired")), "shim never fired\n" + out(r)

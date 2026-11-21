@@ -13,6 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 def test_dashboard_extras_metrics_limits_chat():
     with isolated(nightmux) as iso:
+        nightmux.agent_version = lambda binary: "stub"       # restored on exit; the doctor must not run a real `<agent> --version`
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Dashboard extras: host metrics, limits per agent, and the chat analysis —
         # which must report counts and never a prompt.
