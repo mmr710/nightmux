@@ -112,6 +112,14 @@ def test_codex_reader():
 
 def test_reader_drift_detection():
     """Verify doctor check flags reader drift when activity exists but tokens == 0."""
+    real_version, nightmux.agent_version = nightmux.agent_version, lambda binary: "stub"  # no real CLI
+    try:
+        _reader_drift_body()
+    finally:
+        nightmux.agent_version = real_version
+
+
+def _reader_drift_body():
     with tempfile.TemporaryDirectory() as tmp:
         # Create an opencode DB with sessions/prompts but corrupted/zero tokens
         oc_dir = os.path.join(tmp, ".local", "share", "opencode")
