@@ -8,7 +8,7 @@ from _iso import isolated  # noqa: E402
 
 
 def test_run_times_out():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Something that always blocks. `tmux wait-for` only blocks once a server is
         # already running, so this passed on a machine with sessions open and let a
         # clean one through untested — the timeout path is what is being checked.
@@ -17,7 +17,7 @@ def test_run_times_out():
 
 
 def test_live_sessions_picks_agent_pane():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Which pane a session means. The agent is wherever its status line was last
         # written from, which is not always the pane holding the focus — and reading
         # one pane while typing into another is indistinguishable from a hang.
@@ -44,7 +44,7 @@ def test_live_sessions_picks_agent_pane():
 
 
 def test_tmux_no_answer_is_not_no_sessions():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # A tmux that does not answer must not read as a tmux with no sessions. It
         # used to: run() reports a timeout by returning "[tmux timed out]", which is
         # text, so the pane list parsed as empty and every bound topic was told its
@@ -58,7 +58,7 @@ def test_tmux_no_answer_is_not_no_sessions():
 
 
 def test_tmux_out_reads_exit_status():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # tmux_out reads the exit status, not the text: a failing tmux is None too.
         # Both commands answer without a server, because CI has no tmux running and
         # `display-message` there fails for that reason rather than the one intended.
@@ -73,7 +73,7 @@ def test_tmux_out_reads_exit_status():
 
 
 def test_tmux_outage_announced_once():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # The outage is announced once, and so is its end — not once per session per
         # tick, which is what nine topics of 💀 looked like.
         tsent = []

@@ -14,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_discord_slack_bridge():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Discord/Slack bridge: topics above Telegram's range route through
         # bridge_post, formatting and buttons translate, events become updates.
@@ -90,7 +90,7 @@ def test_discord_slack_bridge():
 
 
 def test_websocket_client():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # The websocket client against a local server: fragments, a 126-length
         # frame, ping answered with pong, masked client frames, close.

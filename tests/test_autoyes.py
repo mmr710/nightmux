@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_auto_yes_opt_in_affirmative_only():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()

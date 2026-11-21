@@ -13,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_events_post_redacted_json():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # events: one JSON POST per moment, redacted, and !events manages the URL.
         got_ = []
@@ -42,7 +42,7 @@ def test_events_post_redacted_json():
 
 
 def test_nightmux_comments_trusted_authors():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # /nightmux comments: only trusted authors, PRs work on their branch, issues
         # go through issue_begin with the ask appended, and a quiet page moves on.
@@ -88,7 +88,7 @@ def test_nightmux_comments_trusted_authors():
 
 
 def test_night_replay_frames():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Night replay: a frame when the picture changes (sampled, plus a heartbeat),
         # no screen text, on disk, and the file trimmed once it runs well past a day.

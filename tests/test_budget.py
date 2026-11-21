@@ -1,7 +1,6 @@
 """test_budget: cut from the old monolithic selfcheck() (the last part)."""
 import json
 import os
-import queue
 import shutil
 import sys
 import tempfile
@@ -15,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_budget_ledger_warns_and_holds():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # !budget: the ledger fills from transcript spend; 80% warns once, 100%
         # holds every agent of the topic until the period ends, off lifts it.
@@ -83,7 +82,7 @@ def test_budget_ledger_warns_and_holds():
 
 
 def test_stopall_holds_until_off():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()

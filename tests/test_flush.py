@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_spend_cap_counts_turn_cost():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         # A cap in tokens counts what the turns cost. Two greps and two hundred are
@@ -45,7 +45,7 @@ def test_spend_cap_counts_turn_cost():
 
 
 def test_flush_scrape_progress_menus_and_nudge():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         twice = lambda: (nightmux.flush_new(cfg, state, "1", "s"), nightmux.flush_new(cfg, state, "1", "s"))

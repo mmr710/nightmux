@@ -1,12 +1,9 @@
 """test_cli: cut from the old monolithic selfcheck() (the last part)."""
 import contextlib
-import http
 import io
 import json
 import os
-import queue
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -33,7 +30,7 @@ def cli_(*args):
 
 
 def test_cli_help_and_unknown_option():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # The CLI: -h prints usage, and an unknown option stops. `nightmux --help`
         # used to fall through to main() and start a daemon on the live config.
@@ -52,7 +49,7 @@ def test_cli_help_and_unknown_option():
 
 
 def test_cli_wrapped_cards_private_and_share():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         ran_ = []
         r2_ = {'days': 30,
@@ -167,7 +164,7 @@ def test_cli_wrapped_cards_private_and_share():
 
 
 def test_cli_handoff_brief_and_next_agent():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         ran_ = []
         with nightmux.stubbed(main=lambda: ran_.append("daemon")):
@@ -257,7 +254,7 @@ def test_cli_handoff_brief_and_next_agent():
 
 
 def test_cli_up_tmux_second_copy_phone_line():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         ran_ = []
         with nightmux.stubbed(main=lambda: ran_.append("daemon")):

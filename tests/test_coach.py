@@ -16,7 +16,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_prompt_coach():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Prompt coach: vague prompts held, corrections learned, model ladder, fresh.
         assert nightmux.lint_why("fix it") and nightmux.lint_why("still broken") and nightmux.lint_why("Doesn't work")
@@ -88,7 +88,7 @@ def test_prompt_coach():
 
 
 def test_point_and_fix_photo():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         # Point and fix: a photo soon after a preview carries the page, its console
@@ -110,7 +110,7 @@ def test_point_and_fix_photo():
 
 
 def test_night_reel_story_and_gif():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Night reel: the busiest room is told as a story, PNG frames decode, and the
         # GIF is well formed — one image block per frame, a loop, a trailer.

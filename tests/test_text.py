@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_parse_reset_and_render():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         now = time.mktime((2026, 8, 7, 10, 0, 0, 0, 0, -1))
         assert nightmux.parse_reset("· resets in 2h 14m", now) == now + 2 * 3600 + 14 * 60
         assert nightmux.parse_reset("resets in 45m", now) == now + 45 * 60
@@ -38,7 +38,7 @@ def test_parse_reset_and_render():
 
 
 def test_clock_and_tz_shift():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         noon = time.mktime((2026, 8, 7, 12, 0, 0, 0, 0, -1))   # display shifts, never parse
         assert nightmux.clock({}, noon) == "12:00" and nightmux.clock({"tz_offset": 0}, noon) == \
             time.strftime("%H:%M", time.gmtime(noon))
@@ -58,7 +58,7 @@ def test_clock_and_tz_shift():
 
 
 def test_limit_banner():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         for banner in ("You've hit your 5-hour limit · resets 3pm",
                        "  You've reached your weekly limit · Resets in 2 hr 16 min",
                        "You're out of usage credits · resets 11am"):
@@ -68,7 +68,7 @@ def test_limit_banner():
 
 
 def test_md_html():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         assert nightmux.md_html("**bold** and `x_1 & y`") == \
             "<b>bold</b> and <code>x_1 &amp; y</code>", nightmux.md_html("**bold** and `x_1 & y`")
         assert nightmux.md_html("### Title\ntext") == "<b>Title</b>\ntext"
@@ -79,7 +79,7 @@ def test_md_html():
 
 
 def test_chrome_matches_noise_not_content():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         for chrome in ("╭──────────╮", "│ ", "", "─" * 40, "╌" * 40, "❯ what I already typed",
                        "✻ Brewed for 2s", "  ⏵⏵ accept edits on",
                        "  ubuntu@host:/home/x  [MODE] ⛏ 5.4M", "  ? for shortcuts"):
@@ -91,7 +91,7 @@ def test_chrome_matches_noise_not_content():
 
 
 def test_chrome_agy():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         for chrome in ("⢿  Running...", "> use your shell tool to run: ls",
                        "  ↑/↓ Navigate · enter Confirm",
                        "esc to cancel                    Gemini 3.1 Pro · high",
@@ -104,14 +104,14 @@ def test_chrome_agy():
 
 
 def test_detail_lines():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         assert nightmux.DETAIL.match("  ⎿  Read 200 lines") and nightmux.DETAIL.match("     … +12 lines")
         assert nightmux.DETAIL.match("▸ Thought for 3s, 282 tokens")
         assert not nightmux.DETAIL.match("● here is the answer")
 
 
 def test_arabic_layout_translation():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Arabic keyboard layout translation
         assert "ظةخيثم".translate(nightmux.AR_EN_MAP) == "/model"

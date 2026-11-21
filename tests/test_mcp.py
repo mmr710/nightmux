@@ -14,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_mcp_tools_and_live_floor():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -31,7 +31,7 @@ def test_mcp_tools_and_live_floor():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)

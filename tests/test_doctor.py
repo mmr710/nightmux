@@ -9,7 +9,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_doctor_lines_and_overall():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # --doctor: one ✓/✗ line per check, and the overall result is their AND.
         def _boom():

@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_goal_red_check_returns_to_agent():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !goal: a red check goes back to the agent as its next prompt, the same
         # failure three times stops and says so, green is reported once.
@@ -52,7 +52,7 @@ def test_goal_red_check_returns_to_agent():
 
 
 def test_brain_next_repeat_done_ask():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         glk_ = threading.Lock()
         # !brain: NEXT queues the step, a repeat or DONE or ASK pauses and tells you.
@@ -84,7 +84,7 @@ def test_brain_next_repeat_done_ask():
 
 
 def test_po_roadmap_one_topic_per_item():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         glk_ = threading.Lock()
         # !po: roadmap parsed from the model's lines, approved, one topic+brain per item.

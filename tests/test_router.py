@@ -1,6 +1,5 @@
 """test_router: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
-import queue
 import shutil
 import sys
 import tempfile
@@ -14,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_router_classes_and_light_task_moves():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Router: classes, mid-task prompts stay, a light task on a quiet topic moves
         # to the light agent, learned scores outrank the preference list.
@@ -24,7 +23,7 @@ def test_router_classes_and_light_task_moves():
 
 
 def test_drift_old_opencode_tables():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Drift: opencode 2 left its old tables behind, empty. The reader neither
         # throws nor finds anything; the freshly written database gives it away.
@@ -47,7 +46,7 @@ def test_drift_old_opencode_tables():
 
 
 def test_dispatch_keeps_topic_order_and_acks():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -56,7 +55,7 @@ def test_dispatch_keeps_topic_order_and_acks():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),

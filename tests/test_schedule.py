@@ -1,6 +1,5 @@
 """test_schedule: cut from the old monolithic selfcheck() (the last part)."""
 import os
-import queue
 import sys
 import threading
 import time
@@ -12,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_at_and_scheduled_prompts():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -55,7 +54,7 @@ def test_at_and_scheduled_prompts():
 
 
 def test_digest_schedule_reports_directly():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -98,7 +97,7 @@ def test_digest_schedule_reports_directly():
 
 
 def test_shift_plan_drains_one_step_per_idle_turn():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []

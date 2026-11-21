@@ -14,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_wrapped_private_until_shared():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !wrapped is private: nothing leaves the machine until share is tapped.
         class _Now:

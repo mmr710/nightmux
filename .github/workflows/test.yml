@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - run: pipx run ruff check --select F,E9,B006,B008 --output-format github *.py
+      - run: pipx run ruff check --select F,E9,B006,B008 --output-format github .
 
   macos:
     runs-on: macos-latest

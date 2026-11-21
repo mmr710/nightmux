@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_worktrees_and_snapshot_before_prompt():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # git worktrees + snapshot-before-unattended-prompt, against a real throwaway repo.
         repo = os.path.realpath(tempfile.mkdtemp(prefix="nightmux-selfcheck-"))
@@ -31,7 +31,7 @@ def test_worktrees_and_snapshot_before_prompt():
 
 
 def test_sandbox_cmd_shape():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         repo = os.path.realpath(tempfile.mkdtemp(prefix="nightmux-selfcheck-"))
         subprocess.run(["git", "init", "-q", repo], check=True)
@@ -41,7 +41,7 @@ def test_sandbox_cmd_shape():
             f.write("one")
         subprocess.run(["git", "-C", repo, "add", "f"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
-        wt = nightmux.worktree_path(repo, "feature-a")
+        nightmux.worktree_path(repo, "feature-a")
 
         # sandbox_cmd: shape of the docker line, mounts only what exists, off by default
         sbc_ = {"sandbox": {"names": ["box"], "mounts": ["~/.claude", "/no/such/thing"], "network": "none", "image": "img"}}

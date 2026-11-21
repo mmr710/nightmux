@@ -4,7 +4,6 @@
 Tests every reader against recorded fixtures from real CLI output to guard
 against schema and format drift (e.g. OpenCode v1 vs v2, Agy transcripts, Codex rollouts).
 """
-import datetime
 import json
 import os
 import shutil
@@ -160,7 +159,7 @@ if __name__ == "__main__":
 
 
 def test_agy_context_of_newest_conversation():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # agy: the context of its newest conversation in this folder, 0 after its CHECKPOINT
         with tempfile.TemporaryDirectory() as ah_:

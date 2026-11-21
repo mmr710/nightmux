@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_review_changed_untracked_clean():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -27,7 +27,7 @@ def test_review_changed_untracked_clean():
             f.write("one")
         subprocess.run(["git", "-C", repo, "add", "f"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
-        wt = nightmux.worktree_path(repo, "feature-a")
+        nightmux.worktree_path(repo, "feature-a")
 
         # !review / review_data: a changed file, an untracked one, a clean repo
         with open(os.path.join(repo, "f"), "w") as f:

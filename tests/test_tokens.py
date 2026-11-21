@@ -10,7 +10,7 @@ from _iso import isolated  # noqa: E402
 
 
 def test_tail_transcript_baselines_and_partials():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         tp = os.path.join(nightmux.FILE_DIR, "selfcheck.jsonl")
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         rec = json.dumps({"type": "assistant",
@@ -31,7 +31,7 @@ def test_tail_transcript_baselines_and_partials():
 
 
 def test_compact_boundary_drops_figure():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         tp = os.path.join(nightmux.FILE_DIR, "selfcheck.jsonl")
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         rec = json.dumps({"type": "assistant",
@@ -57,7 +57,7 @@ def test_compact_boundary_drops_figure():
 
 
 def test_turn_spend_and_ladder_booking():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         tp = os.path.join(nightmux.FILE_DIR, "selfcheck.jsonl")
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         rec = json.dumps({"type": "assistant",
@@ -85,7 +85,7 @@ def test_turn_spend_and_ladder_booking():
 
 
 def test_parse_amount_and_spend_cap():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # One parser, two knobs: a bare number keeps each setting's original unit,
         # a k/M suffix means tokens in both.
         assert nightmux.parse_amount(None) == (None, None) and nightmux.parse_amount("nope") == (None, None)
@@ -104,14 +104,14 @@ def test_parse_amount_and_spend_cap():
 
 
 def test_usage_line():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         assert nightmux.usage_line({}, {"five_hour": {"used_percentage": 87.4, "resets_at": None},
                            "ctx_pct": 41.2}) == "  5h 87%  ctx 41%"
         assert nightmux.usage_line({}, None) == "" and nightmux.usage_line({}, {}) == ""
 
 
 def test_cost_report():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         tcx = os.path.join(nightmux.FILE_DIR, "ctx.jsonl")       # what fills a context window
         with open(tcx, "w") as f:
@@ -146,7 +146,7 @@ def test_cost_report():
 
 
 def test_ctx_report():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         tcx = os.path.join(nightmux.FILE_DIR, "ctx.jsonl")       # what fills a context window
         with open(tcx, "w") as f:

@@ -1,7 +1,5 @@
 """test_limits: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
-import queue
-import re
 import sys
 import threading
 import time
@@ -13,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_usage_limit_hold_resume_and_retry():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed = []                                    # menu guard on plain text
@@ -195,7 +193,7 @@ def test_usage_limit_hold_resume_and_retry():
 
 
 def test_scheduled_prompt_waits_behind_hold():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Scheduling rides the queue, so a scheduled prompt waits behind a usage hold
         # and a busy pane exactly as a typed one does.
@@ -216,7 +214,7 @@ def test_scheduled_prompt_waits_behind_hold():
 
 
 def test_limit_hold_resume_refused_trace_and_banner_chain():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []

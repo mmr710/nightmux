@@ -10,7 +10,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_agy_permission_menu():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # agy: numbered permission menu, arrow-only trust prompt, spinner
         agy_perm = ["Requesting permission for:", "Do you want to proceed?", "> 1. Yes",
                     "  2. Yes, and always allow in this conversation",
@@ -21,7 +21,7 @@ def test_agy_permission_menu():
 
 
 def test_opencode_modal_and_form():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # opencode: a modal drawn inside the border, over prose that numbers itself.
         # It names no question WAITING knows and answers to arrows, never the digit.
         oc = ["     5. Ship & iterate (wk 4+): soft-launch, measure D1",
@@ -45,7 +45,7 @@ def test_opencode_modal_and_form():
 
 
 def test_opencode_colour_marker_and_pick():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         oc = ["     5. Ship & iterate (wk 4+): soft-launch, measure D1",
               "  ┃  Unity can't run on this ARM64 server. How should we proceed?",
               "  ┃  1. Godot 4 (Recommended)",
@@ -93,14 +93,7 @@ def test_opencode_colour_marker_and_pick():
 
 
 def test_opencode_button_bar():
-    with isolated(nightmux) as iso:
-        oc = ["     5. Ship & iterate (wk 4+): soft-launch, measure D1",
-              "  ┃  Unity can't run on this ARM64 server. How should we proceed?",
-              "  ┃  1. Godot 4 (Recommended)",
-              "  ┃     Native performance, ARM64-buildable here",
-              "  ┃  2. Web (TypeScript)",
-              "  ┃  3. Scaffold-only",
-              "  ┃  ↑↓ select  enter submit  esc dismiss"]
+    with isolated(nightmux):
         # opencode 2.x: the permission dialog is one row of buttons, the highlight a
         # background colour (captured from opencode v2.0.24, cut off at the pane edge).
         E = "\x1b[%sm".__mod__
@@ -134,7 +127,7 @@ def test_opencode_button_bar():
 
 
 def test_dialog_under_numbered_reply():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # A dialog under a reply that ends in a numbered list: its options are the
         # last run numbered from 1, not every numbered line on screen.
         listed = ["  1. Merge the pull request.", "  2. Run the release command.", "",
@@ -145,7 +138,7 @@ def test_dialog_under_numbered_reply():
 
 
 def test_gemini_trust_dialog():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Gemini CLI marks the chosen row of a boxed dialog with ●, and its folder
         # trust dialog has no other sign: it read as unknown, with no buttons.
         gem = [" ╭────────────────────────────────────────╮",
@@ -157,7 +150,7 @@ def test_gemini_trust_dialog():
 
 
 def test_aider_asks_on_input_line():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Aider asks on its input line and read as unknown. It takes a line, so !y
         # is y and an Enter; answered, the line stays on screen and asks nothing.
         aid = ["No LLM model was specified and no API keys were provided.",
@@ -172,7 +165,7 @@ def test_aider_asks_on_input_line():
 
 
 def test_agy_trust_prompt():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         agy_trust = ["Do you trust the contents of this project?", "> Yes, I trust this folder",
                      "  No, exit", "  ↑/↓ Navigate · enter Confirm"]
         assert nightmux.pane_state(agy_trust) == "waiting"
@@ -182,7 +175,7 @@ def test_agy_trust_prompt():
 
 
 def test_claude_trust_prompt():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Claude Code's: only the pointed row is marked, and it is "No, exit"
         cc_trust = [" Claude Code'll be able to read, edit, and execute files here.", "",
                     " ❯ No, exit", "   Yes, I trust this folder", "",
@@ -194,7 +187,7 @@ def test_claude_trust_prompt():
 
 
 def test_pane_state_busy_idle():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         assert nightmux.pane_state(["● Bash(x)", "⢿  Running...", "esc to cancel"]) == "busy"
         # a backgrounded shell is not the session being busy: the prompt is free
         assert nightmux.pane_state(["● Bash(npm test) &", "  ⎿ \xa0Running… (7m 53s · timeout 10m)",
@@ -210,7 +203,7 @@ def test_pane_state_busy_idle():
 
 def test_opencode_session_and_model_lists():
     # slow
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # opencode's lists (captured from v2.0.24): the session switcher a prompt
         # was typed into, and the model list over the chat it is drawn on.
@@ -244,7 +237,7 @@ def test_opencode_session_and_model_lists():
 
 
 def test_model_pickers_captured():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # The /model pickers, captured: Claude Code (numbered, ❯), codex (›), agy (bare >).
         cl_ = ["  Select model", "  Switch between Claude models. Your pick becomes the default",
@@ -279,7 +272,7 @@ def test_model_pickers_captured():
 
 def test_agy_model_selection():
     # slow
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # agy model tests
         agy_keys = []
@@ -295,7 +288,7 @@ def test_agy_model_selection():
 
 
 def test_close_picker_dismisses_switch_model():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # close_picker dismissing Switch Model and banner
         esc_keys = []

@@ -1,7 +1,6 @@
 """test_setup: cut from the old monolithic selfcheck() (stubbed part)."""
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -14,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_starter_templates():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # 5 Starter templates
         assert len(nightmux.STARTER_TEMPLATES) == 5
@@ -40,7 +39,7 @@ def test_starter_templates():
 
 
 def test_daemon_path_grows_by_user_bin_dirs():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # The daemon's PATH grows by the user bin dirs that exist, never duplicates.
         with tempfile.TemporaryDirectory() as hp_:
@@ -59,7 +58,7 @@ def test_daemon_path_grows_by_user_bin_dirs():
 
 
 def test_tools_mcp_add_per_agent():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !tools: each agent's own `mcp add`, project-local for Claude; opencode's
         # missing remove edits its project file; the agent is told it has the tool.
@@ -90,7 +89,7 @@ def test_tools_mcp_add_per_agent():
 
 
 def test_setup_chat_binds_forum_and_ignores_others():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         forum = {"message": {"chat": {"id": -100, "type": "supergroup",
                                       "is_forum": True, "title": "work"},
@@ -106,7 +105,7 @@ def test_setup_chat_binds_forum_and_ignores_others():
 
 
 def test_wire_claude_settings_idempotent_and_theirs():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         sfile = os.path.join(nightmux.STATE_DIR, "settings.json")
         os.makedirs(nightmux.STATE_DIR, exist_ok=True)
@@ -135,7 +134,7 @@ def test_wire_claude_settings_idempotent_and_theirs():
 
 
 def test_migrate_adopts_every_old_name():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         scratch = os.path.join(os.path.dirname(nightmux.FILE_DIR), ".mig-selfcheck")
         os.makedirs(scratch, exist_ok=True)

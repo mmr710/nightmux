@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_dashboard_extras_metrics_limits_chat():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         nightmux.agent_version = lambda binary: "stub"       # restored on exit; the doctor must not run a real `<agent> --version`
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Dashboard extras: host metrics, limits per agent, and the chat analysis —
@@ -173,7 +173,7 @@ def test_dashboard_extras_metrics_limits_chat():
 
 
 def test_board_page_and_office_url():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()

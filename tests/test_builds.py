@@ -15,7 +15,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_android_builds_and_apk():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Android: which build runs where, the newest APK outside intermediates, and
         # point-and-fix on a phone screen carries its activity and logcat errors.
@@ -33,7 +33,7 @@ def test_android_builds_and_apk():
 
 
 def test_build_past_limit_stopped_whole():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # A build past its limit is stopped whole, children included.
         with tempfile.TemporaryDirectory() as at_:
@@ -63,7 +63,7 @@ def test_build_past_limit_stopped_whole():
 
 
 def test_desktop_mcp_initialize_list_call():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Desktop MCP: initialize, list, a failing call is an error result (not a
         # crash), notifications get no reply.
@@ -86,7 +86,7 @@ def test_desktop_mcp_initialize_list_call():
 
 
 def test_deploy_preview_bot_comment():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Deploy previews: a bot's comment is a preview link, not review feedback.
         assert nightmux.is_bot("vercel[bot]") and nightmux.is_bot("netlify") and not nightmux.is_bot("alice")
@@ -97,7 +97,7 @@ def test_deploy_preview_bot_comment():
 
 
 def test_error_feed_sentry_and_plain():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -114,7 +114,7 @@ def test_error_feed_sentry_and_plain():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)

@@ -1,7 +1,6 @@
 """test_share: cut from the old monolithic selfcheck() (the last part)."""
 import html
 import os
-import queue
 import re
 import sys
 import tempfile
@@ -16,7 +15,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_teleport_harvest_vibe_and_share():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # !teleport, !harvest, !vibe, and OpenGraph Share Studio (/share, /share/card.svg)
         with tempfile.TemporaryDirectory() as tdir:

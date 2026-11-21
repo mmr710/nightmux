@@ -1,6 +1,5 @@
 """test_memory: cut from the old monolithic selfcheck() (the last part)."""
 import os
-import queue
 import sys
 import tempfile
 import time
@@ -12,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_memory_rewrite_and_greet():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Project memory: enough turns and a quiet spell ask the agent to rewrite the
         # notes; its reply is swallowed; a session started where notes exist reads them.

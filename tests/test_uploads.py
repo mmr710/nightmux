@@ -10,7 +10,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_voice_audio_video_note_updates():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Voice/audio/video-note updates ride the same download-and-type path as a
         # photo or a document — just another field to notice on the way in.

@@ -1,9 +1,6 @@
 """test_bench: cut from the old monolithic selfcheck() (the last part)."""
 import os
-import queue
-import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -16,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_bench_of_pane_binary_beats_config():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Claude's session filed as agy (a topic re-bound while marked agy) sent !agy
         # into claude. The pane's binary decides; a config-defined key is not second-guessed.
@@ -29,7 +26,7 @@ def test_bench_of_pane_binary_beats_config():
 
 
 def test_bare_agent_switch_reuses_session():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -61,7 +58,7 @@ def test_bare_agent_switch_reuses_session():
 
 
 def test_at_agent_addresses_bench_without_moving_topic():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -74,7 +71,7 @@ def test_at_agent_addresses_bench_without_moving_topic():
         # @agent: one prompt to one bench agent, without moving the topic.
         # Put topic 9 back exactly as found: the tests below turn on which session
         # it is on, and switch_agent short-circuits when the bench already names it.
-        was9 = (cfg2["topics"].get("9"), cfg2["started"].get("9"),
+        (cfg2["topics"].get("9"), cfg2["started"].get("9"),
                 dict((cfg2.get("bench") or {}).get("9") or {}))
         cfg2.setdefault("bench", {})["9"] = {"codex": "box", "agy": "box-agy"}
         cfg2["topics"]["9"], cfg2["started"]["9"] = "box", "codex"
@@ -93,7 +90,7 @@ def test_at_agent_addresses_bench_without_moving_topic():
 
 
 def test_consult_two_agents_two_rounds():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -257,7 +254,7 @@ def test_consult_two_agents_two_rounds():
 
 
 def test_plugin_names_restricted_and_only_run():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -307,7 +304,7 @@ def test_plugin_names_restricted_and_only_run():
 
 
 def test_watcher_reads_every_bench_agent():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # The watcher has to read every agent a topic can be written to, or a
         # benched one takes prompts and its answers go nowhere.
@@ -319,7 +316,7 @@ def test_watcher_reads_every_bench_agent():
 
 
 def test_one_session_is_never_two_topics():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
