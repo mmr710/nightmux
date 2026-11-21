@@ -15,7 +15,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_update_runs_each_agents_updater():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !update: each installed agent's own updater, versions before and after.
         # A fake agent whose updater bumps its version -- never a real installer.
@@ -49,7 +49,7 @@ def test_update_runs_each_agents_updater():
 
 
 def test_secrets_never_typed_queued_or_logged():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Secrets: never typed into an agent, queued or logged; deleted from the
         # chat when the bot may. !raw is the deliberate override.
@@ -85,7 +85,7 @@ def test_secrets_never_typed_queued_or_logged():
 
 
 def test_failover_hands_work_to_other_agent():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Failover: a limit-held topic hands its work to another installed agent —
         # the working tree and the cut-off instruction, not a summary the limited
@@ -137,7 +137,7 @@ def test_failover_hands_work_to_other_agent():
 
 
 def test_agent_defaults_and_claude_has_chat():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         assert nightmux.agent(cfg2, "claude") == ("claude", "--continue")

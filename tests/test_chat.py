@@ -1,9 +1,6 @@
 """test_chat: cut from the old monolithic selfcheck() (the last part)."""
-import http
 import json
 import os
-import queue
-import socket
 import sys
 import threading
 import time
@@ -16,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_chat_view_logs_and_serves():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -55,7 +52,7 @@ def test_chat_view_logs_and_serves():
 
 
 def test_briefing_sections_and_command():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Briefing: done / waiting / limits / today, from the pieces nightmux already
         # tracks; nothing to say in a section says so in one line.

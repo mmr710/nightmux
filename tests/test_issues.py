@@ -13,7 +13,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 def test_issues_become_prompt_and_branch():
     # slow
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !issues: an issue becomes a prompt + branch; the watch finds the branch's PR
         # and from then on is a normal PR watch; auto takes the next labelled issue.

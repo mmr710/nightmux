@@ -15,7 +15,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_dashboard_management_and_cross_site_posts():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -32,7 +32,7 @@ def test_dashboard_management_and_cross_site_posts():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)
@@ -80,7 +80,7 @@ def test_dashboard_management_and_cross_site_posts():
 
 
 def test_pairing_page_and_qr():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -97,7 +97,7 @@ def test_pairing_page_and_qr():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)
@@ -108,7 +108,7 @@ def test_pairing_page_and_qr():
 
 
 def test_terminal_qr_matches_matrix():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # The terminal QR is the same matrix, module for module, inside a light border.
         qt_ = [[{" ": (1, 1), "▄": (1, 0), "▀": (0, 1), "█": (0, 0)}[c] for c in l]
@@ -129,7 +129,7 @@ def test_terminal_qr_matches_matrix():
 
 
 def test_terminal_qr_and_phone_pairing():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -146,7 +146,7 @@ def test_terminal_qr_and_phone_pairing():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)
@@ -202,7 +202,7 @@ def test_terminal_qr_and_phone_pairing():
 
 
 def test_peer_requests_secret_then_auth_gate():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         class DummyHandler(nightmux.WebhookHandler):
             def __init__(self, ip, headers=None, path="/"):
@@ -240,7 +240,7 @@ def test_peer_requests_secret_then_auth_gate():
 
 
 def test_loopback_open_for_own_names():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         class DummyHandler(nightmux.WebhookHandler):
             def __init__(self, ip, headers=None, path="/"):
@@ -283,7 +283,7 @@ def test_loopback_open_for_own_names():
 
 
 def test_pairing_code_needs_login_redeem_does_not():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -300,7 +300,7 @@ def test_pairing_code_needs_login_redeem_does_not():
                          args=(ocfg, ostate, threading.Lock(), {1}, port_)).start()
         for _ in range(100):
             try:
-                page = urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
+                urllib.request.urlopen(f"http://127.0.0.1:{port_}/office").read().decode()
                 break
             except OSError:
                 time.sleep(0.05)

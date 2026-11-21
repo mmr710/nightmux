@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_generated_docs_current():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cmd_md = os.path.join(os.path.dirname(os.path.abspath(nightmux.__file__)), "docs", "COMMANDS.md")
         if os.path.exists(cmd_md):              # a git checkout, not a pip install
             with open(cmd_md) as f:
@@ -28,7 +28,7 @@ def test_generated_docs_current():
 
 
 def test_hardening_secrets_and_state_dir():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Hardening: credentials are never sent by !get, and the state dir is private.
         home_ = os.path.expanduser("~")
         for p_ in (".nightmux.json", ".ssh/id_ed25519", ".nightmux-relay.env", ".aws/credentials",
@@ -44,7 +44,7 @@ def test_hardening_secrets_and_state_dir():
 
 
 def test_cfg_save_keeps_hand_edits_and_mode():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         nightmux.CFG_PATH = os.path.join(nightmux.FILE_DIR, "selfcheck.json")
         nightmux.OFFSET_PATH = os.path.join(nightmux.FILE_DIR, "selfcheck.offset")
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
@@ -59,7 +59,7 @@ def test_cfg_save_keeps_hand_edits_and_mode():
 
 
 def test_acks_offset_ordering():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         nightmux.CFG_PATH = os.path.join(nightmux.FILE_DIR, "selfcheck.json")
         nightmux.OFFSET_PATH = os.path.join(nightmux.FILE_DIR, "selfcheck.offset")
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
@@ -83,7 +83,7 @@ def test_acks_offset_ordering():
 
 
 def test_snapshot_newest_fresh_and_prune():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         nightmux.STATE_DIR = os.path.join(nightmux.FILE_DIR, "state")
         os.makedirs(nightmux.STATE_DIR, exist_ok=True)
         for n_, ts, pn in (("a", time.time() - 10, "%1"), ("b", time.time(), "%1"),
@@ -142,7 +142,7 @@ def test_snapshot_newest_fresh_and_prune():
 
 
 def test_prune_skips_non_snapshot_json():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # A non-snapshot JSON in the shared state dir (a list, from another tool)
         # once crash-looped the daemon at startup inside snapped().
@@ -155,7 +155,7 @@ def test_prune_skips_non_snapshot_json():
 
 
 def test_prune_ignores_non_snapshot_state_json():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # A non-snapshot json in the state dir must not stop prune (and the watcher).
         with tempfile.TemporaryDirectory() as td_:

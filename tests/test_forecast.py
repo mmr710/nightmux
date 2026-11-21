@@ -10,7 +10,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_forecast_warns_once_per_window():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Forecast: a rising window is projected to 100% before it resets; a new
         # window starts a new line; warned once, to topics actually on that agent.

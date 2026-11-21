@@ -1,6 +1,5 @@
 """test_center: cut from the old monolithic selfcheck() (the last part)."""
 import os
-import queue
 import sys
 import threading
 import time
@@ -12,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_center_binds_to_every_session_and_points_plain_text():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -21,7 +20,7 @@ def test_center_binds_to_every_session_and_points_plain_text():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
@@ -50,7 +49,7 @@ def test_center_binds_to_every_session_and_points_plain_text():
 
 
 def test_board_reuses_status():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -59,7 +58,7 @@ def test_board_reuses_status():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
@@ -72,7 +71,7 @@ def test_board_reuses_status():
 
 
 def test_all_fan_out_skips_readonly_and_digest_loops_topics():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -81,7 +80,7 @@ def test_all_fan_out_skips_readonly_and_digest_loops_topics():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),

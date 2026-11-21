@@ -1,6 +1,5 @@
 """test_guards: cut from the old monolithic selfcheck() (stubbed part)."""
 import os
-import queue
 import shutil
 import subprocess
 import sys
@@ -15,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_ghost_pair_reviewer():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Ghost pair: a turn that changed the tree goes to the reviewer (in the same
         # folder, by diff range); its findings go to the coder, LGTM is a 👍, a turn
@@ -57,7 +56,7 @@ def test_ghost_pair_reviewer():
 
 
 def test_loop_guard_two_signs():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Loop guard: two independent signs of circling ping once, with a cooldown;
         # one sign alone (a long refactor of one file) does not.
@@ -90,7 +89,7 @@ def test_loop_guard_two_signs():
 
 
 def test_unhandled_command_cancel_button_is_real():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -99,7 +98,7 @@ def test_unhandled_command_cancel_button_is_real():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
@@ -120,7 +119,7 @@ def test_unhandled_command_cancel_button_is_real():
 
 
 def test_readonly_topic_never_reaches_keyboard():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -129,7 +128,7 @@ def test_readonly_topic_never_reaches_keyboard():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
@@ -149,7 +148,7 @@ def test_readonly_topic_never_reaches_keyboard():
 
 
 def test_prompt_calling_model_said_once():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # A prompt that keeps calling the model: said once, with an esc button.
         sent_c = []

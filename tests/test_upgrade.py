@@ -12,7 +12,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_upgrade_fast_forwards_and_rolls_back():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # !upgrade: a git checkout fast-forwards, refuses over local edits, rolls
         # back code that does not compile; a branch and a detached deploy both move.

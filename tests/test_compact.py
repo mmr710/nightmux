@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_context_warnings_and_autocompact():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         typed = []                                    # menu guard on plain text
         nightmux.inject = lambda s, t: (typed.append(t), True)[1]   # typed it
@@ -134,7 +134,7 @@ def test_context_warnings_and_autocompact():
 
 
 def test_park_compact():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Park compact: idle past park_compact, 110k compacts; not idle long enough, it doesn't.
         typed = []

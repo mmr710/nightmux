@@ -1,6 +1,5 @@
 """test_sessions: cut from the old monolithic selfcheck() (pre-stub part)."""
 import os
-import queue
 import shutil
 import subprocess
 import sys
@@ -15,7 +14,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_agentless_session_is_not_typed_into():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # A topic with no recorded directory must not come back in $HOME: --continue
         # resumes the last conversation *of that directory*, so one reboot put three
         # topics on the same one. It is learned from the live session instead.
@@ -72,7 +71,7 @@ def test_agentless_session_is_not_typed_into():
 
 
 def test_autocompact_native_env():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         # Native mid-turn cap: claude sessions get the token autocompact as their window.
         made = []
         with nightmux.stubbed(tmux=lambda *a: made.append(a)):
@@ -85,7 +84,7 @@ def test_autocompact_native_env():
 
 
 def test_resume_and_track_cwd():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         os.makedirs(nightmux.FILE_DIR, exist_ok=True)
         spawned = []
         with nightmux.stubbed(has_session=lambda s: False, sess_cwd=lambda s: nightmux.FILE_DIR,
@@ -113,7 +112,7 @@ def test_resume_and_track_cwd():
 
 
 def test_start_session_spawns_with_flags_and_agy_hint():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -136,7 +135,7 @@ def test_start_session_spawns_with_flags_and_agy_hint():
 
 
 def test_restore_is_resume_alias():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -156,7 +155,7 @@ def test_restore_is_resume_alias():
 
 
 def test_restore_startup_button_or_relaunch():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -165,7 +164,7 @@ def test_restore_startup_button_or_relaunch():
         cfg["topics"], cfg["verbose"] = {"1": "s"}, []
         screen[:] = ["● done", "⚠ Our servers are experiencing high traffic right now, please try again in a minute. "
                      "(UNAVAILABLE (code 503): No capacity available for model gemini-pro-agent on the server)"] + box
-        st = state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
+        state["s"] = {"asked_at": time.time(), "asked_msgs": [("1", 77)], "calls": 0, "calls_warned": False,
                            "changed": time.time(), "echo": {"and again"}, "last": "task for gemini",
                            "last_at": time.time(), "mode": "idle", "prev": list(screen), "prog_at": 0.0,
                            "prog_text": "", "queue": [], "ran": True, "react": None, "scr": list(screen),
@@ -193,7 +192,7 @@ def test_restore_startup_button_or_relaunch():
 
 
 def test_no_dir_gets_own_folder():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -208,7 +207,7 @@ def test_no_dir_gets_own_folder():
             f.write("one")
         subprocess.run(["git", "-C", repo, "add", "f"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
-        wt = nightmux.worktree_path(repo, "feature-a")
+        nightmux.worktree_path(repo, "feature-a")
 
         nightmux.has_session = lambda s: False
         # No dir: a folder of its own under projects_root, never loose in $HOME.

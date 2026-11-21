@@ -2,7 +2,6 @@
 import concurrent
 import json
 import os
-import queue
 import shutil
 import socket
 import subprocess
@@ -18,7 +17,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_preview_finds_session_http_servers():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !preview finds what the session's own processes serve over HTTP — by
         # process tree, not port guessing — and links it on the tailnet.
@@ -50,7 +49,7 @@ def test_preview_finds_session_http_servers():
 
 def test_watch_pr_queues_failures_once():
     # slow
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !watch pr: a failed check's log and new review comments are queued to the
         # agent once each; the gh account's own comments and pre-existing ones are
@@ -105,7 +104,7 @@ def test_watch_pr_queues_failures_once():
 
 
 def test_saved_prompts_args_filled():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !p: saved prompts, {{args}} filled, config overrides and hides built-ins.
         assert nightmux.fill("Explain {{args}}: short.", "auth.py") == "Explain auth.py: short."
@@ -123,7 +122,7 @@ def test_saved_prompts_args_filled():
 
 
 def test_idea_gets_own_folder_and_build_prompt():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !idea: its own folder under projects_root (never on top of another), git,
         # the agent started with the build prompt queued, and the check loop on.
@@ -144,7 +143,7 @@ def test_idea_gets_own_folder_and_build_prompt():
 
 
 def test_transcript_fed_delivery_and_held_work_dropped():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         box = ["╭────────╮", "│ > ", "╰────────╯", "  ? for shortcuts"]
         typed, edits = [], []
@@ -229,7 +228,7 @@ def test_transcript_fed_delivery_and_held_work_dropped():
 
 
 def test_watch_pool_overlaps_slow_session():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # watcher()'s per-session tick runs through a pool now (see watch_one) so
         # that one laggy tmux round-trip cannot stall every other session's update

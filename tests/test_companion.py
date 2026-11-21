@@ -1,9 +1,7 @@
 """test_companion: cut from the old monolithic selfcheck() (the last part)."""
-import http
 import io
 import json
 import os
-import queue
 import re
 import shutil
 import subprocess
@@ -21,7 +19,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_companion_seeds_folder_night_and_prompt():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             ran, cd_ = [], os.path.join(cd_, "comp")
@@ -76,7 +74,7 @@ def test_companion_seeds_folder_night_and_prompt():
 
 
 def test_companion_read_chat_clips_and_budget_line():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             cd_ = os.path.join(cd_, "comp")
@@ -117,7 +115,7 @@ def test_companion_read_chat_clips_and_budget_line():
 
 
 def test_companion_progress_report():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             cd_ = os.path.join(cd_, "comp")
@@ -162,7 +160,7 @@ def test_companion_progress_report():
 
 
 def test_companion_focus_targets_reports():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             cd_ = os.path.join(cd_, "comp")
@@ -204,7 +202,7 @@ def test_companion_focus_targets_reports():
 
 
 def test_companion_gated_rounds():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             cd_ = os.path.join(cd_, "comp")
@@ -244,7 +242,7 @@ def test_companion_gated_rounds():
 
 
 def test_suggest_ledger_limits_signals_log_and_roles():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         with tempfile.TemporaryDirectory() as cd_:
             cd_ = os.path.join(cd_, "comp")
@@ -254,7 +252,7 @@ def test_suggest_ledger_limits_signals_log_and_roles():
                 for rel_, text_ in nightmux.COMPANION_SEED.items():
                     with open(os.path.join(cd_, rel_), "w") as f:
                         f.write(text_)
-                now_ = time.time()
+                time.time()
                 rows_ = [{"topic": "5", "session": "shop", "mode": "idle", "budget": "1M of 5M this day"},
                          {"topic": "6", "session": "blog", "mode": "waiting"},
                          {"topic": "8", "session": "old", "mode": "idle"},
@@ -317,7 +315,7 @@ def test_suggest_ledger_limits_signals_log_and_roles():
 
 
 def test_companion_priorities_and_allowance():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Companion revamp: priorities from PERSONA.md, an allowance for unbudgeted
         # projects, projects with no session, and talking to it through !companion.
@@ -365,7 +363,7 @@ def test_companion_priorities_and_allowance():
 
 
 def test_peer_priority_not_woken_here():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # A priority on a peer is never woken here, where its folder is empty.
         try:

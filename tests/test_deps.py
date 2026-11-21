@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_deps_report_and_clean_run():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # !deps: findings sorted worst first, reported with the fix button; a clean
         # nightly run says nothing.

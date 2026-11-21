@@ -18,7 +18,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_office_rooms_desks_and_redaction():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         # The office: a room per topic, a desk per agent, every state a real one —
@@ -66,7 +66,7 @@ def test_office_rooms_desks_and_redaction():
 
 
 def test_office_link_404_gets_the_fix():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
                 "bench": {"5": {"claude": "o", "codex": "o-codex", "agy": "o-agy"}}}
@@ -81,7 +81,6 @@ def test_office_link_404_gets_the_fix():
             and '"office_url": "https://box.ts.net:9090/office"' in fix_, (osent, fix_)
         # ...found by asking the link itself: 404 and 5xx and a refused connection are answers; 401/403
         # (a login wall), a timeout or a name that does not resolve are not reasons to say it is broken.
-        import io
         class Site_(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response({"/office": 200, "/gone": 404, "/auth": 403}.get(self.path, 502))
@@ -102,7 +101,7 @@ def test_office_link_404_gets_the_fix():
 
 
 def test_office_reads_usage_off_the_lock():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         tok = "123456789:AA" + "x" * 33
         ocfg = {"topics": {"5": "o"}, "topic_names": {"5": "proj"}, "started": {"5": "claude"},
@@ -158,7 +157,7 @@ def test_office_reads_usage_off_the_lock():
 
 
 def test_peers_asked_together_dead_one_skipped():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Peers are asked together, and one that just failed is not waited on again: a dead peer used to
         # put its whole timeout on every poll of the office and the dashboard, and a line in the log.
@@ -195,7 +194,7 @@ def test_peers_asked_together_dead_one_skipped():
 
 
 def test_non_json_200_is_peer_down():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         pcfg_ = {"peers": {n_: {"url": "http://x", "secret": "s"} for n_ in "abc"}}
         # A 200 that is no JSON (an app that answers every path) is a peer down, not a 500 for the office.
@@ -205,7 +204,7 @@ def test_non_json_200_is_peer_down():
 
 
 def test_gzip_only_when_asked():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # gzip: only when the client asks and the body is worth it; Content-Length is the compressed size.
         class GzH_:
@@ -233,7 +232,7 @@ def test_gzip_only_when_asked():
 
 
 def test_unrestarted_deploy_told_once():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # A deploy nobody restarted: told once, after it has lasted; not for the seconds an upgrade restarts in.
         stale_sent_ = []
@@ -255,7 +254,7 @@ def test_unrestarted_deploy_told_once():
 
 
 def test_raising_watcher_told_once():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # A watcher that raises every tick: a few log lines for 400 ticks, and its topic told once.
         wf_sent_, wf_err_ = [], io.StringIO()

@@ -1,5 +1,4 @@
 """test_peers: cut from the old monolithic selfcheck() (the last part)."""
-import http
 import json
 import os
 import socket
@@ -16,7 +15,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_peer_forwarding_and_server_command():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Two servers: the primary forwards a remote topic's update, untouched, to
         # the peer that runs it; the peer serves /peer/ to the secret and nothing else.
@@ -78,7 +77,7 @@ def test_peer_forwarding_and_server_command():
 
 
 def test_fleet_stats_sum_servers():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         # Fleet stats: Wrapped, coach and !stats sum every server's numbers; ratios are
         # recomputed from the sums, and a peer that does not answer is left out.

@@ -1,6 +1,5 @@
 """test_help: cut from the old monolithic selfcheck() (the last part)."""
 import os
-import queue
 import sys
 import threading
 
@@ -11,7 +10,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_help_index_sections_search():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()
@@ -29,7 +28,7 @@ def test_help_index_sections_search():
 
 
 def test_help_names_every_old_command():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         legacy_stubs(nightmux)
         cfg2 = {"topics": {}, "agents": {"opencode": ["opencode", "--resume"]}}
         spawned, lk = [], threading.Lock()

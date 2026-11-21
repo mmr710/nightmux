@@ -11,7 +11,7 @@ from _legacy import legacy_stubs  # noqa: E402
 
 
 def test_team_watch_prompt_audit():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # team: watch reads, prompt talks but runs no admin commands, audit redacts.
         tc_ = {"allow_users": [1, 2, 3], "roles": {"2": "watch", "3": "prompt"}, "topics": {}}
@@ -33,7 +33,7 @@ def test_team_watch_prompt_audit():
 
 
 def test_arena_judged_races():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # !arena: judged races add up per agent and per kind of task.
         old_sav_ = dict(nightmux._sav)
@@ -54,7 +54,7 @@ def test_arena_judged_races():
 
 
 def test_voice_briefing():
-    with isolated(nightmux) as iso:
+    with isolated(nightmux):
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Voice briefing: speakable text, and a real voice note where ffmpeg can speak.
         sp_ = nightmux.spoken("☀️ briefing · since 19:30\n\ndone overnight:\n  shop #12 fix login — ready to merge")
