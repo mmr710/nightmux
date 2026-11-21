@@ -187,10 +187,6 @@ WRAPPED = "#!/bin/sh\nexport PS1='user@host:~/proj$ '\n%s\nexec bash --norc\n"
 
 
 def test_shell_left_behind_is_not_the_agent():
-    if sys.platform == "darwin":
-        # ponytail: macOS /bin/sh is bash, so the wrapper and the shell it execs both show as "bash";
-        # a name compare cannot tell them apart (#204 tried "-bash" and failed). Needs another signal.
-        return
     home, work = setup(inner=EXITS.replace("sleep 0.5", "sleep 1"))
     wrap = os.path.join(home, "wrap")
     with open(wrap, "w") as f:
