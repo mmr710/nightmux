@@ -162,26 +162,29 @@ def test_peers_asked_together_dead_one_skipped():
         cfg, state, screen, sent = legacy_stubs(nightmux)
         # Peers are asked together, and one that just failed is not waited on again: a dead peer used to
         # put its whole timeout on every poll of the office and the dashboard, and a line in the log.
-        quick_ = []
+        quick_, asked_ = [], []
+        together_ = threading.Barrier(3, timeout=30)     # all three must be inside peer_call at once
 
         def far_(c, n, p, b=None, timeout=10):
-            time.sleep(0 if n == "c" and quick_ else .4)          # the good peer is slow once, to prove they run together
+            asked_.append(n)
+            if not quick_:
+                together_.wait()          # sequential asking never gets here with 3: the barrier breaks
             return None if n in ("a", "b") else {"rooms": [{"topic": "9", "name": "far", "desks": []}]}
         pcfg_ = {"peers": {n_: {"url": "http://x", "secret": "s"} for n_ in "abc"}}
         with nightmux.stubbed(peer_call=far_):
-            t_ = time.time()
             got_ = nightmux.peers_ask(pcfg_, "api/office")
-            assert got_["a"] is None and got_["b"] is None and got_["c"]["rooms"], got_
-            assert time.time() - t_ < .75, "peers are asked one after another"          # 1.2 s in turn
+            assert got_["a"] is None and got_["b"] is None and got_["c"]["rooms"], got_          # asked one after another: barrier breaks
             quick_.append(1)
-            t_ = time.time()
-            assert nightmux.peers_ask(pcfg_, "api/office")["a"] is None and time.time() - t_ < .2
+            del asked_[:]
+            assert nightmux.peers_ask(pcfg_, "api/office")["a"] is None and asked_ == ["c"], asked_   # the dead ones are not asked
             for n_ in "ab":                                       # the quiet period is over: one probe, no waiting
                 nightmux._peer_down[n_, "api/office"] = time.time() - nightmux.PEER_DOWN_FOR - 1
-            t_ = time.time()
+            del asked_[:]
             nightmux.peers_ask(pcfg_, "api/office")
-            assert time.time() - t_ < .2 and all(nightmux._peer_down[n_, "api/office"] > time.time() for n_ in "ab"), nightmux._peer_down
-            time.sleep(.6)                                        # the probes fail: down again, from now
+            end_ = time.time() + 30                               # the probes fail: down again, from now
+            while time.time() < end_ and not all(nightmux._peer_down[n_, "api/office"] <= time.time() for n_ in "ab"):
+                time.sleep(.02)
+            assert sorted(set(asked_)) == ["a", "b", "c"], asked_      # each dead one was probed once
             assert all(nightmux._peer_down[n_, "api/office"] <= time.time() for n_ in "ab"), nightmux._peer_down
         # ...per route: a peer too old for one route answers it 404 and the rest fine. And a failure no
         # poll has looked at for a minute is asked again rather than answered from memory.
