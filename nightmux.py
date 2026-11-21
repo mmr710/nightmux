@@ -19975,18 +19975,26 @@ def _run_loop(a, mine, say, finish):
             at the first idle prompt is the baseline: a script agent shows as sh/bash
             from the start and must not count. ponytail: an agent that falls back to the
             same-named shell it started as, or a wrapper already at a shell prompt when
-            first seen idle, cannot be told apart by name."""
-            o = tmux_out("display-message", "-p", "-t", at, "#{pane_dead} #{pane_current_command}")
+            first seen idle, cannot be told apart."""
+            o = tmux_out("display-message", "-p", "-t", at, "#{pane_dead} #{pane_pid} #{pane_current_command}")
             if o is None:
                 return True
-            dead, _, c = o.strip().partition(" ")
+            dead, _, rest = o.strip().partition(" ")
             if dead == "1":
                 return True
+            pid, _, c = rest.partition(" ")
+            # The pane process's own program, from ps: a wrapper that exec()s a shell keeps
+            # its pid and, where /bin/sh is bash (macOS), its name; its program still changes.
+            try:
+                ps = subprocess.run(("ps", "-o", "args=", "-p", pid), capture_output=True, text=True, timeout=5).stdout
+            except (subprocess.TimeoutExpired, OSError):
+                ps = ""
+            me = (c, (ps.split() or [""])[0])
             if ctx["cmd"] is None:
                 if idle:
-                    ctx["cmd"] = c
+                    ctx["cmd"] = me
                 return False
-            return c != ctx["cmd"] and shell_name(c) in SHELLS
+            return me != ctx["cmd"] and shell_name(c) in SHELLS
 
         def wait(secs, pre=None):
             """'ready' (idle on two polls in a row and, with `pre`, the turn was seen busy
