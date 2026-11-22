@@ -65,3 +65,34 @@ jobs:
         with:
           name: agent-screens
           path: agent-screens
+
+  # The page is landed by a pull request, never a push to protected main. It
+  # gets write rights here, in a job of its own that runs no third-party CLI.
+  publish:
+    needs: drift-guard
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-screens
+          path: agent-screens
+      - name: open a PR with docs/status.html
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp agent-screens/status.html docs/status.html
+          git diff --quiet -- docs/status.html && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B status-page
+          git add docs/status.html
+          git commit -m "docs: agent status page"
+          git push -f origin status-page
+          gh pr create --base main --head status-page --title "docs: agent status page" \
+            --body "Nightly update of docs/status.html from the drift guard." \
+            || gh pr edit status-page --body "Nightly update of docs/status.html from the drift guard."

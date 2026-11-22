@@ -12,6 +12,7 @@ to the output folder, one copy away from being a fixture in tests/panes.
 
     python3 tests/live_agents.py [outdir]    # exit 1 when a reading changed
 """
+import html
 import os
 import shutil
 import subprocess
@@ -72,10 +73,31 @@ def first_screen(key, launch, limit=60):
     return last
 
 
+def status_html(rows, when):
+    """docs/status.html: one self-contained page, a row per agent. rows are dicts
+    with agent, version, expected, got; a row whose reading differs is drift."""
+    e = html.escape
+    body = "".join(
+        '<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+            "ok" if r["got"] == r["expected"] else "drift", e(r["agent"]), e(r["version"]),
+            e(r["expected"]), e(r["got"])) for r in rows)
+    return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>nightmux agent status</title><style>"
+            "body{font:16px system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem}"
+            "table{border-collapse:collapse;width:100%%}td,th{padding:.4rem .6rem;border-bottom:1px solid #8884;text-align:left}"
+            "tr.ok td:first-child::before{content:\"\\2713 \";color:#2a7}tr.drift{background:#e5484d22}"
+            "tr.drift td:first-child::before{content:\"\\2717 \";color:#e5484d}</style></head><body>"
+            "<h1>Agents nightmux reads correctly</h1>"
+            "<p>First screen of each agent's newest release, as nightmux reads it. Updated %s.</p>"
+            "<table><tr><th>Agent</th><th>Version</th><th>Expected</th><th>Read</th></tr>%s</table>"
+            "</body></html>\n") % (e(when), body)
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "agent-screens"
     os.makedirs(out, exist_ok=True)
-    rows, drift = [], []
+    rows, drift, data = [], [], []
     for key, (launch, _resume) in nightmux.AGENTS.items():
         binary = launch.split()[0]
         if not shutil.which(binary):
@@ -88,6 +110,7 @@ def main():
         want = EXPECT.get(key)
         if want and got != want:
             drift.append(key)
+        data.append({"agent": key, "version": nightmux.agent_version(binary), "expected": want or "unknown", "got": got})
         rows.append("| %s | `%s` | %s | %s | %s |" % (
             key, nightmux.agent_version(binary), got, ", ".join(opts[:4]) or "–",
             "✓" if got == want else "✗ was " + want if want else "new"))
@@ -96,6 +119,8 @@ def main():
     table = "\n".join(["| Agent | Version | First screen | Options read | |",
                        "|---|---|---|---|---|"] + rows)
     print(table)
+    with open(os.path.join(out, "status.html"), "w") as f:
+        f.write(status_html(data, time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())))
     if SUMMARY:
         with open(SUMMARY, "a") as f:
             f.write("### Agents' first screens, read by nightmux\n\n" + table + "\n")
