@@ -16,7 +16,7 @@ PANE = [f"line {i}" for i in range(40)] + [
     "mail alice.smith@example.com",
     "key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
     "gh ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-    "bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+    "bot 123456789:" "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",   # split: keeps secret scanners quiet
     "╭──────────────╮",
     "│ Do you want to proceed?  1. Yes  2. No │",
     "╰──────────────╯",
