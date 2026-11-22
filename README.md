@@ -105,7 +105,7 @@ Any terminal coding agent works: nightmux types into its `tmux` pane and reads t
 | `qwen` | basic | – | – |
 <!-- agents:end -->
 
-Tier: **full** = usage windows, tokens and every screen state (busy, idle, waiting) covered by fixtures; **partial** = one of those readers; **basic** = nightmux reads the screen and types, nothing more. Tiers are earned by tests, not claimed.
+Tier: **full** = usage windows, tokens and every screen state (busy, idle, waiting) covered by fixtures; **partial** = one of those readers; **basic** = nightmux reads the screen and types, nothing more. Tiers are earned by tests, not claimed. Live status of each agent's newest release: [status page](https://mmr710.github.io/nightmux/status.html).
 
 Every night the [drift guard](https://github.com/mmr710/nightmux/actions/workflows/drift-guard.yml) installs the newest release of each agent in CI and verifies how nightmux classifies its initial screen.
 
