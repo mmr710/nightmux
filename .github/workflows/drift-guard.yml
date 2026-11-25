@@ -85,6 +85,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # No status.html means the run crashed before it wrote one: fail loudly, publish nothing.
+          test -f agent-screens/status.html || { echo "drift-guard produced no status.html"; exit 1; }
           cp agent-screens/status.html docs/status.html
           git diff --quiet -- docs/status.html && exit 0
           git config user.name "github-actions[bot]"
