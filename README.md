@@ -113,6 +113,18 @@ Every night the [drift guard](https://github.com/mmr710/nightmux/actions/workflo
 
 `contrib/aiprof` gives each extra account its own login without touching your real one. Copy it to `~/.local/bin/aiprof`, then `ln -s aiprof ~/.local/bin/agy1` (or `opencode1`) and run `agy1` / `opencode1` once to sign in; the login lives in `~/.ai-profiles/agy1`. To start one from chat, add `"agents": {"agy1": "agy1"}` to the config. `!quota` shows what is left per account and model group (`agy1  Gemini 4 Argon  7d  94% left  resets 21 Nov 13:53`); it is read in the background and refreshed every 5 minutes, so the first call may say "refreshing…".
 
+## FAQ
+
+**How is this different from plain tmux?** tmux keeps sessions alive. nightmux adds agent-aware screen reading (busy, idle, waiting), answers menus from chat buttons, waits out usage limits, and shows quota and cost per account.
+
+**What happens if I close the dashboard or lose my connection?** Nothing. Agents run in tmux panes and keep going. Reconnect from chat or the dashboard.
+
+**Which agents work?** Any agent that runs in a terminal. The [agent table](#agents) shows which get full, partial or basic support.
+
+**Does it work on Windows?** Not natively: it needs tmux. WSL2 should work, but we have not tested it ([#2](https://github.com/mmr710/nightmux/issues/2)).
+
+**Where is the plan?** See [ROADMAP.md](ROADMAP.md).
+
 ## Security
 
 **The bot token is a shell on your machine, and `allow_users` is the only thing between a stranger and your sessions.**
