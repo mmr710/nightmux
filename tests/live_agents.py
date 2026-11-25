@@ -77,6 +77,7 @@ def status_html(rows, when):
     """docs/status.html: one self-contained page, a row per agent. rows are dicts
     with agent, version, expected, got; a row whose reading differs is drift."""
     e = html.escape
+    good = sum(r["got"] == r["expected"] for r in rows)
     body = "".join(
         '<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
             "ok" if r["got"] == r["expected"] else "drift", e(r["agent"]), e(r["version"]),
@@ -89,9 +90,9 @@ def status_html(rows, when):
             "tr.ok td:first-child::before{content:\"\\2713 \";color:#2a7}tr.drift{background:#e5484d22}"
             "tr.drift td:first-child::before{content:\"\\2717 \";color:#e5484d}</style></head><body>"
             "<h1>Agents nightmux reads correctly</h1>"
-            "<p>First screen of each agent's newest release, as nightmux reads it. Updated %s.</p>"
+            "<p>First screen of each agent's newest release, as nightmux reads it. %d of %d as expected. Updated %s.</p>"
             "<table><tr><th>Agent</th><th>Version</th><th>Expected</th><th>Read</th></tr>%s</table>"
-            "</body></html>\n") % (e(when), body)
+            "</body></html>\n") % (good, len(rows), e(when), body)
 
 
 def main():
@@ -101,6 +102,9 @@ def main():
     for key, (launch, _resume) in nightmux.AGENTS.items():
         binary = launch.split()[0]
         if not shutil.which(binary):
+            # Not installed is a broken install in CI: the page says so, rather
+            # than dropping the agent. It is not counted as drift for the exit code.
+            data.append({"agent": key, "version": "not installed", "expected": EXPECT.get(key, "unknown"), "got": "missing"})
             continue
         lines = first_screen(key, launch)
         with open(os.path.join(out, key + ".txt"), "w") as f:
@@ -110,7 +114,7 @@ def main():
         want = EXPECT.get(key)
         if want and got != want:
             drift.append(key)
-        data.append({"agent": key, "version": nightmux.agent_version(binary), "expected": want or "unknown", "got": got})
+        data.append({"agent": key, "version": nightmux.agent_version(binary) or "unknown", "expected": want or "unknown", "got": got})
         rows.append("| %s | `%s` | %s | %s | %s |" % (
             key, nightmux.agent_version(binary), got, ", ".join(opts[:4]) or "–",
             "✓" if got == want else "✗ was " + want if want else "new"))
