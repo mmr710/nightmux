@@ -38,8 +38,8 @@ codex: turn 3 sent
 ```
 
 <div align="center">
-<img src="https://raw.githubusercontent.com/mmr710/nightmux/main/docs/office-demo.gif" width="100%" alt="The full nightmux daemon's office view: claude hits its limit at 02:14, codex takes over, and claude is back at 04:11">
-<br><sub>A simulated night in the daemon's 3D / pixel-art office view (what the phone setup below adds; preview locally with <code>python3 nightmux.py --demo</code>). <a href="https://mmr710.github.io/nightmux/office.html?demo">Open live demo</a> · <a href="https://mmr710.github.io/nightmux/#video">Watch 48-second video</a></sub>
+<img src="https://raw.githubusercontent.com/mmr710/nightmux/main/docs/demo.gif" width="100%" alt="Real terminal run: pytest -q fails on a discount bug, nightmux run --until pytest -q starts Claude Code in tmux, fixes cart.py in 1 turn, and pytest -q passes">
+<br><sub>Real, unscripted terminal run (<a href="docs/demo.tape"><code>docs/demo.tape</code></a>): <code>pytest -q</code> fails → <code>nightmux run … --until "pytest -q"</code> fixes <code>cart.py</code> in 1 turn → <code>2 passed</code>. Star if this saves your night runs ⭐</sub>
 </div>
 
 > **How `run` behaves:** Usage-limit banners are recognised for Claude Code directly; other agents fail over when they exit or a turn exceeds an hour. Permission dialogs in a pane are never auto-answered by `run` — it reports the session and waits for you to answer via `tmux attach -t =<session>`. Exit codes: `0` check passed, `1` max turns reached, `2` bad arguments or no tmux, `3` no agent left, `130` interrupted.
@@ -74,6 +74,11 @@ curl -fsSL https://raw.githubusercontent.com/mmr710/nightmux/main/install.sh | s
 
 - **Telegram (or Discord / Slack):** Setup creates your bot (scan the terminal QR, or paste a token from [@BotFather](https://t.me/BotFather)). One forum topic per project → one `tmux` session behind it that you can still `tmux attach` to anytime. Send `!new myproj ~/code/myproj`, then type. Permission prompts arrive as tap buttons.
 - **Dashboard only, no Telegram:** Run `nightmux up` to start the web dashboard, chat PWA and live office at `http://127.0.0.1:9090` (`python3 nightmux.py --demo` previews a simulated night on `:8099` with no keys). Nothing is opened to the network; to pair a phone over [Tailscale](https://tailscale.com), run `tailscale serve --bg 9090` and tap **+ Pair phone**.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/mmr710/nightmux/main/docs/office-demo.gif" width="100%" alt="The full nightmux daemon's office view: claude hits its limit at 02:14, codex takes over, and claude is back at 04:11">
+<br><sub>A simulated night in the daemon's 3D / pixel-art office view (preview locally with <code>python3 nightmux.py --demo</code>). <a href="https://mmr710.github.io/nightmux/office.html?demo">Open live demo</a> · <a href="https://mmr710.github.io/nightmux/#video">Watch 48-second video</a></sub>
+</div>
 
 What the daemon adds on top of `run`:
 

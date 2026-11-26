@@ -1,48 +1,38 @@
-# VHS Tape (https://github.com/charmbracelet/vhs)
-# Run `vhs docs/demo.tape` to generate the demo.gif
-
+# VHS Tape (https://github.com/charmbracelet/vhs): a real, unscripted run.
+# Needs: a demo repo with one failing test, claude logged in, nightmux on PATH.
+# Render: vhs docs/demo.tape
 Output docs/demo.gif
+Set Shell bash
 Set FontSize 18
 Set Width 1200
-Set Height 800
+Set Height 640
 Set Theme "Dracula"
+Set TypingSpeed 40ms
+Set Padding 20
 
-# Simulate the user sending a message on Telegram and the agent typing
-Type "tmux new-session -s api"
+Hide
+Type "export GIT_PAGER=cat PATH=/tmp/claude-1001/demo/bin:$PATH PS1='\[\e[1;35m\]shop\[\e[0m\] $ ' && cd /tmp/claude-1001/demo/shop && clear"
 Enter
 Sleep 1s
+Show
 
-Type "claude"
+Type "pytest -q"
 Enter
-Sleep 2s
-
-Type "Review the auth logic and add rate limiting"
-Enter
+Wait /shop \$\s*$/
 Sleep 1s
 
-# Simulate Claude Code doing work
-Type "..."
-Sleep 2s
+Type `nightmux run "fix the failing test" --until "pytest -q" --agents claude`
+Sleep 500ms
 Enter
-Type "I will modify auth.py to add rate limiting."
+Wait+Screen@240s /passed after/
+Wait /shop \$\s*$/
 Sleep 1s
-Enter
-Type "Done."
-Sleep 2s
 
-# Show the limits feature
-Type "# Oh no, you hit a limit!"
+Type "git diff cart.py"
 Enter
-Type "usage limit reached. resets in 1m"
+Wait /shop \$\s*$/
+Sleep 1500ms
+Type "pytest -q"
 Enter
-Sleep 3s
-
-# Show nightmux taking over
-Type "# nightmux queued the prompt..."
-Enter
-Sleep 2s
-Type "# 1 minute later..."
-Enter
-Type "# nightmux auto-resumed!"
-Enter
-Sleep 3s
+Wait /shop \$\s*$/
+Sleep 4s
