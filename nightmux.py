@@ -19831,6 +19831,7 @@ def demo_serve(port=8099):
 
 
 RUN_USAGE = """usage: nightmux run "<task>" [--until "<shell check>"] [--agents a,b] [--max-turns N]
+       nightmux run --demo     # two fake agents, no login: one hits a limit, the next finishes
 
 Usage-limit detection works for Claude Code only: its banners ("You've hit your ...")
 are the ones nightmux matches. Any other agent is failed over only when it exits or
@@ -19879,6 +19880,43 @@ def run_args(argv):
     return a
 
 
+# Two fake agents in a scratch HOME: the first prints a usage-limit banner, the second does the
+# work. Shows the whole loop (check, failover, handoff) with no login, key or real agent.
+DEMO_LIMITED = "#!/bin/sh\nstty -echo\nprintf 'demo agent one\\n> '\nwhile IFS= read -r l; do\n" \
+    "printf '%s\\n' \"$l\"; printf \"You've hit your 5-hour limit · resets 3pm\\n> \"\ndone\n"
+DEMO_WORKER = "#!/bin/sh\nstty -echo\nprintf 'demo agent two\\n> '\nwhile IFS= read -r l; do\n" \
+    "printf '%s\\n' \"$l\"; printf 'Working... (esc to interrupt)'; sleep 2; printf '\\r\\033[K'; touch fixed.flag\n" \
+    "printf 'fixed it\\n> '\ndone\n"
+
+
+def run_demo():
+    import tempfile
+    home = tempfile.mkdtemp(prefix="nm-demo-")
+    work = os.path.join(home, "proj")
+    os.makedirs(work)
+    cfg = {}
+    for name, body in (("demo-one", DEMO_LIMITED), ("demo-two", DEMO_WORKER)):
+        path = os.path.join(home, name)
+        with open(path, "w") as f:
+            f.write(body)
+        os.chmod(path, 0o700)
+        cfg[name] = [path, ""]
+    with open(os.path.join(home, ".nightmux.json"), "w") as f:
+        json.dump({"agents": cfg}, f)
+    os.chmod(os.path.join(home, ".nightmux.json"), 0o600)
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    env.update(HOME=home, TMUX_TMPDIR=home)   # own tmux server: your real sessions are never touched
+    print("nightmux run --demo: fake agents, nothing real is started\n"
+          "task: fix the failing check   (done when fixed.flag exists)\n", flush=True)
+    try:
+        return subprocess.call([sys.executable, os.path.abspath(__file__), "run", "fix the failing check",
+                                "--until", "test -f fixed.flag", "--agents", "demo-one,demo-two"],
+                               cwd=work, env=env)
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True, env=env)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def run_cli(argv):
     """`nightmux run`: drive an agent in tmux until the check passes. No bot, daemon or
     config. Exits 0 check passed, 1 max turns, 2 usage, 3 no agent left, 130 Ctrl-C.
@@ -19891,6 +19929,11 @@ def run_cli(argv):
     if "-h" in argv or "--help" in argv:
         print(RUN_USAGE, end="")
         sys.exit(0)
+    if "--demo" in argv:
+        if not shutil.which("tmux"):
+            print("nightmux run needs tmux, and it is not installed", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(run_demo())
     a = run_args(argv)
     if not shutil.which("tmux"):
         print("nightmux run needs tmux, and it is not installed", file=sys.stderr)

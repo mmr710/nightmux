@@ -289,3 +289,11 @@ if __name__ == "__main__":
                   test_shell_left_behind_is_not_the_agent, test_ticking_footer_does_not_stall_the_turn,
                   test_echo_only_agent_finishes, test_sandboxed_config_launches_through_docker,
                   test_brief_after_an_exit_says_exited]))
+
+
+def test_demo_fails_over_and_finishes():
+    home = fake_home()
+    r = cli("run", "--demo", home=home, cwd=home, env=FAST, timeout=DEADLINE)
+    assert r.returncode == 0, out(r)
+    assert "demo-one: usage limit hit" in r.stdout, out(r)
+    assert "passed" in r.stdout, out(r)
